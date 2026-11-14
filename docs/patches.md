@@ -12,6 +12,7 @@
 | `0006-wpe-optional-process-swap-on-navigation` | lets the browser keep a view in its web process (`WPE_BROWSER_NO_PROCESS_SWAP`): the webOS compositor can't move a view's layer between processes |
 | `0007-gstreamer-ring-buffer-max-size-is-guint64` | an `int` passed for a `guint64` property through varargs crashed the web process on 32-bit ARM when setting up MSE video |
 | `0008-jsc-32bit-gcc-no-speculative-indexing-header-loads` | GCC hoisted an `IndexingHeader` load above its type check; past a 1 MB heap chunk's end it faulted (SIGSEGV in `allocateMoreOutOfLineStorage`, [webkit.org/b/295780](https://bugs.webkit.org/show_bug.cgi?id=295780)) |
+| `0009-shm-readback-without-bgra-read-support` | Mali-400 accepts BGRA textures but cannot read BGRA pixels: use RGBA readback and convert the SHM frame to BGRA when the GLES read-format extension is absent |
 
 ## GnuTLS (`buildroot-external/patches/gnutls/`)
 
