@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><meta charset="utf-8"></head><body><script>
+function log(m) { try { new Image().src = '/log?' + encodeURIComponent(m); } catch (e) {} }
+const ao = location.ancestorOrigins ? Array.from(location.ancestorOrigins) : 'absent';
+log('child ' + location.origin + ' referrer=' + JSON.stringify(document.referrer) + ' ancestorOrigins=' + JSON.stringify(ao));
+let parentOrigin = '?';
+try { parentOrigin = new URL(document.referrer).origin; } catch (e) {}
+parent.postMessage('to * ', '*');
+parent.postMessage('to referrer origin ' + parentOrigin, parentOrigin);
+if (Array.isArray(ao) && ao[0]) parent.postMessage('to ancestorOrigins[0] ' + ao[0], ao[0]);
+</script></body></html>

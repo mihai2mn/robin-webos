@@ -24,7 +24,7 @@
 
 #include <stdint.h>
 
-#define WPE_IPC_VERSION 10u
+#define WPE_IPC_VERSION 11u
 #define WPE_IPC_ENGINE_FD 3
 #define WPE_IPC_FRAME_SLOTS 3u
 #define WPE_IPC_MAX_TEXT 2048u   /* bytes including the terminating NUL */
@@ -85,7 +85,13 @@ typedef enum {
                                  the page did not scroll and did not handle the key itself (the UI shows its toolbar) */
     WPE_ENGINE_ICON,          /* WpeText: the page's best icon URL (apple-touch-icon, else a PNG/SVG/WebP icon link;
                                  empty if it declares none). The UI downloads it itself (WPE has no favicon API). */
+    WPE_ENGINE_NOTICE,        /* WpeFlag: value = WpeNoticeKind, something about the page the UI tells the user */
 } WpeMsgType;
+
+typedef enum {
+    WPE_NOTICE_BOT_CHECK = 1, /* the page is a bot check (Cloudflare's "cf-mitigated: challenge"); on a TV's CPU these
+                                 take about a minute, so the UI says so rather than looking frozen */
+} WpeNoticeKind;
 
 /* Tabs the engine opens itself (popups) get ids from here, so they never collide with the UI's. */
 #define WPE_ENGINE_TAB_ID_BASE 0x40000000u

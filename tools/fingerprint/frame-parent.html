@@ -1,0 +1,13 @@
+<!doctype html>
+<!-- With frame-child.html: what a cross-origin frame sees of its parent (document.referrer, location.ancestorOrigins)
+     and whether its postMessage to the parent arrives, reported to minihttpd's /log. Open
+     http://127.0.0.1:8099/frame-parent.html; the frame loads from localhost, another origin. -->
+<html><head><meta charset="utf-8"><title>Frame parent</title></head><body><pre id="o"></pre><script>
+function log(m) { document.getElementById('o').textContent += m + '\n'; try { new Image().src = '/log?' + encodeURIComponent(m); } catch (e) {} }
+log('parent ' + location.origin + ' referrerPolicy-meta none');
+addEventListener('message', (e) => log('parent got message from ' + e.origin + ': ' + e.data));
+const f = document.createElement('iframe');
+f.src = 'http://localhost:' + location.port + '/frame-child.html';
+document.body.appendChild(f);
+setTimeout(() => log('ended'), 4000);
+</script></body></html>

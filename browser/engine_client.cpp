@@ -489,6 +489,13 @@ void EngineClient::handle(const uint8_t *buf, size_t n, int fd) {
             if (f.value == 1) cb_.edge_up(h.tab);
         }
         break;
+    case WPE_ENGINE_NOTICE:
+        if (len >= sizeof(WpeFlag) && cb_.notice) {
+            WpeFlag f;
+            std::memcpy(&f, p, sizeof(f));
+            cb_.notice(h.tab, static_cast<WpeNoticeKind>(f.value));
+        }
+        break;
     case WPE_ENGINE_IME:
         if (len >= sizeof(WpeIme) && cb_.ime) {
             WpeIme m;

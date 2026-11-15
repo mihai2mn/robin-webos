@@ -1187,6 +1187,10 @@ class App : public wnk::app::Delegate {
                 reload_crashed(*t);
             }
         };
+        cb.notice = [this](TabId id, WpeNoticeKind kind) {
+            if (kind == WPE_NOTICE_BOT_CHECK && id == active_)
+                ctx_->ui().toast("Security check by the site. On a TV this takes about a minute; please wait.", 8000);
+        };
         cb.data_cleared = [this](uint32_t, bool ok) {
             ctx_->ui().toast(ok ? "Browsing data cleared" : "Some browsing data could not be cleared");
         };

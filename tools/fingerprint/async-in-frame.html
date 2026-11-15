@@ -1,0 +1,7 @@
+<!doctype html>
+<!-- async.html inside a cross-origin frame (localhost under 127.0.0.1), where browsers limit storage and some APIs as
+     for a third-party frame such as Cloudflare's challenge. Open http://127.0.0.1:8099/async-in-frame.html. -->
+<html><head><meta charset="utf-8"><title>Async features in a frame</title></head><body>
+<iframe src="about:blank" width="900" height="600" id="f"></iframe>
+<script>document.getElementById('f').src = 'http://localhost:' + location.port + '/async.html';</script>
+</body></html>

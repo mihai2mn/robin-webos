@@ -760,3 +760,25 @@
   earlier is a loss; hot code reaches the JIT with the defaults anyway. Kept the defaults. Results:
   build/perf-bench/jit-{A-default,B-baseline100,C-dfg300}.txt. run.sh now logs the web process's CPU and memory per
   load and takes WPEB_ENV (engine environment), SITES and NO_SCROLL.
+
+## 2026-11-16 Cloudflare checks and a Web Audio crash (user: Cloudflare "verifying" never finishes)
+- Cloudflare's managed challenge passes on the TV but takes 68-84 s (www.scrapingcourse.com/cloudflare-challenge,
+  cookies forgotten first, from load start to the widget's "complete" postMessage); earlier tests stopped too soon.
+  The web process's main thread runs flat out the whole time, 83% of samples in JIT code (tools/tv-sampler).
+- Not the cause: Wren's media script, the user agent, missing features (tools/fingerprint/ probes behave the same on
+  the TV and desktop WebKitGTK except navigator.mediaDevices, which this build lacks), cross-origin postMessage.
+  brunhild.challenges.cloudflare.com fails on the TV and the PC alike: it is IPv6-only and neither has an IPv6
+  route; the check passes without it. Don't log console messages to stdout for this test: the check notices.
+- Desktop WebKitGTK (x86-64) does it in 3.2 s; 3.1 s without FTL, 4.8 s also without DFG, 12.6 s interpreter only.
+  So the missing FTL on 32-bit ARM is not the reason; it is the TV's CPU (~19x slower at the same tiers).
+- JSC options on the TV (one run each unless noted): defaults 81, 68 s; Baseline after 100 84 s; Baseline 100 +
+  DFG 300 51, 78 s; DFG 300 74, 76 s; no DFG >130 s (not finished). Nothing reliably faster; kept the defaults.
+- Done instead: the engine sees "cf-mitigated: challenge" on a page's response and sends WPE_ENGINE_NOTICE
+  (protocol 11); the UI toasts that the site's security check takes about a minute on a TV. The pass cookie
+  (cf_clearance) is kept, so later visits skip the check until it expires.
+- Fixed: every page that made an AudioContext crashed the web process. WEBKIT_GST_QUIRKS=rialto makes WebKit's
+  Web Audio ask for "rialtowebaudiosink" and RELEASE_ASSERT when it is missing; engine/gst/wpebmediasink.c now
+  registers one (audioconvert, audioresample, pulsesink; rank none). TV: AudioContext "suspended 44100", no crash.
+- Engine debug switches (wpebEnv): WPE_BROWSER_DEBUG_USER_AGENT (the whole UA), WPE_BROWSER_DEBUG_MESSAGES=1
+  (postMessages to the top frame), WPE_BROWSER_DEBUG_REQUESTS=1 (each request and its status),
+  WPE_BROWSER_DEBUG_FORGET_COOKIES=site,... (drops those sites' cookies before the first load).

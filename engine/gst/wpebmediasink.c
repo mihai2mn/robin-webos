@@ -1079,14 +1079,65 @@ static void wpeb_audio_sink_class_init(WpebAudioSinkClass *klass)
         "PulseAudio", "wpebrowser");
 }
 
+/* ---- Web Audio sink --------------------------------------------------------------------------------------- */
+
+/* WebKit's "rialto" quirk (WEBKIT_GST_QUIRKS=rialto, for the sinks above) makes Web Audio output a
+ * "rialtowebaudiosink" and aborts the web process when there is none (GStreamerQuirkRialto::createWebAudioSink,
+ * RELEASE_ASSERT): every page that made an AudioContext crashed (TV, 2026-11-15). Web Audio is PCM, so this one
+ * plays it with PulseAudio, like the software audio path above. */
+typedef struct {
+    GstBin parent;
+} WpebWebAudioSink;
+typedef struct {
+    GstBinClass parent_class;
+} WpebWebAudioSinkClass;
+
+G_DEFINE_TYPE(WpebWebAudioSink, wpeb_webaudio_sink, GST_TYPE_BIN)
+
+static GstStaticPadTemplate webaudio_sink_template =
+    GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, GST_STATIC_CAPS("audio/x-raw"));
+
+static void wpeb_webaudio_sink_init(WpebWebAudioSink *self)
+{
+    GstElement *convert = gst_element_factory_make("audioconvert", NULL);
+    GstElement *resample = gst_element_factory_make("audioresample", NULL);
+    GstElement *pulse = gst_element_factory_make("pulsesink", NULL);
+    if (!convert || !resample || !pulse) {
+        /* No sink pad: WebKit can't link it and Web Audio stays silent, but the page keeps running. */
+        GST_ERROR_OBJECT(self, "audioconvert, audioresample or pulsesink missing");
+        g_clear_object(&convert);
+        g_clear_object(&resample);
+        g_clear_object(&pulse);
+        return;
+    }
+    gst_bin_add_many(GST_BIN(self), convert, resample, pulse, NULL);
+    gst_element_link_many(convert, resample, pulse, NULL);
+    GstPad *target = gst_element_get_static_pad(convert, "sink");
+    GstPadTemplate *templ = gst_static_pad_template_get(&webaudio_sink_template);
+    gst_element_add_pad(GST_ELEMENT(self), gst_ghost_pad_new_from_template("sink", target, templ));
+    gst_object_unref(templ);
+    gst_object_unref(target);
+    GST_OBJECT_FLAG_SET(self, GST_ELEMENT_FLAG_SINK);
+}
+
+static void wpeb_webaudio_sink_class_init(WpebWebAudioSinkClass *klass)
+{
+    GstElementClass *element_class = GST_ELEMENT_CLASS(klass);
+    gst_element_class_add_static_pad_template(element_class, &webaudio_sink_template);
+    gst_element_class_set_static_metadata(element_class, "webOS browser Web Audio sink", "Sink/Audio",
+        "Web Audio played by PulseAudio", "wpebrowser");
+}
+
 /* ---- plugin ----------------------------------------------------------------------------------------------- */
 
 static gboolean plugin_init(GstPlugin *plugin)
 {
     GST_DEBUG_CATEGORY_INIT(wpeb_media_debug, "wpebmedia", 0, "webOS browser hardware media");
-    /* Rank above MARGINAL: WebKit's quirk checks it. Nothing else autoplugs sinks by rank here. */
+    /* Rank above MARGINAL: WebKit's quirk checks it. Nothing else autoplugs sinks by rank here. The Web Audio sink
+     * is made by name only (rank none), so no autoaudiosink picks it. */
     return gst_element_register(plugin, "rialtomsevideosink", GST_RANK_SECONDARY, WPEB_TYPE_VIDEO_SINK)
-        && gst_element_register(plugin, "rialtomseaudiosink", GST_RANK_SECONDARY, WPEB_TYPE_AUDIO_SINK);
+        && gst_element_register(plugin, "rialtomseaudiosink", GST_RANK_SECONDARY, WPEB_TYPE_AUDIO_SINK)
+        && gst_element_register(plugin, "rialtowebaudiosink", GST_RANK_NONE, wpeb_webaudio_sink_get_type());
 }
 
 #define PACKAGE "wpebrowser"

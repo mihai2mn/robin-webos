@@ -450,6 +450,20 @@ void on_load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer)
     send_msg(WPE_ENGINE_LOAD, tab, &l, sizeof(l));
     send_history(tab, view);
 
+    // A Cloudflare bot check ("cf-mitigated: challenge" on the page's own response) runs about a minute of
+    // JavaScript on a TV's CPU (TV, 2026-11-16: 68–84 s; JIT thresholds did not shorten it). The UI says so.
+    if (event == WEBKIT_LOAD_COMMITTED) {
+        WebKitWebResource *main = webkit_web_view_get_main_resource(view);
+        WebKitURIResponse *response = main ? webkit_web_resource_get_response(main) : nullptr;
+        SoupMessageHeaders *headers = response ? webkit_uri_response_get_http_headers(response) : nullptr;
+        const char *mitigated = headers ? soup_message_headers_get_one(headers, "cf-mitigated") : nullptr;
+        if (mitigated && g_ascii_strcasecmp(mitigated, "challenge") == 0) {
+            log_msg("tab %u: the page is a bot check (cf-mitigated: challenge)", tab);
+            const WpeFlag notice { WPE_NOTICE_BOT_CHECK };
+            send_msg(WPE_ENGINE_NOTICE, tab, &notice, sizeof(notice));
+        }
+    }
+
     // Page timings for the log (TV diagnostics: which site, how long to first commit / full load).
     static guint32 started = 0;
     const char *uri = webkit_web_view_get_uri(view);
@@ -981,6 +995,19 @@ void add_scroll_reporter(WebKitWebView *web_view, uint32_t id)
         webkit_user_content_manager_add_script(ucm, script);
         webkit_user_script_unref(script);
     }
+    // WPE_BROWSER_DEBUG_MESSAGES=1: postMessage traffic to the top frame (e.g. a Cloudflare challenge frame's status
+    // and error codes) goes to the engine log. Listened to from Wren's isolated world, so the page's own functions
+    // stay untouched; WPE_BROWSER_DEBUG_CONSOLE wraps them and bot checks notice that.
+    static const bool messages = getenv("WPE_BROWSER_DEBUG_MESSAGES") != nullptr;
+    if (messages && webkit_user_content_manager_register_script_message_handler(ucm, "wpebMessage", kScrollWorld)) {
+        g_signal_connect(ucm, "script-message-received::wpebMessage", G_CALLBACK(on_console_message), GUINT_TO_POINTER(id));
+        script = webkit_user_script_new_for_world(R"JS(addEventListener('message', function (e) {
+  var d; try { d = typeof e.data === 'string' ? e.data : JSON.stringify(e.data); } catch (x) { d = String(e.data); }
+  window.webkit.messageHandlers.wpebMessage.postMessage('message from ' + e.origin + ': ' + String(d).slice(0, 700));
+}, true);)JS", WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, kScrollWorld, nullptr, nullptr);
+        webkit_user_content_manager_add_script(ucm, script);
+        webkit_user_script_unref(script);
+    }
 }
 
 void on_history_changed(WebKitBackForwardList *, WebKitBackForwardListItem *, gpointer, gpointer web_view)
@@ -992,6 +1019,74 @@ void on_history_changed(WebKitBackForwardList *, WebKitBackForwardListItem *, gp
 void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener = nullptr);
 
 // window.close() from a page: the UI closes the tab (and shows its opener).
+// WPE_BROWSER_DEBUG_FORGET_COOKIES="example.com,other.org": removes those sites' cookies (only theirs) before the
+// first page loads, e.g. to see a Cloudflare challenge again without its clearance cookie. Waits until done.
+void forget_cookies(const char *sites)
+{
+    struct Job {
+        GMainLoop *loop;
+        gchar **sites;
+    } job { g_main_loop_new(nullptr, FALSE), g_strsplit(sites, ",", -1) };
+    WebKitWebsiteDataManager *manager = webkit_network_session_get_website_data_manager(g.session);
+    webkit_website_data_manager_fetch(manager, WEBKIT_WEBSITE_DATA_COOKIES, nullptr, [](GObject *source, GAsyncResult *result, gpointer data) {
+        auto *job = static_cast<Job *>(data);
+        auto *manager = WEBKIT_WEBSITE_DATA_MANAGER(source);
+        GList *records = webkit_website_data_manager_fetch_finish(manager, result, nullptr), *matched = nullptr;
+        for (GList *r = records; r; r = r->next) {
+            const char *name = webkit_website_data_get_name(static_cast<WebKitWebsiteData *>(r->data));
+            for (gchar **s = job->sites; name && *s; ++s)
+                if (**s && g_str_has_suffix(name, *s)) {
+                    log_msg("forgetting the cookies of %s", name);
+                    matched = g_list_prepend(matched, r->data);
+                    break;
+                }
+        }
+        if (!matched) {
+            log_msg("no cookies to forget");
+            g_list_free_full(records, reinterpret_cast<GDestroyNotify>(webkit_website_data_unref));
+            g_main_loop_quit(job->loop);
+            return;
+        }
+        webkit_website_data_manager_remove(manager, WEBKIT_WEBSITE_DATA_COOKIES, matched, nullptr, [](GObject *source, GAsyncResult *result, gpointer data) {
+            webkit_website_data_manager_remove_finish(WEBKIT_WEBSITE_DATA_MANAGER(source), result, nullptr);
+            g_main_loop_quit(static_cast<Job *>(data)->loop);
+        }, job);
+        g_list_free(matched);
+        g_list_free_full(records, reinterpret_cast<GDestroyNotify>(webkit_website_data_unref));
+    }, &job);
+    g_main_loop_run(job.loop);
+    g_main_loop_unref(job.loop);
+    g_strfreev(job.sites);
+}
+
+// WPE_BROWSER_DEBUG_REQUESTS=1: every request of a page and its frames, with the response status or the error, goes
+// to the engine log (e.g. how far a Cloudflare challenge frame gets). Nothing in the page changes.
+std::string short_uri(const char *uri)
+{
+    std::string u = uri ? uri : "";
+    return u.size() > 160 ? u.substr(0, 160) + "..." : u;
+}
+
+void on_resource_finished(WebKitWebResource *resource, gpointer)
+{
+    WebKitURIResponse *response = webkit_web_resource_get_response(resource);
+    log_msg("request done %u %s", response ? webkit_uri_response_get_status_code(response) : 0,
+        short_uri(webkit_web_resource_get_uri(resource)).c_str());
+}
+
+void on_resource_failed(WebKitWebResource *resource, GError *error, gpointer)
+{
+    log_msg("request failed %s: %s", short_uri(webkit_web_resource_get_uri(resource)).c_str(), error ? error->message : "?");
+}
+
+void on_resource_load_started(WebKitWebView *, WebKitWebResource *resource, WebKitURIRequest *request, gpointer)
+{
+    const char *method = webkit_uri_request_get_http_method(request);
+    log_msg("request %s %s", method ? method : "GET", short_uri(webkit_uri_request_get_uri(request)).c_str());
+    g_signal_connect(resource, "finished", G_CALLBACK(on_resource_finished), nullptr);
+    g_signal_connect(resource, "failed", G_CALLBACK(on_resource_failed), nullptr);
+}
+
 void on_close(WebKitWebView *view, gpointer)
 {
     if (const uint32_t id = tab_of_web_view(view))
@@ -1132,6 +1227,8 @@ void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener)
     g_signal_connect(web_view, "create", G_CALLBACK(on_create), nullptr);
     g_signal_connect(web_view, "close", G_CALLBACK(on_close), nullptr);
     g_signal_connect(web_view, "permission-request", G_CALLBACK(on_permission_request), nullptr);
+    if (getenv("WPE_BROWSER_DEBUG_REQUESTS"))
+        g_signal_connect(web_view, "resource-load-started", G_CALLBACK(on_resource_load_started), nullptr);
     g_signal_connect(web_view, "decide-policy", G_CALLBACK(on_decide_policy), nullptr);
     g_signal_connect(web_view, "enter-fullscreen", G_CALLBACK(on_fullscreen_changed), GUINT_TO_POINTER(1));
     g_signal_connect(web_view, "leave-fullscreen", G_CALLBACK(on_fullscreen_changed), GUINT_TO_POINTER(0));
@@ -1543,6 +1640,12 @@ int main(int, char **)
         }
         g_strfreev(pairs);
     }
+    // WPE_BROWSER_DEBUG_USER_AGENT: the whole user agent, for compatibility tests (a user agent has ";", which
+    // WPE_BROWSER_DEBUG_SETTINGS uses between settings).
+    if (const char *ua = getenv("WPE_BROWSER_DEBUG_USER_AGENT"); ua && *ua) {
+        webkit_settings_set_user_agent(g.settings, ua);
+        log_msg("debug user agent: %s", ua);
+    }
     if (g.direct) {
         // COOP (YouTube sends it) moves a page into a new web process by its own path, which ignores
         // WPE_BROWSER_NO_PROCESS_SWAP; see there for why direct presentation can't follow a process switch.
@@ -1556,6 +1659,9 @@ int main(int, char **)
         }
         webkit_feature_list_unref(features);
     }
+
+    if (const char *sites = getenv("WPE_BROWSER_DEBUG_FORGET_COOKIES"); sites && *sites)
+        forget_cookies(sites);
 
     g_unix_fd_add(g.sock, static_cast<GIOCondition>(G_IO_IN | G_IO_HUP | G_IO_ERR), on_socket, nullptr);
 
