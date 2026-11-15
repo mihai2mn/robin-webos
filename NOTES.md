@@ -740,3 +740,16 @@
   cmake/SdlWebOS.cmake): SDL-webOS adds the keys asked for with KEYS_BACK/EXIT/HOME to the window's key mask, at
   window creation and when the hints change. TV (C1, webOS 6.5.3): Back on a page, in the menu and in Settings works
   in direct mode. The kit change is uncommitted in the kit (the user's repo).
+
+## 2026-11-15 Performance pass (user: page loading, scrolling, app start, heavy sites)
+- Benchmark: tools/perf-bench/run.sh LABEL [RUNS] (cold starts of Wikipedia, BBC News, GitHub with the engine's
+  page timing; tools/perf-bench/scroll.html scrolls itself and reports rAF frame intervals; the UI's CPU on a still
+  page). Results in build/perf-bench/. The C1 shows 50 Hz (20 ms frames).
+- Baseline 0.3.2 (3 runs): first frame ~0.8 s, engine ready ~0.7 s; first paint Wikipedia 2.6-3.3 s, BBC 1.1-3.2 s,
+  GitHub 2.3-2.7 s (GitHub DOMContentLoaded 9-10 s); scroll 43.6 fps, p95 33 ms, 13 frames >33 ms per 6 s; UI CPU on a
+  still page 12.7% of a core.
+- Fixed: the page view (kit GlView, animated by default) made the UI present every frame in direct mode; static there
+  now (37b19ec). UI CPU 1.5%; scroll 46.6 fps, p95 24 ms, 10 frames >33 ms.
+- GitHub: no resource over 2 s (engine timing now lists "slow resource" lines >2 s); its DOMContentLoaded waits on
+  ~8 s of its own deferred JavaScript. JIT tiers in the build: Baseline + DFG (FTL is 64-bit only), WebAssembly on.
+- Decided (user, 2026-11-15): no WebKit build tuned for Cortex-A55; the engine stays built for every webOS TV.

@@ -615,6 +615,18 @@ constexpr const char *kPerfScript = R"JS((function () {
                 ' | interactive ' + r(n.domInteractive) + ' dcl ' + r(n.domContentLoadedEventEnd) +
                 ' fcp ' + r(fcp) + ' load ' + r(n.loadEventStart) +
                 ' | ' + res.length + ' resources ' + r(kb) + ' KB | ' + location.host);
+            // Resources that took over 2 s or ended after DOMContentLoaded+load waited on them: what slows a page.
+            var slow = [];
+            for (var k = 0; k < res.length; k++) {
+                var e = res[k], d = e.responseEnd - e.startTime;
+                if (d < 2000) continue;
+                var u = e.name.replace(/[?#].*$/, '');
+                if (u.length > 90) u = u.slice(0, 60) + '...' + u.slice(-27);
+                slow.push(r(e.startTime) + '+' + r(d) + 'ms ' + (e.initiatorType || '?') + ' ' + u);
+            }
+            slow.sort(function (x, y) { return parseInt(y.split('+')[1], 10) - parseInt(x.split('+')[1], 10); });
+            for (var m = 0; m < slow.length && m < 8; m++)
+                window.webkit.messageHandlers.wpebPerf.postMessage('slow resource ' + slow[m]);
         }, 0);
     });
 })();)JS";
