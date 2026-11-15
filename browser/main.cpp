@@ -627,6 +627,10 @@ class App : public wnk::app::Delegate {
             if (show == "zoom") show_menu(browser::wren::SidePanel::Section::Zoom);
         }
         keep_overlay_focus(ctx.ui());
+        // A page field's text input (TV keyboard) ends when focus leaves the page (menu, Settings, toolbar): while a
+        // view has text input, Back skips the overlays' handling and the kit treats keys as typing for that view, so
+        // Back never closed the menu or Settings after a page had focused a field (Google's search box; 2026-11-15).
+        if (screen_->page_->editing() && ctx.ui().focused() != screen_->page_) screen_->page_->ime(ctx.ui(), false);
         if (ok_down_ && !ok_long_ && ctx.ui().now_ms() - ok_down_ms_ >= kHoldOkMs) {
             ok_long_ = true;
             show_quick_actions();
