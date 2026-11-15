@@ -29,15 +29,23 @@ class PageView : public wnk::ui::GlView {
     bool has_frame() const { return tex_w_ > 0; }
     // Frames from other tabs are dropped; switching shows a blank page until the new tab's first frame.
     void show_tab(TabId tab) {
-        if (tab != tab_) tab_ = tab, tex_w_ = tex_h_ = 0;
+        if (tab != tab_) tab_ = tab, tex_w_ = tex_h_ = 0, invalidate_content();
     }
     // Direct presentation (DirectOwner): the page is its own surface below the window. Once a tab's surface has
-    // shown a frame, this view becomes a transparent hole over it; until then it stays blank.
-    void set_direct(bool on) { direct_ = on, direct_tab_ = 0; }
+    // shown a frame, this view becomes a transparent hole over it; until then it stays blank. The hole is a still
+    // picture, so the view is static there (redrawn only when the hole changes): an animated view had the UI
+    // present every frame, ~15% of a core on the TV for nothing. SHM frames arrive all the time: animated.
+    void set_direct(bool on) {
+        direct_ = on, direct_tab_ = 0;
+        set_animated(!on);
+        invalidate_content();
+    }
     bool direct() const { return direct_; }
     void direct_shown(TabId tab, bool shown) {
+        const TabId before = direct_tab_;
         if (shown) direct_tab_ = tab;
         else if (direct_tab_ == tab) direct_tab_ = 0;
+        if (direct_tab_ != before) invalidate_content();
     }
 
  protected:
