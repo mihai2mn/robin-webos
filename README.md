@@ -40,7 +40,7 @@ approved; until then, use the ipk.
 install or:
 
 ```sh
-ares-install -d <your-device> org.sostk.wpebrowser_0.3.2_arm.ipk
+ares-install -d <your-device> org.sostk.wpebrowser_0.3.3_arm.ipk
 ```
 
 Each release also carries `org.sostk.wpebrowser.manifest.json`, the Homebrew Channel manifest (version, ipk link
