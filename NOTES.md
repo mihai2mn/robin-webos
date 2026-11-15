@@ -782,3 +782,13 @@
 - Engine debug switches (wpebEnv): WPE_BROWSER_DEBUG_USER_AGENT (the whole UA), WPE_BROWSER_DEBUG_MESSAGES=1
   (postMessages to the top frame), WPE_BROWSER_DEBUG_REQUESTS=1 (each request and its status),
   WPE_BROWSER_DEBUG_FORGET_COOKIES=site,... (drops those sites' cookies before the first load).
+
+## 2026-11-16 webOS 3: software video, launcher icon (issue #2, PR #4)
+- OLED B7 (webOS 3.9, satgit62's logs): every video failed. The engine's video window needs wl_webos_foreign,
+  which webOS 3.9's compositor lacks, so the media server got no window id, skipped LG's pipeline and fell back to
+  NDL, which has no NDL_DirectMediaLoad there. A plain MP4 reportedly froze the whole TV (logs lost to the reboot).
+- Now libwpeb-owner reports whether the compositor offers wl_webos_foreign (wpeb_owner_has_video_window); without
+  it and without NDL the UI does not start hardware video, so pages get GStreamer's software decoders (the
+  wpebVideo=software path). Untested on webOS 3.
+- PR #4 found that webOS 3.x's launcher shows a dark tile unless appinfo has "supportGIP": true. Its patch never
+  set it (PKG_ prefix, option not declared); the kit now has SUPPORT_GIP (wnk_add_webos_package), which Wren sets.

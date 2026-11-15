@@ -54,15 +54,21 @@ MediaServer::~MediaServer() { stop(); }
 
 void MediaServer::set_foreground(bool foreground) { wnk::media::NdlBackend::set_app_foreground(foreground); }
 
-bool MediaServer::start(const std::string &path, std::string *why) {
+bool MediaServer::start(const std::string &path, bool video_window, std::string *why) {
     if (running()) return true;
     // LG's media pipeline (StarfishMediaAPIs) is the main path; NDL's v2 API (webOS 5+) only a fallback. webOS 3.x
-    // and 4.x have the pipeline but an older NDL without NDL_DirectMediaLoad.
+    // and 4.x have the pipeline but an older NDL without NDL_DirectMediaLoad. The pipeline shows video in a video
+    // window (wl_webos_foreign), which webOS 3.x's compositor lacks: there neither path works, so pages get
+    // software video instead (issue #2: on an OLED B7, webOS 3.9, every video failed).
     std::string ndl_why;
     const bool ndl = wnk::media::NdlBackend::available(&ndl_why);
     const bool lg = LgMediaPlayer::available();
     if (!ndl && !lg) {
         *why = "no LG media pipeline (" + LgMediaPlayer::unavailable_reason() + ") and " + ndl_why;
+        return false;
+    }
+    if (!ndl && !video_window) {
+        *why = "no video windows (wl_webos_foreign) for LG's media pipeline and " + ndl_why;
         return false;
     }
     if (!ndl) WNK_LOGI(kCat, "NDL fallback unavailable (%s); LG media pipeline only", ndl_why.c_str());

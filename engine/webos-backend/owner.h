@@ -23,6 +23,8 @@ struct wpeb_owner *wpeb_owner_create(struct wl_display *display, struct wl_surfa
 void wpeb_owner_dispatch(struct wpeb_owner *owner);
 // Moves the page layer (negative = below the UI window, positive = above it).
 void wpeb_owner_set_z(struct wpeb_owner *owner, int z_index);
+// 1 if the compositor offers video windows (wl_webos_foreign) for hardware video on the page; webOS 3.x does not.
+int wpeb_owner_has_video_window(struct wpeb_owner *owner);
 // Page surfaces attached to the layer right now.
 int wpeb_owner_attached(struct wpeb_owner *owner);
 void wpeb_owner_destroy(struct wpeb_owner *owner);

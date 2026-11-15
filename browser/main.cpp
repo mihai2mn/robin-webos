@@ -1274,10 +1274,10 @@ class App : public wnk::app::Delegate {
                 std::string why;
                 if (launch_param(params, "wpebVideo") == "software")
                     WNK_LOGI(kCat, "hardware video off (launch parameter)");
-                else if (media_.running() || media_.start(l.runtime_dir + "/media.sock", &why))
+                else if (media_.running() || media_.start(l.runtime_dir + "/media.sock", direct_.has_video_window(), &why))
                     l.media_socket = media_.path();
                 else
-                    WNK_LOGW(kCat, "hardware video unavailable: %s", why.c_str());
+                    WNK_LOGW(kCat, "hardware video unavailable: %s; software video", why.c_str());
             }
         }
         if (!params.empty()) {

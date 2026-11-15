@@ -25,7 +25,8 @@ public:
     MediaServer &operator=(const MediaServer &) = delete;
 
     // Listens on `path` if LG's decoder library is there; false with *why otherwise.
-    bool start(const std::string &path, std::string *why);
+    // video_window: the compositor offers video windows, without which LG's media pipeline cannot show video.
+    bool start(const std::string &path, bool video_window, std::string *why);
     void stop();
     bool running() const { return listen_fd_ >= 0; }
     const std::string &path() const { return path_; }

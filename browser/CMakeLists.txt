@@ -55,6 +55,7 @@ wnk_add_webos_package(
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"
         ICON_COLOR "#0b1020"
+        SUPPORT_GIP  # webOS 3.x launcher: the icon instead of a dark tile (PR #4)
         EXPECTED_NEEDED "${CMAKE_CURRENT_SOURCE_DIR}/expected-needed.txt"
         EXTRA_DIRS "${WNK_FONT_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/fonts" "${CMAKE_CURRENT_SOURCE_DIR}/icons"
         GLIBC_RUNTIMES ${WPEB_ENGINE_EXTRA_DIR}

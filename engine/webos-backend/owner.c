@@ -24,6 +24,7 @@ struct wpeb_owner {
     struct wl_webos_surface_group_layer *layer;
     int attached; // page surfaces currently attached to the layer
     int z_index;
+    int has_foreign; // the compositor offers wl_webos_foreign (video windows); webOS 3.x does not
 };
 
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface, uint32_t version)
@@ -32,6 +33,8 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
     (void)version;
     if (!strcmp(interface, "wl_webos_surface_group_compositor") && !o->groups)
         o->groups = wpeb_registry_bind(registry, name, &wl_webos_surface_group_compositor_interface, 1);
+    else if (!strcmp(interface, "wl_webos_foreign"))
+        o->has_foreign = 1;
 }
 static void registry_global_remove(void *data, struct wl_registry *registry, uint32_t name) { (void)data; (void)registry; (void)name; }
 static const struct wl_registry_listener registry_listener = { registry_global, registry_global_remove };
@@ -137,6 +140,11 @@ WPEB_OWNER_EXPORT int wpeb_owner_renew_layer(struct wpeb_owner *o, const char *l
     }
     fprintf(stderr, "[wpeb-owner] new layer '%s' (z %d)\n", layer, o->z_index);
     return 1;
+}
+
+WPEB_OWNER_EXPORT int wpeb_owner_has_video_window(struct wpeb_owner *o)
+{
+    return o && o->has_foreign;
 }
 
 WPEB_OWNER_EXPORT int wpeb_owner_attached(struct wpeb_owner *o)

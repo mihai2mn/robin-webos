@@ -25,6 +25,8 @@ class DirectOwner {
     const std::string &group() const { return group_; }
     const std::string &layer() const { return layer_; }
     const std::string &socket() const { return socket_; }  // compositor socket for WPEB_WAYLAND_SOCKET
+    // The compositor offers video windows (wl_webos_foreign), which LG's media pipeline needs; webOS 3.x does not.
+    bool has_video_window() const { return video_window_; }
     void dispatch();  // once per UI frame
     // Moves the page layer: below the UI window (-1, the default) or above it (1). LG's video is drawn as a
     // punch-through directly below the app's main window and cuts out everything under it, the page included:
@@ -45,6 +47,7 @@ class DirectOwner {
     int (*renew_layer_)(wpeb_owner *, const char *) = nullptr;
     int layer_generation_ = 0;
     int page_z_ = -1;
+    bool video_window_ = false;
 };
 
 }  // namespace browser

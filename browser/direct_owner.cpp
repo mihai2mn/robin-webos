@@ -60,8 +60,11 @@ bool DirectOwner::open(const std::string &engine_dir, std::string &why, int page
         return false;
     }
     socket_ = socket;
-    WNK_LOGI(kCat, "surface group %s, layer %s, compositor socket %s", group_.c_str(), layer_.c_str(),
-             socket_.empty() ? "(default)" : socket_.c_str());
+    // Libraries from before this query existed: assume video windows, as before.
+    auto has_video = reinterpret_cast<int (*)(wpeb_owner *)>(::dlsym(lib_, "wpeb_owner_has_video_window"));
+    video_window_ = has_video == nullptr || has_video(owner_) != 0;
+    WNK_LOGI(kCat, "surface group %s, layer %s, compositor socket %s, video windows %s", group_.c_str(), layer_.c_str(),
+             socket_.empty() ? "(default)" : socket_.c_str(), video_window_ ? "yes" : "no");
     return true;
 #else
     (void)engine_dir;
