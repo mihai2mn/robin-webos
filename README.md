@@ -8,7 +8,7 @@ the arrows, OK and Back of any LG remote.
 
 | | |
 |---|---|
-| ![Home page](docs/screenshots/home.jpg) **Home**: search, shortcuts, recent pages, open tabs | ![Browsing](docs/screenshots/browsing.jpg) **Browsing**: ▲ at the top of a page shows the tabs and the toolbar |
+| ![Home page](docs/screenshots/home.jpg) **Home**: search, shortcuts, recent pages, open tabs | ![Browsing](docs/screenshots/browsing.jpg) **Browsing**: a slim toolbar at the top, the page below it |
 | ![Quick actions](docs/screenshots/quick-actions.jpg) **Hold OK**: quick actions and page zoom | ![Side panel](docs/screenshots/side-panel.jpg) **Menu**: bookmarks, history, zoom, settings |
 
 ## Features
@@ -17,12 +17,13 @@ the arrows, OK and Back of any LG remote.
 - Hardware video (H.264, HEVC, VP9; MSE, DASH, HLS) with HDR10/HLG, on LG's decoder
 - Widevine DRM (EME) through the TV's own CDM
 - YouTube opens as its fast TV app, full screen
-- Remote-first: **▲** at the top of a page for tabs, **Hold OK** for quick actions, **CH ±** to switch tabs; the
+- Remote-first: a slim toolbar above the page (**▲** at the top of a page goes to it), **Hold OK** for quick actions, **CH ±** to switch tabs; the
   Magic Remote pointer and colour keys work too ([all keys](docs/usage.md))
 
 ## Install
 
-**webOS 5 or newer** should work (2020 TVs onwards, webOS 22–26 included); only webOS 6 has been tested
+**webOS 5 or newer** should work (2020 TVs onwards, webOS 22–26 included); webOS 6 is tested, webOS 5 reported
+working, webOS 3.4–4 experimental
 ([which TVs](docs/compatibility.md)). Download the ipk from [Releases](../../releases) and install it with the
 Homebrew Channel or:
 
