@@ -703,3 +703,26 @@
   `/proc/<ui pid>/map_files/…memfd:wpe-browser-frames` showed the page with correct colours (no R/B swap), so the
   BGRA path still runs where the extension exists. Widevine H.264 played to the end (1395+ frames, 2 dropped,
   keys=5). The RGBA fallback itself only runs on GPUs like the contributor's Mali-400 (webOS 3.9.2, 32LJ594U).
+
+## 2026-11-15 Docked toolbar; new-tab minimise fix (user request: "like Chrome", Reddit report from a C2 owner)
+- **Toolbar docked, page below it.** Normal pages: one 88 px row (back, forward, reload, address, Tabs, bookmark,
+  menu) on a solid band; the page is laid out below (BrowserScreen::content_ top inset). Full-screen pages and TV apps
+  keep the whole screen with the floating glass panel (tab row) on Hold OK → Toolbar or the pointer resting at the top
+  edge. No more peek over the page on load/Back; no hint pill for the toolbar (user request).
+  - Direct presentation: webOS places the page surface at (0,0) and can't move it. The surface keeps the screen's
+    shape (WPEB_SCREEN_SIZE from the UI → surface_height in the backend) while WebKit gets the shorter page size;
+    WebKit's glViewport(0,0,size) is bottom-left, so the page lands below the band. Hardware video window y is shifted
+    by the same strip. TV screenshot (executeOneShot via `script`): page exactly below the bar, not stretched.
+- **Arrow-key scroll fallback** (kScrollScript): ▲/▼ that moved no focus and scrolled nothing scroll the largest
+  scrolling box (sites that scroll an inner element); ▲ opens the toolbar only when that box is at its top.
+  tools/scroll-test/scroll.html: PASS on the C1.
+- **New tab, then a page in it → webOS minimised Wren; the old tab stayed full screen** (user report; also in alpha 3,
+  so older than the toolbar work). /var/log/messages: `org.sostk.wpebrowser.page visible:true` (a page surface became
+  an app card), then `org.sostk.wpebrowser visible:false`. Cause: the old page kept drawing after its detach (~12
+  frames, paced by the backend's frame timeout; one is enough), and a buffer committed to a detached surface with a
+  window role maps it as its own window. Fix: (1) backend holds WebKit's frame completion while a page with a role is
+  detached (handed over on re-attach); (2) a page detaches on its own thread only while WebKit waits for a
+  completion (else after its next frame or 100 ms); (3) the engine shows the new tab after the old one reports
+  DETACHED (≤300 ms), so no thread detaches another page mid-frame; (4) hidden tabs are resized only when shown.
+  TV: Wikipedia → Google in a new tab, no minimise, tab 2 on screen. Dropped: set_state(minimized) on hidden page
+  windows (webOS minimised the whole app and showed Home).

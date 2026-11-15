@@ -26,6 +26,9 @@ void set_size(View *view, uint32_t width, uint32_t height);
 void set_scale(View *view, double scale);
 // Shown = attached to the UI's surface group and visible to WebKit; hidden = detached and not rendering.
 void set_shown(View *view, bool shown);
+bool shown(const View *view);
+// The status a hidden view reports once its surface has left the layer (wpeb_webos_status DETACHED).
+bool is_detached_status(int32_t status);
 void set_focused(View *view, bool focused);
 // Pages attach to `layer` from now on; a shown view is attached again there (its web process is new or reloading).
 void set_layer(const char *layer);

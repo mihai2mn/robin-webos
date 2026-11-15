@@ -183,6 +183,8 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
         set_env(env, "WPEB_SURFACE_LAYER", l.surface_layer.empty() ? "page" : l.surface_layer);
         // The full socket path, so the web processes need not share our XDG_RUNTIME_DIR / WAYLAND_DISPLAY.
         if (!l.wayland_socket.empty()) set_env(env, "WPEB_WAYLAND_SOCKET", l.wayland_socket);
+        if (l.screen_width > 0 && l.screen_height > 0)
+            set_env(env, "WPEB_SCREEN_SIZE", std::to_string(l.screen_width) + "x" + std::to_string(l.screen_height));
         if (!l.media_socket.empty()) {
             // Video goes to LG's decoder on the video plane under the page (engine/gst/wpebmediasink.c): WebKit's
             // generic "rialto" quirks find our sinks by name and punch a hole in the page where the video is.

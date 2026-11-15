@@ -35,6 +35,7 @@
 // No frame callback within this time (surface detached or hidden by the compositor): let WebKit go on anyway,
 // so its compositor thread never stalls for good.
 #define FRAME_TIMEOUT_MS 250
+#define DETACH_WAIT_MS 100
 
 static void copy_name(char *dst, const char *src)
 {
@@ -521,6 +522,9 @@ struct target {
     struct wl_callback *frame;
     uint32_t width, height;
     bool attached, waiting_first_frame, failed, swap_interval_set;
+    bool detach_pending; // asked to detach while WebKit could still draw: done after its next frame or a timeout
+    GSource *detach_source;
+    bool frame_owed; // detached with a window role: WebKit's frame completion held back until attached again
     char group_name[WPEB_WEBOS_NAME_MAX], layer_name[WPEB_WEBOS_NAME_MAX];
 };
 
@@ -574,6 +578,16 @@ static void target_fail(struct target *t, int32_t code)
     target_status(t, code);
 }
 
+// A detached page that has a window role must not draw: a buffer committed to it maps it again as a window of its
+// own (appId "<app>.page") above the browser, and webOS then minimises the browser (TV, 2026-11-15: after a tab
+// switch the old page went on drawing ~12 frames, paced by frame_timeout). Hidden views still render (resizes,
+// pages still loading), so pacing stops for them: WebKit waits for the frame completion, which is handed over when
+// the page is attached again (target_attach_locked).
+static bool target_hold_frames(const struct target *t)
+{
+    return !t->attached && t->shell_surface != NULL;
+}
+
 static void target_frame_complete(struct target *t)
 {
     if (t->timeout_source) {
@@ -585,6 +599,13 @@ static void target_frame_complete(struct target *t)
         wl_callback_destroy(t->frame);
         t->frame = NULL;
     }
+    if (target_hold_frames(t)) {
+        if (!t->frame_owed)
+            LOG("page detached: its frames wait until it is shown again");
+        t->frame_owed = true;
+        return;
+    }
+    t->frame_owed = false;
     wpe_renderer_backend_egl_target_dispatch_frame_complete(t->wpe);
 }
 
@@ -744,6 +765,41 @@ static void target_attach_locked(struct target *t, const char *group, const char
     pthread_mutex_lock(&g_video_lock);
     g_shown_target = t;
     pthread_mutex_unlock(&g_video_lock);
+    if (t->frame_owed) {
+        t->frame_owed = false;
+        wpe_renderer_backend_egl_target_dispatch_frame_complete(t->wpe);
+    }
+}
+
+static void target_cancel_detach(struct target *t)
+{
+    t->detach_pending = false;
+    if (t->detach_source) {
+        g_source_destroy(t->detach_source);
+        g_source_unref(t->detach_source);
+        t->detach_source = NULL;
+    }
+}
+
+static void target_finish_detach(struct target *t)
+{
+    target_cancel_detach(t);
+    if (!t->attached)
+        return;
+    target_detach(t);
+    // The detach must reach the compositor before the view lets another process attach.
+    if (t->renderer->display)
+        wl_display_flush(t->renderer->display);
+    target_status(t, WPEB_WEBOS_STATUS_DETACHED);
+}
+
+static gboolean detach_timeout(gpointer data)
+{
+    struct target *t = data;
+    g_source_unref(t->detach_source);
+    t->detach_source = NULL;
+    target_finish_detach(t);
+    return G_SOURCE_REMOVE;
 }
 
 static gboolean target_on_channel(gint fd, GIOCondition condition, gpointer data)
@@ -754,14 +810,26 @@ static gboolean target_on_channel(gint fd, GIOCondition condition, gpointer data
         ssize_t n;
         while ((n = recv(fd, &msg, sizeof(msg), MSG_DONTWAIT)) == (ssize_t)sizeof(msg)) {
             msg.group[WPEB_WEBOS_NAME_MAX - 1] = msg.layer[WPEB_WEBOS_NAME_MAX - 1] = '\0';
-            if (msg.type == WPEB_WEBOS_ATTACH)
-                target_attach(t, msg.group, msg.layer);
-            else if (msg.type == WPEB_WEBOS_DETACH && t->attached) {
-                target_detach(t);
-                // The detach must reach the compositor before the view lets another process attach.
-                if (t->renderer->display)
-                    wl_display_flush(t->renderer->display);
-                target_status(t, WPEB_WEBOS_STATUS_DETACHED);
+            if (msg.type == WPEB_WEBOS_ATTACH) {
+                if (t->detach_pending && t->attached) {
+                    target_cancel_detach(t);  // shown again before it went: still attached
+                    target_status(t, WPEB_WEBOS_STATUS_ATTACHED);
+                } else {
+                    target_attach(t, msg.group, msg.layer);
+                }
+            } else if (msg.type == WPEB_WEBOS_DETACH && t->attached && !t->detach_pending) {
+                // Detach only while WebKit waits for a frame completion (held from then on, see
+                // target_hold_frames): a frame drawn after the detach would map the surface as a window of its own.
+                // Otherwise WebKit may be about to draw: detach after that frame (target_frame_rendered), or after
+                // DETACH_WAIT_MS if it draws none.
+                if (t->timeout_source || t->frame) {
+                    target_finish_detach(t);
+                } else {
+                    t->detach_pending = true;
+                    t->detach_source = g_timeout_source_new(DETACH_WAIT_MS);
+                    g_source_set_callback(t->detach_source, detach_timeout, t, NULL);
+                    g_source_attach(t->detach_source, t->context);
+                }
             }
         }
         if (t->renderer->display)
@@ -865,6 +933,7 @@ static void target_deinitialize(void *data)
 static void target_destroy(void *data)
 {
     struct target *t = data;
+    target_cancel_detach(t);
     target_deinitialize(t);
     if (t->fd >= 0)
         close(t->fd);
@@ -872,6 +941,26 @@ static void target_destroy(void *data)
 }
 
 // Called on WebKit's compositing thread, whose GMainContext is the thread default there.
+// The page sits below the browser's toolbar, but webOS places the page surface at the screen's top-left and offers no
+// way to move it. So the surface keeps the screen's shape (WPEB_SCREEN_SIZE "WxH" from the UI; the page always spans
+// the screen's width) while WebKit is told the page's own, shorter size: WebKit sets glViewport(0, 0, page size),
+// whose origin is the buffer's bottom-left, so the page is drawn into the bottom of the surface and the strip above it
+// (under the toolbar) is left cleared. Without the variable the surface is the page's size, as before.
+static int surface_height(uint32_t width, uint32_t height)
+{
+    static int sw = -1, sh = 0;
+    if (sw < 0) {
+        const char *v = getenv("WPEB_SCREEN_SIZE");
+        sw = 0;
+        if (!v || sscanf(v, "%dx%d", &sw, &sh) != 2 || sw <= 0 || sh <= 0 || sw > 16384 || sh > 16384)
+            sw = 0, sh = 0;
+    }
+    if (sw == 0)
+        return (int)height;
+    const int full = (int)(((long long)width * sh + sw / 2) / sw);
+    return (int)height > full ? (int)height : full;
+}
+
 static void target_initialize(void *data, void *backend_data, uint32_t width, uint32_t height)
 {
     struct target *t = data;
@@ -926,7 +1015,7 @@ static void target_initialize(void *data, void *backend_data, uint32_t width, ui
         wl_keyboard_add_listener(t->keyboard, &keyboard_listener, t);
     }
     // No window role yet: target_attach adds it (see target_add_role).
-    t->window = wl_egl_window_create(t->surface, (int)width, (int)height);
+    t->window = wl_egl_window_create(t->surface, (int)width, surface_height(width, height));
 
     WaylandSource *s = (WaylandSource *)g_source_new(&wl_source_funcs, sizeof(WaylandSource));
     s->display = r->display;
@@ -953,7 +1042,7 @@ static void target_resize(void *data, uint32_t width, uint32_t height)
     t->width = width;
     t->height = height;
     if (t->window)
-        wl_egl_window_resize(t->window, (int)width, (int)height, 0, 0);
+        wl_egl_window_resize(t->window, (int)width, surface_height(width, height), 0, 0);
 }
 
 static void target_frame_will_render(void *data)
@@ -980,8 +1069,16 @@ static void target_frame_will_render(void *data)
 static void target_frame_rendered(void *data)
 {
     struct target *t = data;
+    if (target_hold_frames(t) && t->surface) {
+        // A frame that was already being drawn when the page was detached: unmap again in the same flush.
+        LOG("frame drawn while detached: unmapped again");
+        wl_surface_attach(t->surface, NULL, 0, 0);
+        wl_surface_commit(t->surface);
+    }
     if (t->renderer && t->renderer->display)
         wl_display_flush(t->renderer->display);
+    if (t->detach_pending)
+        target_finish_detach(t);  // this frame went to the attached surface; WebKit now waits for its completion
     if (!t->timeout_source) {
         // Paces a detached page too; cancelled by frame_done when the compositor answers first.
         t->timeout_source = g_timeout_source_new(t->frame ? FRAME_TIMEOUT_MS : 16);
@@ -1099,7 +1196,8 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
     return ok;
 }
 
-// Source: the coded picture; destination: page-surface pixels (the page surface covers the screen).
+// Source: the coded picture; destination: page-surface pixels (the page surface covers the screen; the page itself
+// is its bottom part, see surface_height, so page coordinates move down by the strip above it).
 __attribute__((visibility("default"))) void wpeb_webos_video_place(int sw, int sh, int x, int y, int w, int h)
 {
     pthread_mutex_lock(&g_video_lock);
@@ -1108,7 +1206,7 @@ __attribute__((visibility("default"))) void wpeb_webos_video_place(int sw, int s
         struct wl_region *src = wl_compositor_create_region(t->renderer->compositor);
         wl_region_add(src, 0, 0, sw > 0 ? sw : w, sh > 0 ? sh : h);
         struct wl_region *dst = wl_compositor_create_region(t->renderer->compositor);
-        wl_region_add(dst, x, y, w, h);
+        wl_region_add(dst, x, y + (surface_height(t->width, t->height) - (int)t->height), w, h);
         wl_webos_exported_set_exported_window(t->video, src, dst);
         wl_region_destroy(src);
         wl_region_destroy(dst);

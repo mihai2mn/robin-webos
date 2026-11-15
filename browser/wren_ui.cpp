@@ -676,14 +676,30 @@ void ChromePanel::set_progress(bool loading, float value) {
     target_ = std::max(value, 0.05f);
 }
 
-void ChromePanel::draw(Ui &ui) { draw_glass(ui, frame(), 45, Glass::Dark); }
+void ChromePanel::set_docked(bool docked) {
+    if (docked == docked_) return;
+    docked_ = docked;
+    set_padding(docked ? wnk::ui::Insets{60, 8, 60, 8} : wnk::ui::Insets{15, 15, 15, 15});
+    set_gap(docked ? 8 : 12);
+}
+
+void ChromePanel::draw(Ui &ui) {
+    if (!docked_) {
+        draw_glass(ui, frame(), 45, Glass::Dark);
+        return;
+    }
+    auto &r = ui.renderer();
+    const Rect f = frame();
+    r.fill_rect(f, ui.fade(Color::hex(0x0E1117FF)));
+    r.fill_rect({f.x, f.bottom() - 1.5f, f.w, 1.5f}, ui.fade(kWhite.with_alpha(0.10f)));
+}
 
 void ChromePanel::draw_over(Ui &ui) {
     if (!loading_) return;
     auto &r = ui.renderer();
     const Rect f = frame();
     shown_ += (target_ - shown_) * 0.25f;
-    const Rect track{f.x + 54, f.bottom() - 4, f.w - 108, 3};
+    const Rect track = docked_ ? Rect{f.x, f.bottom() - 3, f.w, 3} : Rect{f.x + 54, f.bottom() - 4, f.w - 108, 3};
     r.fill_rect(track, ui.fade(kWhite.with_alpha(0.10f)), 1.5f);
     const float w = track.w * std::clamp(shown_, 0.0f, 1.0f);
     r.fill_rect({track.x, track.y - 3, w, 9}, ui.fade(kAccent.with_alpha(0.25f)), 4.5f);

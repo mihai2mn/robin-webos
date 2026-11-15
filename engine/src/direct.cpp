@@ -161,6 +161,16 @@ void set_scale(View *view, double scale)
     wpe_view_backend_dispatch_set_device_scale_factor(view->backend, static_cast<float>(scale));
 }
 
+bool shown(const View *view)
+{
+    return view->shown;
+}
+
+bool is_detached_status(int32_t status)
+{
+    return status == WPEB_WEBOS_STATUS_DETACHED;
+}
+
 void set_shown(View *view, bool shown)
 {
     if (view->shown == shown)

@@ -58,6 +58,9 @@ struct EngineLaunch {
     // Direct presentation (needs gpu): the web processes draw into their own surfaces in this surface group
     // (DirectOwner) instead of sending frames. Empty = SHM frames.
     std::string surface_group, surface_layer, wayland_socket;
+    // The screen's size in UI pixels: the page surface keeps its shape while the page lies below the toolbar
+    // (WPEB_SCREEN_SIZE, engine/webos-backend/wpebackend-webos.c surface_height).
+    uint32_t screen_width = 0, screen_height = 0;
     // Hardware video (browser/media_server.hpp): the UI's decoder service, empty when there is none.
     std::string media_socket;
     // The engine's own glibc, when it has one: "auto" (only on TVs older than glibc 2.28), "bundled", "system"

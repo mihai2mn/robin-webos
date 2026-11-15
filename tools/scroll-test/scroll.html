@@ -1,0 +1,41 @@
+<!doctype html>
+<!-- Checks Wren's arrow-key scroll fallback (engine/src/main.cpp, kScrollScript) on a page that scrolls an inner box
+     instead of the document, with its navigation in a fixed header. Serve with tools/eme-test/minihttpd and open
+     http://127.0.0.1:8099/scroll.html; results go to the report file. Synthetic key events stand in for the remote:
+     WebKit gives them no default action, so only the fallback can move the box. -->
+<html><head><meta charset="utf-8"><title>Scroll test</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font: 28px sans-serif; background: #fff; color: #111; }
+  header { position: fixed; top: 0; left: 0; right: 0; height: 90px; background: #234; color: #fff; display: flex; gap: 40px; align-items: center; padding: 0 40px; }
+  header a { color: #fff; }
+  main { position: absolute; top: 90px; bottom: 0; left: 0; right: 0; overflow-y: auto; padding: 0 40px; }
+  p { height: 300px; margin: 0; border-bottom: 1px solid #ccc; }
+</style></head>
+<body>
+<header><a href="#a">Home</a><a href="#b">Series</a><a href="#c">Search</a><span id="st">running</span></header>
+<main id="m"></main>
+<script>
+function log(m){ try{ new Image().src='/log?'+encodeURIComponent(m); }catch(e){} }
+var m = document.getElementById('m');
+for (var i = 0; i < 40; i++) { var p = document.createElement('p'); p.textContent = 'Row ' + i; m.appendChild(p); }
+function key(k){ document.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true})); }
+function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+(async function(){
+  await wait(1500);
+  log('start scrollTop=' + m.scrollTop + ' max=' + (m.scrollHeight - m.clientHeight));
+  var ok = true;
+  for (var i = 0; i < 3; i++) { key('ArrowDown'); await wait(700); log('down ' + (i+1) + ' scrollTop=' + m.scrollTop); }
+  var down = m.scrollTop;
+  if (!(down > 300)) { ok = false; log('FAIL: Down did not scroll the inner box'); }
+  key('ArrowUp'); await wait(700);
+  log('up scrollTop=' + m.scrollTop);
+  if (!(m.scrollTop < down)) { ok = false; log('FAIL: Up did not scroll the inner box back'); }
+  m.scrollTop = 0; await wait(300);
+  key('ArrowUp'); await wait(700);
+  log('up at top scrollTop=' + m.scrollTop + ' (the toolbar should now have focus)');
+  document.getElementById('st').textContent = ok ? 'PASS' : 'FAIL';
+  log(ok ? 'PASS' : 'FAIL');
+  log('ended');
+})();
+</script>
+</body></html>

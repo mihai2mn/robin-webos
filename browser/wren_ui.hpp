@@ -143,6 +143,9 @@ class ChromePanel : public wnk::ui::Column {
  public:
     ChromePanel();
     void set_progress(bool loading, float value);
+    // Docked above the page: a flat bar across the screen (no floating glass, no shadow over the page), tighter.
+    void set_docked(bool docked);
+    bool docked() const { return docked_; }
 
  protected:
     void draw(wnk::ui::Ui &ui) override;
@@ -150,6 +153,7 @@ class ChromePanel : public wnk::ui::Column {
 
  private:
     bool loading_ = false;
+    bool docked_ = false;
     float target_ = 0, shown_ = 0;
 };
 

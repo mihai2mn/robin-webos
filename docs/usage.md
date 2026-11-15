@@ -6,15 +6,19 @@ Wren works with the arrows, OK and Back of any LG remote; colour keys are option
 
 | Key | Does |
 |---|---|
-| Arrows | move between links and controls on the page (WebKit spatial navigation) |
+| Arrows | move between links and controls on the page (WebKit spatial navigation); with nothing to move to, ▲ ▼ scroll the page |
 | ▲ at the top of a page | the glass panel: the tab row above the toolbar; ◀ ▶ and OK switch tabs |
 | **Hold OK** | quick actions (new tab, bookmark, tabs, reload, close tab, home, settings, toolbar) and page zoom |
 | CH + / − | previous / next tab |
-| Back | back in the page's history, or to the panel |
+| Back | back in the page's history, or to the panel; in the panel, back to the page |
 | Menu | side panel: bookmarks, history, zoom, settings, exit |
 | Red / Green / Yellow / Blue | all tabs / side panel / quick actions / new tab |
 
 The Magic Remote pointer works as a mouse and its wheel scrolls.
+
+The panel stays at the top and the page starts below it, as in a desktop browser. Full-screen video and TV apps (see
+below) take the whole screen; there the panel comes back with Hold OK → **Toolbar**, or by resting the pointer at the
+top edge.
 
 **TV mode:** on TV web apps (a `tv.` host or a `/tv` path, such as YouTube's TV app) Wren hides its panel and
 progress line so the page fills the screen. Hold OK → **Toolbar** brings the tabs back. youtube.com links open

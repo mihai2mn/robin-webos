@@ -68,7 +68,8 @@ constexpr const char *kVersion = "0.3.2";
 // GPU: CPU rendering at about 1280 px wide keeps scrolling usable, and CSS px at that size read well from a sofa.
 constexpr float kRenderScale = 2.0f / 3.0f;
 constexpr double kChromeSlideMs = 160;     // toolbar slide in/out
-constexpr double kChromePeekMs = 2500;   // after a load or Back the panel stays over the page this long
+constexpr double kChromeDwellMs = 350;  // the pointer rests this long at the top edge before the toolbar comes
+constexpr float kChromeLeaveMargin = 24.0f;  // logical px below the toolbar that send it away again
 constexpr float kChromeRevealEdge = 6.0f;  // logical px at the top of the screen that bring the toolbar back
 constexpr int kMaxRestarts = 3;
 constexpr double kHoldOkMs = 550;  // OK held this long opens quick actions
@@ -160,11 +161,14 @@ class BrowserScreen : public wnk::ui::Screen {
     App &app_;
     browser::wren::TabRow *tabrow_ = nullptr;
     browser::IconButton *back_ = nullptr, *forward_ = nullptr, *reload_ = nullptr, *star_ = nullptr, *menu_ = nullptr;
+    browser::IconButton *tabs_ = nullptr;  // all tabs, in the one-row docked toolbar (the tab row is hidden there)
+    wnk::ui::View *panel_line_ = nullptr;  // the rule between the tab row and the toolbar
     browser::Omnibox *omnibox_ = nullptr;
     browser::wren::ChromePanel *panel_ = nullptr;
     wnk::ui::Column *chrome_ = nullptr;             // the panel (and messages): drawn over the page
     wnk::ui::Row *toolbar_ = nullptr;               // the navigation row
     browser::ProgressLine *thin_progress_ = nullptr;  // load progress while the chrome is hidden
+    wnk::ui::View *dock_band_ = nullptr;  // solid band behind the docked toolbar, as tall as the page's top inset
     browser::PageView *page_ = nullptr;
     browser::wren::HomePage *home_ = nullptr;
     browser::wren::HintPill *hints_ = nullptr;      // over a page while the panel has focus
@@ -400,6 +404,10 @@ class App : public wnk::app::Delegate {
     // Up at the page's top edge (and Back with no history): the panel, on the shown tab's chip.
     void focus_tabs(wnk::ui::Ui &ui) {
         screen_->chrome_->set_visible(true);
+        if (docked()) {
+            ui.focus(&omnibox_field());  // the docked toolbar is one row, without the tab row
+            return;
+        }
         if (auto *chip = screen_->tabrow_->chip(active_))
             ui.focus(chip);
         else
@@ -420,26 +428,26 @@ class App : public wnk::app::Delegate {
         for (TabId id : ids) close_tab(id);
     }
 
-    // The chrome is shown unless the page itself has focus (Red, or Back with no history, moves focus to it; so
-    // does the pointer at the top edge). While the page has focus the chrome still peeks over it when the page is
-    // scrolled to its top and for kChromePeekMs after Back (focus stays on the page). It slides up out of view in
-    // kChromeSlideMs and is then hidden, so its buttons can't take focus.
-    bool chrome_wanted(wnk::ui::Ui &ui) {
+    // A page lies below the toolbar, as in desktop browsers: the toolbar stays, docked, and the page is laid out under
+    // it (BrowserScreen::content_'s top inset). Only full-screen pages (video) and sites' TV apps (YouTube's TV app)
+    // take the whole screen; there the toolbar is shown when focus moves to it (Hold OK → Toolbar, Back with no
+    // history) or the pointer rests at the top edge, and slides away again.
+    bool docked() {
         const Tab *t = tab(active_);
-        if (screen_->overlay_open()) return false;  // overlays cover the page; the panel waits behind
-        if (t != nullptr && t->url.empty()) return false;  // Home has its own header
-        const bool page_mode = ui.focused() == screen_->page_ && t != nullptr && t->live && !t->url.empty() &&
-                               !screen_->message_->visible() && ui.top_dialog() == nullptr && nav_->depth() == 1;
-        if (!page_mode) return true;
-        if (t->fullscreen || t->tv_mode) return false;
-        // With a hardware video the page goes above the UI while the chrome is hidden (DirectOwner::set_page_z), so
-        // being at the top no longer keeps the chrome: it would hide the page's video controls.
-        // It peeks for kChromePeekMs when a page loads and after Back; it no longer stays while the page is at its
-        // top: web apps that never scroll (YouTube's TV app) would keep it over their own header and video.
-        return ui.now_ms() < peek_until_ms_;
+        return t != nullptr && !t->url.empty() && !t->fullscreen && !t->tv_mode;
     }
 
-    void peek_chrome() { peek_until_ms_ = ctx_->ui().now_ms() + kChromePeekMs; }
+    bool chrome_wanted(wnk::ui::Ui &ui) {
+        const Tab *t = tab(active_);
+        if (t != nullptr && t->url.empty()) return false;  // Home has its own header
+        if (docked()) return true;
+        if (screen_->overlay_open()) return false;  // overlays cover the page; the panel waits behind
+        const bool page_mode = ui.focused() == screen_->page_ && t != nullptr && t->live &&
+                               !screen_->message_->visible() && ui.top_dialog() == nullptr && nav_->depth() == 1;
+        if (!page_mode) return true;
+        if (t->fullscreen) return false;
+        return pointer_chrome_;
+    }
 
     void update_chrome(wnk::ui::Ui &ui) {
         auto *chrome = screen_->chrome_;
@@ -449,20 +457,39 @@ class App : public wnk::app::Delegate {
         const float h = std::max(0.0f, bottom - chrome->frame().y);
         chrome_h_ = h;
         const bool want = chrome_wanted(ui);
+        const bool dock = docked();
         const double now = ui.now_ms();
         const double dt = last_chrome_ms_ > 0 ? now - last_chrome_ms_ : 0;
         last_chrome_ms_ = now;
         const float step = static_cast<float>(dt / kChromeSlideMs);
-        chrome_shown_ = want ? std::min(1.0f, chrome_shown_ + step) : std::max(0.0f, chrome_shown_ - step);
+        // Docked it doesn't slide: the page below would be resized on every step.
+        if (dock) chrome_shown_ = 1.0f;
+        else chrome_shown_ = want ? std::min(1.0f, chrome_shown_ + step) : std::max(0.0f, chrome_shown_ - step);
         if (want && !chrome->visible()) chrome->set_visible(true);
         chrome->set_translation({0, -(1.0f - chrome_shown_) * h});
         if (!want && chrome_shown_ <= 0.0f && chrome->visible()) chrome->set_visible(false);
+        // The page starts below the toolbar's strip (a solid band behind the glass panel: in direct presentation the
+        // page surface is blank there).
+        if (dock != screen_->panel_->docked()) {
+            screen_->panel_->set_docked(dock);
+            // Docked, the toolbar is a single row for the page's sake: tabs are behind its Tabs button, CH ± and Red.
+            screen_->tabrow_->set_visible(!dock);
+            screen_->panel_line_->set_visible(!dock);
+            screen_->tabs_->set_visible(dock);
+            refresh_chrome();
+            chrome->set_padding(dock ? wnk::ui::Insets{0, 0, 0, 0} : wnk::ui::Insets{60, 27, 60, 0});
+        }
+        const float inset = dock && h > 0 ? std::round(h) : 0.0f;
+        if (inset != dock_inset_) {
+            dock_inset_ = inset;
+            screen_->content_->set_padding({0, inset, 0, 0});
+            screen_->dock_band_->set_height(wnk::ui::Dim::fixed(std::max(inset, 1.0f)));
+            screen_->dock_band_->set_visible(inset > 0);
+        }
         const Tab *t = tab(active_);
         screen_->thin_progress_->set_visible(!chrome->visible() && t != nullptr && !t->url.empty() && !t->tv_mode);
-        // The hint pill while the panel has focus (not while it only peeks over the focused page).
-        const bool hints = chrome->visible() && chrome_shown_ >= 1.0f && ui.focused() != nullptr &&
-                           screen_->chrome_->is_ancestor_of(ui.focused());
-        if (hints != screen_->hints_->visible()) screen_->hints_->set_visible(hints);
+        // No hint pill for the toolbar (user request, 2026-11-15): it covered the page while the toolbar had focus.
+        if (screen_->hints_->visible()) screen_->hints_->set_visible(false);
         screen_->home_->show_hints(!screen_->overlay_open());
     }
 
@@ -604,6 +631,8 @@ class App : public wnk::app::Delegate {
             ok_long_ = true;
             show_quick_actions();
         }
+        if (pointer_edge_since_ > 0 && !pointer_chrome_ && ctx.ui().now_ms() - pointer_edge_since_ >= kChromeDwellMs)
+            pointer_chrome_ = true;
         update_chrome(ctx.ui());
         if (restart_pending_ && ctx_->ui().now_ms() >= restart_at_ms_) {
             restart_pending_ = false;
@@ -685,6 +714,17 @@ class App : public wnk::app::Delegate {
             focus_content();
             return true;
         }
+        // Back in the toolbar or tab row hides it: focus goes back to the page (not while typing an address).
+        if (action == A::Back && browsing && ui.focused() != nullptr && screen_->chrome_->is_ancestor_of(ui.focused())) {
+            const Tab *at = tab(active_);
+            if (at != nullptr && !at->url.empty()) {
+                if (e.down && !e.repeat) {
+                    pointer_chrome_ = false;
+                    focus_content();
+                }
+                return true;
+            }
+        }
         const Tab *t = tab(active_);
         if (ui.focused() != screen_->page_ || screen_->page_->editing() || t == nullptr || !t->live || !engine_.running())
             return false;
@@ -695,7 +735,6 @@ class App : public wnk::app::Delegate {
                     engine_.exit_fullscreen(t->id);  // as Escape on a desktop browser
                 } else if (t->can_back) {
                     engine_.go_back(t->id);
-                    peek_chrome();  // show where we are (the address) while the page stays focused
                 } else
                     focus_tabs(ui);
             }
@@ -763,6 +802,8 @@ class App : public wnk::app::Delegate {
         }
         if (p.type == T::Hidden || p.type == T::Left) {
             leave_page();
+            pointer_chrome_ = false;
+            pointer_edge_since_ = 0;
             return false;
         }
         if (p.type == T::Wheel) {
@@ -773,9 +814,19 @@ class App : public wnk::app::Delegate {
         if (p.type == T::Shown) return false;
         const wnk::Point l = ctx.renderer().mapping().to_logical({p.x, p.y});
         int32_t x = 0, y = 0;
-        if (!screen_->chrome_->visible() && l.y < kChromeRevealEdge && p.type == T::Move) {
+        // The pointer resting at the top edge brings the toolbar (on_frame, after kChromeDwellMs: passing through on
+        // the way to the page's own header doesn't), and moving back down onto the page sends it away. Focus stays on
+        // the page; clicking a toolbar control moves it there.
+        if (p.type == T::Move) {
+            if (l.y < kChromeRevealEdge) {
+                if (pointer_edge_since_ == 0) pointer_edge_since_ = ctx.ui().now_ms();
+            } else {
+                pointer_edge_since_ = 0;
+                if (pointer_chrome_ && l.y > chrome_h_ + kChromeLeaveMargin) pointer_chrome_ = false;
+            }
+        }
+        if (!screen_->chrome_->visible() && l.y < kChromeRevealEdge) {
             leave_page();
-            focus_omnibox(ctx.ui());  // pointer at the top edge: bring the chrome back
             return true;
         }
         if (ctx.ui().top_dialog() != nullptr || over_chrome(l) || !screen_->page_->to_page(l, x, y)) {
@@ -1023,11 +1074,14 @@ class App : public wnk::app::Delegate {
         screen_->star_->accessible_label = marked ? "Remove bookmark" : "Bookmark this page";
         screen_->star_->set_active(page);
         if (ui.focused() != &omnibox_field()) screen_->omnibox_->show_url(t != nullptr ? t->url : std::string());
-        if (browser::wren::colour_keys_seen())
-            screen_->hints_->set_hints({{"◀ ▶", {}, "Switch tab"}, {"OK", {}, "Open"}, {"▼", {}, "Page"},
+        if (docked())
+            screen_->hints_->set_hints({{"◀ ▶", {}, "Move"}, {"OK", {}, "Open"}, {"CH ±", {}, "Tabs"},
+                                        {"▼ BACK", {}, "Page"}});
+        else if (browser::wren::colour_keys_seen())
+            screen_->hints_->set_hints({{"◀ ▶", {}, "Switch tab"}, {"OK", {}, "Open"}, {"▼ BACK", {}, "Page"},
                                         {"", browser::wren::kYellow, "Zoom"}});
         else
-            screen_->hints_->set_hints({{"◀ ▶", {}, "Switch tab"}, {"OK", {}, "Open"}, {"▼", {}, "Page"},
+            screen_->hints_->set_hints({{"◀ ▶", {}, "Switch tab"}, {"OK", {}, "Open"}, {"▼ BACK", {}, "Page"},
                                         {"Hold OK", {}, "More"}});
         rebuild_overview();
         save_session();  // cheap: written at most every 2 s by Profile::flush
@@ -1066,7 +1120,6 @@ class App : public wnk::app::Delegate {
             if (t == nullptr) return;
             if (e == WPE_LOAD_FINISHED) profile_.add_visit(t->title, t->url);
             const bool loading = e == WPE_LOAD_STARTED || e == WPE_LOAD_COMMITTED;
-            if (id == active_ && !t->tv_mode && (e == WPE_LOAD_COMMITTED || e == WPE_LOAD_FINISHED)) peek_chrome();
             if (loading != t->loading) {
                 t->loading = loading;
                 if (loading) t->progress = 0;
@@ -1233,6 +1286,9 @@ class App : public wnk::app::Delegate {
         l.width = static_cast<uint32_t>((r.w > 0 ? r.w : 1920) * kRenderScale);
         l.height = static_cast<uint32_t>((r.h > 0 ? r.h : 880) * kRenderScale);
         screen_->page_->set_page_size(l.width, l.height);
+        const wnk::Rect sr = screen_->screen_rect();
+        l.screen_width = static_cast<uint32_t>(sr.w > 0 ? sr.w : 1920);
+        l.screen_height = static_cast<uint32_t>(sr.h > 0 ? sr.h : 1080);
         std::string error;
         if (!engine_.start(l, error)) {
             WNK_LOGE(kCat, "engine: %s", error.c_str());
@@ -1297,7 +1353,9 @@ class App : public wnk::app::Delegate {
     float chrome_shown_ = 1.0f;  // 0 hidden .. 1 shown (slide position)
     float chrome_h_ = 0;         // height of the chrome's rows
     double last_chrome_ms_ = 0;
-    double peek_until_ms_ = 0;
+    bool pointer_chrome_ = false;    // the pointer brought the toolbar (at the top edge); it goes when the pointer leaves
+    double pointer_edge_since_ = 0;  // the pointer reached the top edge then (0: not there)
+    float dock_inset_ = -1;          // the page's top inset below the docked toolbar (logical px)
     browser::DirectOwner direct_;
     browser::MediaServer media_;
     bool raise_page_ = false;
@@ -1338,6 +1396,11 @@ BrowserScreen::BrowserScreen(App &app, browser::EngineClient &engine) : Screen("
         [&app](wnk::ui::Ui &) { app.show_menu(); });
     home_->set_width(wnk::ui::Dim::fill()).set_height(wnk::ui::Dim::fill());
 
+    dock_band_ = &stack.add<wnk::ui::View>();
+    dock_band_->set_width(wnk::ui::Dim::fill()).set_height(wnk::ui::Dim::fixed(1));
+    dock_band_->set_background(wnk::render::Color::hex(0x0E1117FF));
+    dock_band_->set_visible(false);
+
     thin_progress_ = &stack.add<browser::ProgressLine>();
     thin_progress_->set_width(wnk::ui::Dim::fill());
     thin_progress_->set_visible(false);
@@ -1349,6 +1412,7 @@ BrowserScreen::BrowserScreen(App &app, browser::EngineClient &engine) : Screen("
     panel_ = &col.add<browser::wren::ChromePanel>();
     tabrow_ = &panel_->add<browser::wren::TabRow>(tabs);
     auto &line = panel_->add<wnk::ui::View>();
+    panel_line_ = &line;
     line.set_width(wnk::ui::Dim::fill()).set_height(wnk::ui::Dim::fixed(1.5f));
     line.set_padding({12, 0, 12, 0});
     line.set_background(wnk::render::kWhite.with_alpha(0.08f));
@@ -1362,6 +1426,8 @@ BrowserScreen::BrowserScreen(App &app, browser::EngineClient &engine) : Screen("
                                           "Search or type a URL", 72);
     omnibox_->set_width(wnk::ui::Dim::fill());
     omnibox_->set_align(wnk::ui::Align::Start, wnk::ui::Align::Center);
+    tabs_ = &bar.add<browser::IconButton>("tabs", "All tabs", [&app](wnk::ui::Ui &) { app.show_tab_overview(); }, 72);
+    tabs_->set_visible(false);
     star_ = &bar.add<browser::IconButton>("star", "Bookmark this page", [&app](wnk::ui::Ui &) { app.toggle_bookmark(); }, 72);
     menu_ = &bar.add<browser::IconButton>("menu", "Menu", [&app](wnk::ui::Ui &) { app.show_menu(); }, 72);
 

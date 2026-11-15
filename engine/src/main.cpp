@@ -64,6 +64,7 @@ struct Tab {
     WPEView *view = nullptr;                  // SHM mode
     direct::View *direct = nullptr;           // direct mode (owned by the web view's backend)
     WebKitInputMethodContext *ime = nullptr;  // direct mode (owned by the web view)
+    bool resize_pending = false;              // direct mode: resized while hidden, applied when shown
 };
 
 struct Engine {
@@ -75,6 +76,10 @@ struct Engine {
     WebKitSettings *settings = nullptr;
     std::map<uint32_t, Tab> tabs;
     uint32_t active = 0;
+    // Direct mode tab switch: the new tab is shown once the old one's surface has left the layer (or after
+    // kShowAfterDetachMs), so two pages never hold it at once and the old one is detached by its own thread.
+    uint32_t show_pending = 0, detach_awaited = 0;
+    guint show_timer = 0;
     uint32_t width = 1280, height = 720;
     double zoom = 1.0;
     double scale = 1.0;      // device scale: buffers are CSS size x scale (sharp text on a 1080p screen)
@@ -396,12 +401,29 @@ void resize_view(Tab &tab)
         wpe_view_resized(view, static_cast<int>(g.width), static_cast<int>(g.height));
 }
 
+// In direct mode only the shown tab is resized now; hidden tabs get the size when shown (tab_activate). A hidden
+// page resized draws a frame into its detached, unmapped surface, which maps it again as a window of its own above
+// the browser, and webOS then minimises the browser (TV, 2026-11-15: new tab, Home page, then a page in it; the
+// docked toolbar changes the page size between the two).
+void resize_shown();
+
 void resize(uint32_t width, uint32_t height)
 {
     g.width = std::clamp<uint32_t>(width, 64, 3840);
     g.height = std::clamp<uint32_t>(height, 64, 2160);
-    for (auto &[id, tab] : g.tabs)
+    resize_shown();
+}
+
+void resize_shown()
+{
+    for (auto &[id, tab] : g.tabs) {
+        if (tab.direct && id != g.active) {
+            tab.resize_pending = true;
+            continue;
+        }
+        tab.resize_pending = false;
         resize_view(tab);
+    }
 }
 
 // ---- WebKit signals (user_data = nothing; the tab is looked up from the view) ----------------------------
@@ -502,16 +524,42 @@ constexpr const char *kScrollScript = R"JS((function () {
     }
     addEventListener('pageshow', recheck);
     recheck();
-    // Up with nothing above: spatial navigation moved no focus, the page did not scroll and did not take the key
-    // (defaultPrevented: web apps with their own remote handling). Typing in a field never counts.
+    // The element that scrolls the content: the document, or (web apps, sites with a fixed layout) the largest
+    // element that scrolls vertically and covers most of the screen. Spatial navigation only scrolls the box that holds
+    // the focused link, so with nothing focusable on screen such a box never moves under the arrow keys.
+    function scroller() {
+        var doc = document.scrollingElement || document.documentElement;
+        if (doc && doc.scrollHeight > doc.clientHeight + 4) return doc;
+        var best = null, bestArea = innerWidth * innerHeight * 0.3;
+        var all = document.body ? document.body.getElementsByTagName('*') : [];
+        for (var i = 0; i < all.length && i < 5000; i++) {
+            var el = all[i];
+            if (el.scrollHeight <= el.clientHeight + 4 || el.clientHeight < innerHeight * 0.4) continue;
+            var oy = getComputedStyle(el).overflowY;
+            if (oy !== 'auto' && oy !== 'scroll' && oy !== 'overlay') continue;
+            var area = el.clientWidth * el.clientHeight;
+            if (area > bestArea) { best = el; bestArea = area; }
+        }
+        return best || doc;
+    }
+    // Up / Down that changed nothing: spatial navigation moved no focus, nothing scrolled and the page did not take
+    // the key (defaultPrevented: web apps with their own remote handling). Down then scrolls the content box itself;
+    // Up does too unless the content is at its top, where it brings the toolbar (wpebEdge). Typing never counts.
     addEventListener('keydown', function (ev) {
-        if (ev.key !== 'ArrowUp' || ev.repeat) return;
+        if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
         var a = document.activeElement;
         if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return;
-        var y = window.scrollY;
+        var y = window.scrollY, s = scroller(), st = s ? s.scrollTop : 0;
         setTimeout(function () {
-            if (!ev.defaultPrevented && document.activeElement === a && window.scrollY === y && pageTop())
+            if (ev.defaultPrevented || document.activeElement !== a || window.scrollY !== y) return;
+            if (s && s.scrollTop !== st) return;
+            var up = ev.key === 'ArrowUp';
+            if (s && (up ? s.scrollTop > 2 : s.scrollTop + s.clientHeight < s.scrollHeight - 2)) {
+                var step = Math.round(Math.min(s.clientHeight, innerHeight) * (ev.repeat ? 0.15 : 0.4));
+                s.scrollBy({top: up ? -step : step, behavior: ev.repeat ? 'auto' : 'smooth'});
+            } else if (up && !ev.repeat && pageTop()) {
                 window.webkit.messageHandlers.wpebEdge.postMessage(1);
+            }
         }, 120);
     }, {capture: true});
     // The page's icon for the UI's tabs, tiles and bookmarks: apple-touch-icon (large, made for home screens), else
@@ -976,9 +1024,13 @@ void send_present(uint32_t tab, int32_t status, uint32_t width, uint32_t height)
     send_msg(WPE_ENGINE_PRESENT, tab, &p, sizeof(p));
 }
 
+void show_pending_tab();
+
 void on_direct_status(uint32_t tab, int32_t status, uint32_t width, uint32_t height)
 {
     send_present(tab, status, width, height);
+    if (g.show_pending && tab == g.detach_awaited && direct::is_detached_status(status))
+        show_pending_tab();
 }
 
 void on_direct_ime(uint32_t tab, bool focused, uint32_t purpose, int x, int y, int width, int height)
@@ -1101,20 +1153,62 @@ void tab_close(uint32_t id)
     log_msg("tab %u closed (%zu open)", id, g.tabs.size());
 }
 
+constexpr guint kShowAfterDetachMs = 300;
+
+void show_tab_now(Tab &tab)
+{
+    if (tab.resize_pending) {
+        tab.resize_pending = false;
+        resize_view(tab);
+    }
+    set_visible(tab, true);
+    set_focused(tab, true);
+}
+
+void show_pending_tab()
+{
+    if (g.show_timer) {
+        g_source_remove(g.show_timer);
+        g.show_timer = 0;
+    }
+    const uint32_t id = std::exchange(g.show_pending, 0u);
+    g.detach_awaited = 0;
+    if (id != 0 && id == g.active)
+        if (Tab *tab = active_tab())
+            show_tab_now(*tab);
+}
+
 void tab_activate(uint32_t id)
 {
     if (g.active == id)
         return;
+    uint32_t awaited = 0;
     if (Tab *old = active_tab()) {
+        if (old->direct && direct::shown(old->direct))
+            awaited = old->id;
         set_focused(*old, false);
         set_visible(*old, false);
     }
     g.active = id;
-    if (Tab *tab = active_tab()) {
-        set_visible(*tab, true);
-        set_focused(*tab, true);
-        send_history(id, tab->web_view);
+    Tab *tab = active_tab();
+    if (tab == nullptr)
+        return;
+    send_history(id, tab->web_view);
+    if (awaited != 0 && tab->direct) {
+        // The old page detaches on its own thread when it isn't drawing (engine/webos-backend: a frame drawn after
+        // its detach maps it as a window of its own and webOS minimises the browser, TV 2026-11-15).
+        if (g.show_timer)
+            g_source_remove(g.show_timer);
+        g.show_pending = id;
+        g.detach_awaited = awaited;
+        g.show_timer = g_timeout_add(kShowAfterDetachMs, [](gpointer) -> gboolean {
+            g.show_timer = 0;
+            show_pending_tab();
+            return G_SOURCE_REMOVE;
+        }, nullptr);
+        return;
     }
+    show_tab_now(*tab);
 }
 
 // ---- website data and zoom ---------------------------------------------------------------------------------
@@ -1161,8 +1255,7 @@ void set_zoom(uint32_t permille)
 void set_scale(uint32_t permille)
 {
     g.scale = std::clamp(permille, 1000u, 3000u) / 1000.0;
-    for (auto &[id, tab] : g.tabs)
-        resize_view(tab);
+    resize_shown();
     log_msg("device scale %.2f", g.scale);
 }
 
