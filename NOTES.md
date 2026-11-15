@@ -726,3 +726,17 @@
   DETACHED (≤300 ms), so no thread detaches another page mid-frame; (4) hidden tabs are resized only when shown.
   TV: Wikipedia → Google in a new tab, no minimise, tab 2 on screen. Dropped: set_state(minimized) on hidden page
   windows (webOS minimised the whole app and showed Home).
+
+## 2026-11-15 Back key in direct presentation (user report: Back did nothing in the menu and Settings)
+- Back never reached the app in direct mode (no SDL key event at all; the TV's /var/log/messages logged each
+  `KEY_PREVIOUS`), but did in SHM mode. Isolated on the TV: the UI window owning a surface group is enough (Home
+  page, no page window). Not the cause: page windows' app id, their `_WEBOS_ACCESS_POLICY_KEYS_BACK` property or
+  key mask, hint timing, re-sending the hint after the group exists.
+- Cause (webosose/luna-surfacemanager, WebOSSurfaceItem::processKeyEvent / acceptsKeyEvent): a window outside a
+  group gets keys by focus and the access-policy properties; inside a group (owner or member) a key goes only to a
+  window whose key mask has it, else to the next window in the group, else nowhere. The default mask 0xFFFFFFF8
+  leaves out Home, Back and Exit; SDL-webOS never sets a mask.
+- Fix in the kit (third_party/webos-native-app-kit, cmake/patches/sdl-webos-key-mask.patch, applied by
+  cmake/SdlWebOS.cmake): SDL-webOS adds the keys asked for with KEYS_BACK/EXIT/HOME to the window's key mask, at
+  window creation and when the hints change. TV (C1, webOS 6.5.3): Back on a page, in the menu and in Settings works
+  in direct mode. The kit change is uncommitted in the kit (the user's repo).
