@@ -696,3 +696,10 @@
   name it libcurl.so.5), but Wren doesn't use net.http: the "net.http" capability line is only the kit's report.
 - C1 (webOS 6.5.3), 2026-11-15: "player APIs: Feed yes", media service up; Widevine H.264 1502 frames / 2 dropped,
   Widevine VP9 1499 / 0 dropped on LG's pipeline; no Wayland errors. Released as v0.3.2-alpha.2.
+
+- 2026-11-15 **Patch 0009 (PR #3, SHM readback without `GL_EXT_read_format_bgra`) on the C1.** Rebuilt WebKit
+  (patch applied in the build tree, `wpewebkit-rebuild`), engine and ipk. On the C1 (Mali-G51): direct presentation
+  unchanged (Wikipedia, 50 fps); `{"wpebPresent":"shm"}` draws correctly: an SHM slot read from
+  `/proc/<ui pid>/map_files/…memfd:wpe-browser-frames` showed the page with correct colours (no R/B swap), so the
+  BGRA path still runs where the extension exists. Widevine H.264 played to the end (1395+ frames, 2 dropped,
+  keys=5). The RGBA fallback itself only runs on GPUs like the contributor's Mali-400 (webOS 3.9.2, 32LJ594U).
