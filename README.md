@@ -24,14 +24,28 @@ the arrows, OK and Back of any LG remote.
 
 **webOS 5 or newer** should work (2020 TVs onwards, webOS 22–26 included); webOS 6 is tested, webOS 5 reported
 working, webOS 3.4–4 experimental
-([which TVs](docs/compatibility.md)). Download the ipk from [Releases](../../releases) and install it with the
-Homebrew Channel or:
+([which TVs](docs/compatibility.md)). No root is needed to run it.
+
+**From the Homebrew Channel** (updates show up there too): open **Settings → Repositories → Add repository** and
+enter the [Native-Webos repository](https://github.com/Native-Webos/webos-apps-repo):
+
+```
+https://native-webos.github.io/webos-apps-repo/api/apps.json
+```
+
+Go back to the app list, refresh, open **Wren** and select **Install**. Wren appears there once its listing is
+approved; until then, use the ipk.
+
+**From the ipk:** download it from [Releases](../../releases) and install it with the Homebrew Channel's local
+install or:
 
 ```sh
 ares-install -d <your-device> org.sostk.wpebrowser_0.3.2_arm.ipk
 ```
 
-No root is needed to run it.
+Each release also carries `org.sostk.wpebrowser.manifest.json`, the Homebrew Channel manifest (version, ipk link
+and SHA-256), at a fixed address for the latest release:
+`https://github.com/sostk/webos-wpe-browser/releases/latest/download/org.sostk.wpebrowser.manifest.json`.
 
 ## Reporting a bug
 
