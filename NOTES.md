@@ -753,3 +753,10 @@
 - GitHub: no resource over 2 s (engine timing now lists "slow resource" lines >2 s); its DOMContentLoaded waits on
   ~8 s of its own deferred JavaScript. JIT tiers in the build: Baseline + DFG (FTL is 64-bit only), WebAssembly on.
 - Decided (user, 2026-11-15): no WebKit build tuned for Cortex-A55; the engine stays built for every webOS TV.
+- JIT thresholds tested (TV, 3 cold starts each of Wikipedia, BBC News, GitHub, react.dev; launch param wpebEnv
+  with JSC_ options, which the web process reads in release builds). Web process CPU up to the load event:
+  Baseline JIT after 100 runs instead of 500 cost 1-4% more; also DFG after 300 instead of 1000 cost 7-10% more.
+  Load times unchanged within run-to-run noise, memory unchanged. Page-load JS mostly runs once, so compiling it
+  earlier is a loss; hot code reaches the JIT with the defaults anyway. Kept the defaults. Results:
+  build/perf-bench/jit-{A-default,B-baseline100,C-dfg300}.txt. run.sh now logs the web process's CPU and memory per
+  load and takes WPEB_ENV (engine environment), SITES and NO_SCROLL.
