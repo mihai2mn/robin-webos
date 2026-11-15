@@ -5,9 +5,10 @@ very welcome ([bug report form](https://github.com/sostk/webos-wpe-browser/issue
 
 | webOS (internal release) | Years | glibc | Wren |
 |---|---|---|---|
-| 1.x – 3.x | 2014–2017 | 2.14 – 2.19 | not supported |
+| 1.x – 2.x | 2014–2015 | 2.14 – 2.19 | not supported |
+| 3.x (3.4 and later) | 2016–2017 | 2.19 | untested, experimental: bundled glibc 2.28, hardware video through LG's player; no DRM |
 | 4.4 – 4.10 | 2018–2019 | 2.24 | untested, experimental: the engine uses its own bundled glibc 2.28 there; no DRM |
-| 5.x | 2020 | 2.28 | should work; no DRM yet (Widevine 15.1) |
+| 5.x | 2020 | 2.28 | works (users' reports: CX, NANO80); no DRM yet (Widevine 15.1) |
 | **6.x** | 2021 | 2.28 | **tested** (Widevine 16.3) |
 | 22, 23 (7.x, 8.x) | 2022–2023 | 2.31 | should work; Widevine 16.4 untested |
 | 24, 25, 26 (9.x – 11.x) | 2024–2026, and older TVs upgraded by webOS Re:New | newer | should work; no DRM yet (Widevine 17) |

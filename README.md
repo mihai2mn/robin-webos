@@ -27,7 +27,7 @@ the arrows, OK and Back of any LG remote.
 Homebrew Channel or:
 
 ```sh
-ares-install -d <your-device> org.sostk.wpebrowser_0.3.1_arm.ipk
+ares-install -d <your-device> org.sostk.wpebrowser_0.3.2_arm.ipk
 ```
 
 No root is needed to run it.
