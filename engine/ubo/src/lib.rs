@@ -124,6 +124,34 @@ pub extern "C" fn wren_ubo_add_list(ubo: *mut WrenUbo, name: *const c_char, dat:
     1
 }
 
+/// Adds (or replaces) a list given as filter text, parsed here at load time, like uBO's "My filters": the user's own
+/// rules live in the browser's data directory, not in the package. `trusted` gives them uBO's trusted-source
+/// permission (trusted-only scriptlets). Returns the number of rules that parsed, or -1 on bad arguments.
+#[no_mangle]
+pub extern "C" fn wren_ubo_add_text(ubo: *mut WrenUbo, name: *const c_char, text: *const c_char, trusted: i32) -> i32 {
+    let Some(ubo) = (unsafe { ubo.as_mut() }) else { return -1 };
+    let name = str_of(name);
+    if text.is_null() || name.is_empty() || name == "core" {
+        return -1;
+    }
+    let rules: Vec<&str> = str_of(text).lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('!')).collect();
+    ubo.engines.retain(|(n, _)| n != name);
+    if rules.is_empty() {
+        return 0;
+    }
+    let mut set = adblock::lists::FilterSet::new(false);
+    let opts = adblock::lists::ParseOptions {
+        permissions: adblock::resources::PermissionMask::from_bits(if trusted != 0 { 1 } else { 0 }),
+        ..Default::default()
+    };
+    let count = rules.len() as i32;
+    set.add_filter_list(rules.join("\n"), opts);
+    let mut engine = Engine::new_with_filter_set(set);
+    engine.use_resources(ubo.resources.iter().cloned());
+    ubo.engines.push((name.to_owned(), engine));
+    count
+}
+
 /// Removes an extra list's engine (its memory is freed). Returns 1 when it was loaded.
 #[no_mangle]
 pub extern "C" fn wren_ubo_remove_list(ubo: *mut WrenUbo, name: *const c_char) -> i32 {

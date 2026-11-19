@@ -28,6 +28,7 @@
   window.gifVideosLeft = () => document.getElementById('gifhost').shadowRoot.querySelectorAll('video').length + document.querySelectorAll('video').length;
 </script>
 <p id="normal">normal content</p>
+<p id="mine">hidden only by My filters</p>
 <script>
   // Added after load: generic hiding must follow the DOM.
   setTimeout(() => { const d = document.createElement('div'); d.className = 'ADBox'; d.id = 'late-generic'; d.textContent = 'late'; document.body.appendChild(d); }, 300);

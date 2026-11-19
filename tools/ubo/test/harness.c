@@ -25,6 +25,7 @@ static void on_init(WebKitWebContext *context, gpointer data)
         if (**a)
             g_variant_builder_add(&hosts, "s", *a);
     g_strfreev(allowed);
+    /* TEST_MY_FILTERS: the user's own rules (wren://adblock "My filters"), as filter text. */
     /* TEST_LISTS="name,name": extra lists (lists/<name>.dat) to use. */
     GVariantBuilder lists;
     g_variant_builder_init(&lists, G_VARIANT_TYPE("as"));
@@ -35,7 +36,7 @@ static void on_init(WebKitWebContext *context, gpointer data)
     g_strfreev(names);
     const gboolean on = g_strcmp0(g_getenv("TEST_ADS_OFF"), "1") != 0;
     webkit_web_context_set_web_process_extensions_initialization_user_data(context,
-        g_variant_new("(sbasas)", ubo_dir, on, &hosts, &lists));
+        g_variant_new("(sbasass)", ubo_dir, on, &hosts, &lists, g_getenv("TEST_MY_FILTERS") ? g_getenv("TEST_MY_FILTERS") : ""));
 }
 
 static gboolean run_check(gpointer data);

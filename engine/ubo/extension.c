@@ -11,9 +11,10 @@
  *   cosmetic   cosmetic.js runs in an isolated world: the site's hiding rules, generic hiding for the classes and
  *              ids the document uses (asked from here, __wrenUboHidden), and procedural filters.
  *
- * Initialization data (from the engine): "(sbasas)" = data directory, on, hosts where ads are allowed, extra
- * lists to use (lists/<name>.dat, see wren://adblock). User message "wren-ubo:state" "(basas)": the same
- * on/allowed/lists, sent when the settings change. ("(sbas)"/"(bas)" without lists are accepted too.)
+ * Initialization data (from the engine): "(sbasass)" = data directory, on, hosts where ads are allowed, extra
+ * lists to use (lists/<name>.dat, see wren://adblock), the user's own rules ("My filters", filter text). User
+ * message "wren-ubo:state" "(basass)": the same on/allowed/lists/rules, sent when the settings change. Shorter
+ * forms without the rules or the lists ("(sbasas)", "(sbas)", ...) are accepted too.
  * The blocker is never applied on YouTube (see adblock_wanted in engine/src/main.cpp) or on allowed hosts.
  * WREN_UBO_LOG=1 logs every blocked, redirected or rewritten request (without query strings). */
 #define _GNU_SOURCE /* strcasestr */
@@ -42,11 +43,13 @@ char *wren_ubo_hidden(const WrenUbo *ubo, const char *classes, const char *ids, 
 int32_t wren_ubo_add_list(WrenUbo *ubo, const char *name, const uint8_t *dat, size_t dat_len);
 int32_t wren_ubo_remove_list(WrenUbo *ubo, const char *name);
 int32_t wren_ubo_has_list(const WrenUbo *ubo, const char *name);
+int32_t wren_ubo_add_text(WrenUbo *ubo, const char *name, const char *text, int32_t trusted);
 
 static struct {
     WrenUbo *ubo;
     char *dir;                  /* the data directory (engine.dat, lists/) */
     char **lists;               /* extra lists in use */
+    char *my_filters;           /* the user's own rules (wren://adblock "My filters"), parsed here */
     char *cosmetic_js;          /* cosmetic.js, run in the isolated world */
     char *compat_js;            /* compat.js, run in every page's main world */
     WebKitScriptWorld *world;   /* the isolated world */
@@ -374,8 +377,16 @@ static void apply_lists(void)
     loaded = (char **)g_ptr_array_free(now, FALSE);
 }
 
-/* on, allowed hosts and (when given) the extra lists. */
-static void set_state(gboolean on, GVariant *allowed, GVariant *lists)
+/* The user's own rules, as the engine "my-filters" (trusted, like uBO's My filters with trust on). */
+static void apply_my_filters(void)
+{
+    int32_t n = wren_ubo_add_text(g.ubo, "my-filters", g.my_filters ? g.my_filters : "", 1);
+    if (g.log)
+        g_message("wren-ubo: my filters: %d rule(s)", n);
+}
+
+/* on, allowed hosts and (when given) the extra lists and the user's own rules. */
+static void set_state(gboolean on, GVariant *allowed, GVariant *lists, const char *my_filters)
 {
     g_strfreev(g.allowed);
     g.allowed = strv_of(allowed);
@@ -386,6 +397,29 @@ static void set_state(gboolean on, GVariant *allowed, GVariant *lists)
         if (g.ubo)
             apply_lists();
     }
+    if (my_filters && g_strcmp0(my_filters, g.my_filters) != 0) {
+        g_free(g.my_filters);
+        g.my_filters = g_strdup(my_filters);
+        if (g.ubo)
+            apply_my_filters();
+    }
+}
+
+/* (b as [as [s]]) at child `first`: on, allowed, lists, my filters. */
+static void set_state_from(GVariant *v, gsize first)
+{
+    gboolean on = TRUE;
+    gsize n = g_variant_n_children(v);
+    g_variant_get_child(v, first, "b", &on);
+    GVariant *allowed = g_variant_get_child_value(v, first + 1);
+    GVariant *lists = n > first + 2 ? g_variant_get_child_value(v, first + 2) : NULL;
+    const char *mine = NULL;
+    if (n > first + 3)
+        g_variant_get_child(v, first + 3, "&s", &mine);
+    set_state(on, allowed, lists, mine);
+    g_variant_unref(allowed);
+    if (lists)
+        g_variant_unref(lists);
 }
 
 static gboolean on_user_message(WebKitWebProcessExtension *extension, WebKitUserMessage *message, gpointer data unused)
@@ -393,16 +427,9 @@ static gboolean on_user_message(WebKitWebProcessExtension *extension, WebKitUser
     if (g_strcmp0(webkit_user_message_get_name(message), "wren-ubo:state") != 0)
         return FALSE;
     GVariant *p = webkit_user_message_get_parameters(message);
-    if (p && (g_variant_is_of_type(p, G_VARIANT_TYPE("(basas)")) || g_variant_is_of_type(p, G_VARIANT_TYPE("(bas)")))) {
-        gboolean on = TRUE;
-        g_variant_get_child(p, 0, "b", &on);
-        GVariant *allowed = g_variant_get_child_value(p, 1);
-        GVariant *lists = g_variant_n_children(p) > 2 ? g_variant_get_child_value(p, 2) : NULL;
-        set_state(on, allowed, lists);
-        g_variant_unref(allowed);
-        if (lists)
-            g_variant_unref(lists);
-    }
+    if (p && (g_variant_is_of_type(p, G_VARIANT_TYPE("(basass)")) || g_variant_is_of_type(p, G_VARIANT_TYPE("(basas)"))
+              || g_variant_is_of_type(p, G_VARIANT_TYPE("(bas)"))))
+        set_state_from(p, 0);
     g_message("wren-ubo: %s, %u site(s) allowed, %u extra list(s) (so far: %" G_GUINT64_FORMAT " blocked, %"
         G_GUINT64_FORMAT " redirected, %" G_GUINT64_FORMAT " rewritten)", g.on ? "on" : "off",
         g.allowed ? g_strv_length(g.allowed) : 0, g.lists ? g_strv_length(g.lists) : 0, g.blocked, g.redirected,
@@ -421,21 +448,15 @@ G_MODULE_EXPORT void webkit_web_process_extension_initialize_with_user_data(WebK
     GVariant *user_data)
 {
     const char *dir = NULL;
-    gboolean on = TRUE;
-    if (!user_data || !(g_variant_is_of_type(user_data, G_VARIANT_TYPE("(sbasas)"))
+    if (!user_data || !(g_variant_is_of_type(user_data, G_VARIANT_TYPE("(sbasass)"))
+                        || g_variant_is_of_type(user_data, G_VARIANT_TYPE("(sbasas)"))
                         || g_variant_is_of_type(user_data, G_VARIANT_TYPE("(sbas)")))) {
         g_warning("wren-ubo: no initialization data, not loaded");
         return;
     }
     g_variant_get_child(user_data, 0, "&s", &dir);
-    g_variant_get_child(user_data, 1, "b", &on);
     g.dir = g_strdup(dir);
-    GVariant *allowed = g_variant_get_child_value(user_data, 2);
-    GVariant *lists = g_variant_n_children(user_data) > 3 ? g_variant_get_child_value(user_data, 3) : NULL;
-    set_state(on, allowed, lists); /* lists load below, once the core has */
-    g_variant_unref(allowed);
-    if (lists)
-        g_variant_unref(lists);
+    set_state_from(user_data, 1); /* lists and my filters load below, once the core has */
     /* WPE_BROWSER_DEBUG_UBO_LOG: the same, under a name Wren's launch parameter {"wpebEnv": ...} passes on. */
     const char *log = g_getenv("WREN_UBO_LOG") ? g_getenv("WREN_UBO_LOG") : g_getenv("WPE_BROWSER_DEBUG_UBO_LOG");
     g.log_all = g_strcmp0(log, "2") == 0;
@@ -472,6 +493,7 @@ G_MODULE_EXPORT void webkit_web_process_extension_initialize_with_user_data(WebK
     if (!g.ubo)
         return;
     apply_lists();
+    apply_my_filters();
 
     g.world = webkit_script_world_new_with_name("wren-ubo");
     g_signal_connect(webkit_script_world_get_default(), "window-object-cleared", G_CALLBACK(on_window_object_cleared), NULL);

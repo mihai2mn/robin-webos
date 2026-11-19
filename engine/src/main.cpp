@@ -1369,7 +1369,9 @@ void clear_data(const WpeClearData &c)
 // This 0.3.3-based build has no ad-blocker setting in the UI, so the engine finds the blocker next to itself
 // (engine/ubo/engine.dat, engine/lib/web-extensions/libwren-ubo.so) and offers its settings at wren://adblock:
 // on/off, the extra filter lists (engine/ubo/lists/catalog.ini) and the sites where ads are allowed. They are kept in
-// $WPE_BROWSER_DATA_DIR/ubo-settings.ini and sent to the web process when they change ("wren-ubo:state" (basas)).
+// $WPE_BROWSER_DATA_DIR/ubo-settings.ini and sent to the web process when they change ("wren-ubo:state" (basass)).
+// "My filters", the user's own rules (uBO syntax, e.g. site-specific fixes with Wren's generic scriptlets), are
+// kept as text in $WPE_BROWSER_DATA_DIR/ubo-my-filters.txt and parsed in the web process: never part of the package.
 // WREN_UBO=0 in the environment turns the blocker off altogether. It never runs on YouTube (engine/ubo/extension.c).
 struct UboList {
     std::string name, title, about;
@@ -1380,10 +1382,14 @@ struct UboList {
 struct Ubo {
     std::string dir;              // engine/ubo (empty: no blocker in this package)
     std::string settings_path;    // $WPE_BROWSER_DATA_DIR/ubo-settings.ini
+    std::string my_filters_path;  // $WPE_BROWSER_DATA_DIR/ubo-my-filters.txt
     std::vector<UboList> catalog; // extra lists on offer
     bool on = true;
     std::vector<std::string> allowed, lists;
+    std::string my_filters;       // the user's own rules, filter text
 };
+
+constexpr size_t UBO_MY_FILTERS_MAX = 256 * 1024;
 Ubo ubo;
 
 std::vector<std::string> ubo_split(const gchar *const *v)
@@ -1451,6 +1457,21 @@ void ubo_load_settings()
         }
     }
     g_key_file_unref(kf);
+
+    gchar *mine = nullptr;
+    gsize mine_len = 0;
+    if (g_file_get_contents(ubo.my_filters_path.c_str(), &mine, &mine_len, nullptr))
+        ubo.my_filters.assign(mine, std::min(mine_len, UBO_MY_FILTERS_MAX));
+    g_free(mine);
+}
+
+void ubo_save_my_filters()
+{
+    GError *e = nullptr;
+    if (!g_file_set_contents(ubo.my_filters_path.c_str(), ubo.my_filters.data(), ubo.my_filters.size(), &e)) {
+        log_msg("ad blocker: my filters not saved: %s", e->message);
+        g_clear_error(&e);
+    }
 }
 
 void ubo_save_settings()
@@ -1483,13 +1504,14 @@ GVariant *ubo_strv(const std::vector<std::string> &v)
 void on_initialize_web_process_extensions(WebKitWebContext *context, gpointer)
 {
     webkit_web_context_set_web_process_extensions_initialization_user_data(context,
-        g_variant_new("(sb@as@as)", ubo.dir.c_str(), ubo.on, ubo_strv(ubo.allowed), ubo_strv(ubo.lists)));
+        g_variant_new("(sb@as@ass)", ubo.dir.c_str(), ubo.on, ubo_strv(ubo.allowed), ubo_strv(ubo.lists), ubo.my_filters.c_str()));
 }
 
 void ubo_broadcast()
 {
     webkit_web_context_send_message_to_all_extensions(webkit_web_context_get_default(),
-        webkit_user_message_new("wren-ubo:state", g_variant_new("(b@as@as)", ubo.on, ubo_strv(ubo.allowed), ubo_strv(ubo.lists))));
+        webkit_user_message_new("wren-ubo:state", g_variant_new("(b@as@ass)", ubo.on, ubo_strv(ubo.allowed), ubo_strv(ubo.lists),
+            ubo.my_filters.c_str())));
     log_msg("ad blocker: %s, %zu extra list(s), %zu site(s) allowed", ubo.on ? "on" : "off", ubo.lists.size(), ubo.allowed.size());
 }
 
@@ -1528,7 +1550,9 @@ button:focus{outline:none;border-color:#fff;box-shadow:0 0 0 4px var(--on)}
 [aria-pressed=true] .sw{background:var(--on)}[aria-pressed=true] .sw::after{left:44px;background:#fff}
 .size{color:var(--dim);font-size:18px;flex:none}
 .add{display:flex;gap:12px;margin-bottom:12px}input{font:inherit;flex:1;padding:16px;border-radius:14px;border:3px solid var(--line);background:#0f1530;color:inherit}
-input:focus{outline:none;border-color:#fff}
+input:focus,textarea:focus{outline:none;border-color:#fff}
+textarea{display:block;width:100%;font:20px/1.4 monospace;padding:16px;border-radius:14px;border:3px solid var(--line);background:#0f1530;color:inherit;margin-bottom:12px}
+code{font-size:18px;color:var(--ink)}
 .host{display:flex;align-items:center;gap:16px;margin-bottom:8px}.host span{flex:1}
 #saved{position:fixed;right:40px;top:30px;background:var(--on);padding:10px 18px;border-radius:12px;opacity:0;transition:opacity .2s}
 </style></head><body>
@@ -1551,8 +1575,15 @@ input:focus{outline:none;border-color:#fff}
     for (const std::string &a : ubo.allowed)
         h += "<div class=\"host\"><span>" + html_escape(a) + "</span><button data-cmd=\"disallow\" data-name=\"" +
              html_escape(a) + "\">Remove</button></div>\n";
-    h += R"HTML(</div>
+    h += "</div><h2>My filters</h2><p class=\"note\">Your own rules, in uBlock Origin's syntax, one per line. They stay on "
+         "this TV (in the browser's data folder), never in the package. Wren's fixes for any site: "
+         "<code>example.com##+js(wren-no-mse)</code> plays plain video files instead of MSE streams, "
+         "<code>example.com##+js(wren-media-debug)</code> logs media details.</p>"
+         "<textarea id=\"mine\" rows=\"8\" spellcheck=\"false\" autocapitalize=\"off\">" + html_escape(ubo.my_filters) +
+         "</textarea><button id=\"savemine\">Save my filters</button>\n";
+    h += R"HTML(
 <script>
+document.getElementById('savemine').addEventListener('click', () => send('mine\n' + document.getElementById('mine').value));
 const send = m => { try { window.webkit.messageHandlers.wrenAdblock.postMessage(m); flash(); } catch (e) {} };
 const flash = () => { const s = document.getElementById('saved'); s.style.opacity = 1; clearTimeout(flash.t); flash.t = setTimeout(() => s.style.opacity = 0, 900); };
 document.addEventListener('click', e => {
@@ -1600,7 +1631,7 @@ void on_wren_scheme(WebKitURISchemeRequest *request, gpointer)
     g_object_unref(in);
 }
 
-// Messages from wren://adblock ("on\n1", "list\nNAME\n0", "allow\nHOST", "disallow\nHOST"). Only a tab showing
+// Messages from wren://adblock ("on\n1", "list\nNAME\n0", "allow\nHOST", "disallow\nHOST", "mine\nTEXT"). Only a tab showing
 // wren://adblock is listened to: the handler exists in every page's main world, so a web page could post too.
 void on_adblock_message(WebKitUserContentManager *, JSCValue *value, gpointer view)
 {
@@ -1608,6 +1639,13 @@ void on_adblock_message(WebKitUserContentManager *, JSCValue *value, gpointer vi
     if (!uri || !g_str_has_prefix(uri, "wren://adblock") || ubo.dir.empty() || !jsc_value_is_string(value))
         return;
     gchar *text = jsc_value_to_string(value);
+    if (g_str_has_prefix(text, "mine\n")) {
+        ubo.my_filters.assign(text + 5, std::min(strlen(text + 5), UBO_MY_FILTERS_MAX));
+        g_free(text);
+        ubo_save_my_filters();
+        ubo_broadcast();
+        return;
+    }
     gchar **p = g_strsplit(text, "\n", 3);
     g_free(text);
     const std::string cmd = p[0] ? p[0] : "", arg = p[0] && p[1] ? p[1] : "", arg2 = p[0] && p[1] && p[2] ? p[2] : "";
@@ -1666,6 +1704,7 @@ void setup_ubo(const std::string &data_dir)
     }
     ubo.dir = dir;
     ubo.settings_path = data_dir + "/ubo-settings.ini";
+    ubo.my_filters_path = data_dir + "/ubo-my-filters.txt";
     ubo_load_settings();
     webkit_web_context_set_web_process_extensions_directory(context, ext.c_str());
     webkit_web_context_add_path_to_sandbox(context, dir.c_str(), TRUE);

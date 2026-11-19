@@ -57,6 +57,9 @@ CHECK='({
   procedural_keeps_other: hidden("proc-keep") === false,
   procedural_upward: hidden("upward"),
   normal_visible: hidden("normal") === false,
+  my_filters_hide: hidden("mine") === (window.__wrenMine === true),
+  my_filters_no_mse: (typeof MediaSource === "undefined") === (window.__wrenMine === true),
+  my_raw: [hidden("mine"), typeof MediaSource, window.__wrenMine === true].join(" "),
   fetch_ok: window.echo === "opaque",
   gif_videos_as_images: gifImages() === "https://i.redd.it/wrentest123.gif https://i.giphy.com/WrenGiphy42.webp" && gifVideosLeft() === 0,
   wren_styles: document.querySelectorAll("style[data-wren]").length,
@@ -71,6 +74,11 @@ grep -o 'GET /lib/echo.txt[^ ]*' "$B/third-party.log" | tail -1 | sed 's/^/remov
 echo "== blocker on, with every extra list on by default"
 DEFAULT_LISTS=$(awk -F'[][]' '/^\[/ {n = $2} /^default=true/ {print n}' "$B/data/lists/catalog.ini" | paste -sd,)
 TEST_LISTS=$DEFAULT_LISTS timeout 60 "$B/harness" "$B/data" "$B/ext" 1500 "$PAGE" "$CHECK" 2>&1 | grep -E "RESULT|loaded in|not loaded"
+echo "== my filters (a hide rule and wren-no-mse, given as text)"
+TEST_MY_FILTERS='! mine
+wrentest.127.0.0.1.nip.io###mine
+wrentest.127.0.0.1.nip.io##+js(wren-no-mse)
+wrentest.127.0.0.1.nip.io##+js(set-constant, __wrenMine, true)' timeout 60 "$B/harness" "$B/data" "$B/ext" 1500 "$PAGE" "$CHECK"
 echo "== blocker off"
 TEST_ADS_OFF=1 timeout 60 "$B/harness" "$B/data" "$B/ext" 1500 "$PAGE" "$CHECK"
 echo "== ads allowed on the test host"

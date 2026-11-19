@@ -137,7 +137,18 @@ function wrenMediaDebug() {
     }, 6000), { once: true });
 }
 
+// wren-no-mse.js: hides Media Source Extensions from the page, so its player falls back to a plain video file
+// (progressive MP4), which the TV plays on its hardware decoder. For sites whose MSE streams stall in this WebKit
+// (e.g. video that starts after the audio): add example.com##+js(wren-no-mse) to My filters on wren://adblock.
+function wrenNoMse() {
+    'use strict';
+    for (const name of ['MediaSource', 'ManagedMediaSource', 'WebKitMediaSource', 'SourceBuffer', 'ManagedSourceBuffer']) {
+        try { Object.defineProperty(self, name, { value: undefined, configurable: true, writable: true }); } catch (e) {}
+    }
+}
+
 export const wrenScriptlets = [
     { name: 'wren-gif-videos.js', fn: wrenGifVideos, aliases: ['wren-gif-videos'] },
+    { name: 'wren-no-mse.js', fn: wrenNoMse, aliases: ['wren-no-mse'] },
     { name: 'wren-media-debug.js', fn: wrenMediaDebug, aliases: ['wren-media-debug'] },
 ];

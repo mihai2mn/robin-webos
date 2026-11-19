@@ -1,3 +1,9 @@
 ! Wren's own filters (compiled with uBO's lists, as a trusted list; scriptlets in tools/ubo/wren-scriptlets.js).
+! Site-specific fixes for sites not listed here go in "My filters" on wren://adblock (kept on the TV, not in the
+! package), using Wren's generic scriptlets: wren-no-mse, wren-media-debug.
 ! GIFs served as videos: shown as images, so the TV's single hardware video decoder isn't fought over.
 reddit.com##+js(wren-gif-videos)
+! video.js players: the poster and the black poster layer stay over a video once it plays. On the TV the video is
+! drawn behind the page (hardware hole punch), so any opaque layer above it hides it.
+##.vjs-has-started .vjs-poster
+##.vjs-has-started .vjs-black-poster

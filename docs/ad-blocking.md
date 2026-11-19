@@ -29,6 +29,19 @@ Lists (uBO's defaults on a fresh install): uBlock filters, Badware risks, Privac
 EasyPrivacy, Online Malicious URL Blocklist, Peter Lowe's list. `tools/ubo/update.py` refreshes them, resolving
 `!#include` and evaluating `!#if` the way uBO would in a WebKit browser.
 
+My filters: wren://adblock has a "My filters" box for the user's own rules (uBO syntax, trusted). They are kept as
+text in `$WPE_BROWSER_DATA_DIR/ubo-my-filters.txt` and parsed in the web process, never built into the package.
+That is where site-specific fixes belong; the package only ships generic tools for them, such as Wren's scriptlets
+(`tools/ubo/wren-scriptlets.js`):
+
+| scriptlet | what it does |
+|---|---|
+| `wren-no-mse` | hides Media Source Extensions, so the site's player falls back to a plain MP4 (hardware decoder); for MSE streams that stall in this WebKit |
+| `wren-media-debug` | logs MSE buffered ranges, elements covering videos and pointer media queries (with `WPE_BROWSER_DEBUG_CONSOLE=1`) |
+| `wren-gif-videos` | GIFs served as videos (Reddit, Giphy) shown as images |
+
+For example `example.com##+js(wren-no-mse)`.
+
 Not (yet) like uBO: no element picker, no per-site dynamic filtering, no HTML filtering (`##^`), no `$csp`
 (WebKit's send-request cannot add response headers), and the request type is inferred (Sec-Fetch-Dest, Accept,
 extension) because send-request does not say what a request is for.
