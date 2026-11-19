@@ -31,15 +31,17 @@ launch() {  # a cold start with this URL; waits until the engine log has started
     ares-launch -d "$dev" --close "$app" >/dev/null 2>&1 || true
     ares-launch -d "$dev" "$app" -p "{\"target\":\"$1\"$env_json}" >/dev/null
     local i
-    for ((i = 0; i < 40; i++)); do sh_tv "! grep -q 'tab 1 load finished' $logs/engine.log" && return 0; done
+    for ((i = 0; i < 40; i++)); do sh_tv "! grep -q 'load finished' $logs/engine.log" && return 0; done
 }
 
 say "== $label  $(date -u +%FT%TZ)  $(git -C "$root" rev-parse --short HEAD)  env ${WPEB_ENV:-none}"
 for site in "${sites[@]}"; do
     for ((r = 1; r <= runs; r++)); do
         launch "$site"
-        if wait_for "$logs/engine.log" 'tab 1 timing:' 120; then
-            t=$(sh_tv "grep -m1 'tab 1 timing:' $logs/engine.log | sed 's/.*timing: //'")
+        # Wren restores the last session's tabs at start, so the page's tab number varies: match its host.
+        host=${site#*://}; host=${host%%/*}
+        if wait_for "$logs/engine.log" "timing:.*| $host" 120; then
+            t=$(sh_tv "grep -m1 'timing:.*| $host' $logs/engine.log | sed 's/.*timing: //'")
             ev=$(sh_tv "awk '/first frame/{f=\$1} /engine ready/{e=\$1} /tab 1: page surface/{p=\$1} END{print \"first-frame \" f \" engine-ready \" e \" page-shown \" p}' $logs/events.log")
             # Web process CPU (utime+stime ticks, 100 Hz) since it started, and its memory, once the page has loaded.
             wp=$(sh_tv "for p in \$(pgrep -f '[l]ibexec/WPEWebProcess'); do awk '{c+=\$14+\$15} END{printf \"cpu %d \", c}' /proc/\$p/stat; awk '/VmRSS/{printf \"rss %dMB \", \$2/1024}' /proc/\$p/status; done")
