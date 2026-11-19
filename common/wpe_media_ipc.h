@@ -12,6 +12,7 @@
 #ifndef WPE_MEDIA_IPC_H
 #define WPE_MEDIA_IPC_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define WPEB_MEDIA_IPC_VERSION 4u
@@ -98,5 +99,38 @@ typedef struct WpebMediaLoad {
 typedef struct WpebMediaArea {
     int32_t x, y, width, height;
 } WpebMediaArea;
+
+/* The wire layout is the same on every ABI the browser runs on, which now matters because the two ends may have
+ * different word sizes: the UI (and the 32-bit engine's web process) are armv7 softfp, while the aarch64 engine's web
+ * process is LP64. Every member is fixed-width, so the only thing that could differ is alignment and padding --
+ * WpebMediaHeader's int64_t pts_us is the one member whose alignment is 8 (it pads to offset 8 on both ABIs, and
+ * 4-byte-aligned types all round the same way). Measured identical on armv7 softfp, aarch64 and x86_64
+ * (build/bridge64/lead-check/media-wire-check.sh); a change that breaks it is now a compile error instead of two
+ * processes that disagree about a message. */
+#if defined(__cplusplus)
+#define WPEB_MEDIA_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define WPEB_MEDIA_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+#define WPEB_MEDIA_SIZE(type, bytes) WPEB_MEDIA_STATIC_ASSERT(sizeof(type) == (bytes), #type ": unexpected wire size")
+#define WPEB_MEDIA_AT(type, member, offset) \
+    WPEB_MEDIA_STATIC_ASSERT(offsetof(type, member) == (offset), #type "." #member ": unexpected offset")
+
+WPEB_MEDIA_SIZE(WpebMediaHeader, 16);
+WPEB_MEDIA_AT(WpebMediaHeader, type, 0);
+WPEB_MEDIA_AT(WpebMediaHeader, size, 4);
+WPEB_MEDIA_AT(WpebMediaHeader, pts_us, 8);
+WPEB_MEDIA_SIZE(WpebMediaAudio, 16);
+WPEB_MEDIA_SIZE(WpebMediaVolume, 8);
+WPEB_MEDIA_SIZE(WpebMediaHdr, 72);
+WPEB_MEDIA_AT(WpebMediaHdr, display_primaries, 20);
+WPEB_MEDIA_AT(WpebMediaHdr, white_point, 44);
+WPEB_MEDIA_AT(WpebMediaHdr, max_cll, 64);
+WPEB_MEDIA_SIZE(WpebMediaLoad, 216);
+WPEB_MEDIA_AT(WpebMediaLoad, width, 4);
+WPEB_MEDIA_AT(WpebMediaLoad, fps_milli, 12);
+WPEB_MEDIA_AT(WpebMediaLoad, window_id, 16);
+WPEB_MEDIA_AT(WpebMediaLoad, hdr, 144);
+WPEB_MEDIA_SIZE(WpebMediaArea, 16);
 
 #endif
