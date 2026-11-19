@@ -1,0 +1,20 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] gstreamer: WPE_SHELL_DISABLE_MEDIA_DISK_CACHE also stops urisourcebin's download buffer
+
+The playbin "download" flag honoured it, but urisourcebin's "download" property was set for every
+preload=auto player. On 32-bit systems GStreamer's downloadbuffer/sparse file keep offsets in gsize and wrap
+at 4 GiB, so files over 4 GiB with the moov at the end never played (LG TV, 2026-11-19).
+---
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+index ee21208..46fe4c0 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -2804,7 +2804,7 @@ void MediaPlayerPrivateGStreamer::configureElement(GstElement* element)
+     if (startsWith(name.span(), "urisourcebin"_s) && !m_isLegacyPlaybin && m_preload == MediaPlayer::Preload::Auto) {
+         if (isBlob)
+             g_object_set(element, "ring-buffer-max-size", static_cast<guint64>(2 * MB), nullptr);
+-        else if (!isMediaSource() && !isMediaStreamPlayer())
++        else if (!isMediaSource() && !isMediaStreamPlayer() && !isMediaDiskCacheDisabled())
+             g_object_set(element, "download", TRUE, nullptr);
+     }
+ 

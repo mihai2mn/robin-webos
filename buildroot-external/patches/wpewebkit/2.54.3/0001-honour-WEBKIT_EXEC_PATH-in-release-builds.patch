@@ -1,0 +1,26 @@
+Honour WEBKIT_EXEC_PATH in release builds
+
+The webOS browser ships WPEWebProcess and WPENetworkProcess inside its app package,
+so the compile-time PKGLIBEXECDIR does not exist on the TV.
+diff --git a/Source/WebKit/Shared/glib/ProcessExecutablePathGLib.cpp b/Source/WebKit/Shared/glib/ProcessExecutablePathGLib.cpp
+index 64bcde9..0e31f9e 100644
+--- a/Source/WebKit/Shared/glib/ProcessExecutablePathGLib.cpp
++++ b/Source/WebKit/Shared/glib/ProcessExecutablePathGLib.cpp
+@@ -44,7 +44,8 @@ static String getExecutablePath()
+ 
+ static String findWebKitProcess(const ASCIILiteral processName)
+ {
+-#if ENABLE(DEVELOPER_MODE)
++    // webOS browser: the helper processes live inside the app package, not in PKGLIBEXECDIR,
++    // so honour WEBKIT_EXEC_PATH in release builds too.
+     static const char* execDirectory = g_getenv("WEBKIT_EXEC_PATH");
+     if (execDirectory) {
+         String processPath = FileSystem::pathByAppendingComponent(FileSystem::stringFromFileSystemRepresentation(execDirectory), processName);
+@@ -52,6 +53,7 @@ static String findWebKitProcess(const ASCIILiteral processName)
+             return processPath;
+     }
+ 
++#if ENABLE(DEVELOPER_MODE)
+     static String executablePath = getExecutablePath();
+     if (!executablePath.isNull()) {
+         String processPath = FileSystem::pathByAppendingComponent(executablePath, processName);

@@ -1,0 +1,60 @@
+From: sostk
+Subject: [PATCH] JSC: no speculative IndexingHeader loads with GCC on 32-bit
+
+GCC (arm-webos-linux-gnueabi, -O2) hoists the IndexingHeader loads in
+IndexingHeader::preCapacity() and indexingPayloadSizeInBytes() above the
+indexing-type checks. For an object with no indexed properties the header lies
+past the end of its butterfly allocation; when that allocation ends a
+MarkedBlock at the end of a 1 MB bmalloc chunk the load faults on the next,
+unmapped chunk: SIGSEGV at <1 MB boundary> + 4 in
+JSObject::allocateMoreOutOfLineStorage (webkit.org/b/295780, which bisected to
+the MarkedBlock footer-to-header change: with a footer the bytes after the last
+cell were always mapped). The header pointer now goes through an empty volatile
+asm inside the branches that need it.
+
+---
+diff --git a/Source/JavaScriptCore/runtime/ButterflyInlines.h b/Source/JavaScriptCore/runtime/ButterflyInlines.h
+index 5988e42..1ae55e7 100644
+--- a/Source/JavaScriptCore/runtime/ButterflyInlines.h
++++ b/Source/JavaScriptCore/runtime/ButterflyInlines.h
+@@ -43,12 +43,26 @@ inline size_t NODELETE nextLength(size_t length)
+     return length + length / 2;
+ }
+ 
++// An object without indexed properties has no IndexingHeader: its butterfly points just past its allocation, and
++// the header (and ArrayStorage) would lie beyond it. GCC on 32-bit ARM hoists the header loads below above the
++// indexing-type checks, so they run for every object. When such an allocation ends a MarkedBlock at the end of a
++// 1 MB bmalloc chunk, the load faults on the next, unmapped chunk (SIGSEGV at boundary + 4 in
++// JSObject::allocateMoreOutOfLineStorage, webkit.org/b/295780). Passing the pointer through an empty volatile asm
++// in the branch that needs it makes the address exist only there, so the load can't be moved above the check.
++ALWAYS_INLINE Butterfly* indexingHeaderAfterTypeCheck(Butterfly* butterfly)
++{
++#if COMPILER(GCC) && !COMPILER(CLANG) && CPU(ADDRESS32)
++    asm volatile("" : "+r"(butterfly));
++#endif
++    return butterfly;
++}
++
+ inline size_t Butterfly::preCapacity(Structure* structure)
+ {
+     if (!hasAnyArrayStorage(structure->indexingType())) [[likely]]
+         return 0;
+ 
+-    return IndexingHeader::from(this)->arrayStorage()->m_indexBias;
++    return IndexingHeader::from(indexingHeaderAfterTypeCheck(this))->arrayStorage()->m_indexBias;
+ }
+ 
+ inline size_t Butterfly::indexingPayloadSizeInBytes(Structure* structure)
+@@ -58,10 +72,10 @@ inline size_t Butterfly::indexingPayloadSizeInBytes(Structure* structure)
+     case ALL_INT32_INDEXING_TYPES:
+     case ALL_DOUBLE_INDEXING_TYPES:
+     case ALL_CONTIGUOUS_INDEXING_TYPES:
+-        return IndexingHeader::from(this)->vectorLength() * sizeof(EncodedJSValue);
++        return IndexingHeader::from(indexingHeaderAfterTypeCheck(this))->vectorLength() * sizeof(EncodedJSValue);
+ 
+     case ALL_ARRAY_STORAGE_INDEXING_TYPES:
+-        return ArrayStorage::sizeFor(IndexingHeader::from(this)->arrayStorage()->vectorLength());
++        return ArrayStorage::sizeFor(IndexingHeader::from(indexingHeaderAfterTypeCheck(this))->arrayStorage()->vectorLength());
+ 
+     default:
+         ASSERT(!hasIndexedProperties(structure->indexingType()));

@@ -1,0 +1,78 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] gstreamer: per-player software video next to hole-punch quirks
+
+A <video wren-software> element renders with WebKit's own video sink and decoders even when the
+platform quirks (Rialto) put every other player's video on a hardware hole-punch sink. Wren marks
+thumbnail previews this way so they never take the TV's single hardware decoder from the main video.
+---
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+index 9b9a654..ee21208 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -1270,7 +1270,7 @@ static void setSyncOnClock(GstElement* element, bool sync)
+ void MediaPlayerPrivateGStreamer::syncOnClock(bool sync)
+ {
+     auto& quirksManager = GStreamerQuirksManager::singleton();
+-    if (quirksManager.supportsVideoHolePunchRendering() && !quirksManager.sinksRequireClockSynchronization())
++    if (isHolePunchRenderingEnabled() && !quirksManager.sinksRequireClockSynchronization())
+         return;
+ 
+     setSyncOnClock(videoSink(), sync);
+@@ -2850,6 +2850,14 @@ void MediaPlayerPrivateGStreamer::configureElementPlatformQuirks(GstElement* ele
+     if (m_isLiveStream.value_or(false))
+         characteristics.add({ ElementRuntimeCharacteristics::IsLiveStream });
+ 
++    if (!isHolePunchRenderingEnabled() && GStreamerQuirksManager::singleton().supportsVideoHolePunchRendering()) {
++        auto name = StringView::fromLatin1(G_OBJECT_TYPE_NAME(G_OBJECT(element)));
++        if (name.startsWith("GstURIDecodeBin"_s) || name.startsWith("GstDecodebin"_s) || name.startsWith("GstDecodeBin"_s)) {
++            GST_DEBUG_OBJECT(pipeline(), "wren-software: %s keeps its default caps (decoders)", GST_ELEMENT_NAME(element));
++            return;
++        }
++    }
++
+     GStreamerQuirksManager::singleton().configureElement(element, WTF::move(characteristics));
+ }
+ 
+@@ -3530,6 +3538,11 @@ void MediaPlayerPrivateGStreamer::setPlaybackFlags(bool isMediaStream)
+     hasSoftwareColorBalance &= additionalFlags;
+     hasNativeVideo &= additionalFlags;
+     hasNativeAudio &= additionalFlags;
++    if (!isHolePunchRenderingEnabled()) {
++        // Wren: a software player (wren-software) decodes to raw frames: let playsink convert them for our sinks.
++        hasNativeVideo = 0;
++        hasNativeAudio = 0;
++    }
+ 
+     if (!m_isUsingFallbackVideoSink) {
+         GST_INFO_OBJECT(pipeline(), "Hardware-accelerated video rendering is enabled, so enabling native-video as well");
+@@ -4465,7 +4478,15 @@ bool MediaPlayerPrivateGStreamer::isHolePunchRenderingEnabled() const
+ #endif
+ 
+     auto& quirksManager = GStreamerQuirksManager::singleton();
+-    return quirksManager.supportsVideoHolePunchRendering();
++    if (!quirksManager.supportsVideoHolePunchRendering())
++        return false;
++    if (!m_wrenSoftwareVideo) {
++        RefPtr player = m_player.get();
++        m_wrenSoftwareVideo = player && player->doesHaveAttribute("wren-software"_s);
++        if (*m_wrenSoftwareVideo)
++            GST_INFO_OBJECT(m_pipeline.get(), "wren-software: this player renders video with WebKit's own sink");
++    }
++    return !*m_wrenSoftwareVideo;
+ }
+ 
+ GstElement* MediaPlayerPrivateGStreamer::createHolePunchVideoSink()
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+index 21a96a7..c93ade2 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+@@ -312,6 +312,9 @@ protected:
+     virtual void updatePlaybackRate();
+ 
+     bool isHolePunchRenderingEnabled() const;
++    // Wren: a <video wren-software> plays with WebKit's own (software) video sink even where the platform
++    // quirks use a hole-punch sink, e.g. thumbnails' previews next to a main video on the TV's one hardware decoder.
++    mutable std::optional<bool> m_wrenSoftwareVideo;
+     GstElement* createHolePunchVideoSink();
+     void pushNextHolePunchBuffer();
+     bool shouldIgnoreIntrinsicSize() final;

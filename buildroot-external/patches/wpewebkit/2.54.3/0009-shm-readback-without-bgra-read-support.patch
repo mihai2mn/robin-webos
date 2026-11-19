@@ -1,0 +1,49 @@
+Subject: [PATCH] Use RGBA SHM readback when GLES cannot read BGRA
+
+Mali-400 MP (GLES 2.0, EGL Linux-r6p1-01rel0) supports BGRA textures
+but not GL_EXT_read_format_bgra. The unconditional BGRA glReadPixels
+fails with GL_INVALID_ENUM, leaving the shared-memory page frame empty.
+
+Keep BGRA reads on desktop GL and GLES with the read-format extension.
+Otherwise read RGBA/UNSIGNED_BYTE and swap R/B in the owned SHM bitmap.
+This only changes the SHM target; direct presentation is unaffected.
+
+Device evidence: RGBA FBO probe passed; BGRA returned 0x500. Applying
+the equivalent conversion via a temporary dispatch shim restored page
+rendering in the installed app. This native patch has not yet been
+validated in a full rebuilt WebKit on the TV.
+
+---
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
+index 9220be1..2075030 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
+@@ -41,6 +41,7 @@
+ #include <array>
+ #include <fcntl.h>
+ #include <unistd.h>
++#include <utility>
+ #include <wtf/SafeStrerror.h>
+ #include <wtf/SystemTracing.h>
+ #include <wtf/TZoneMallocInlines.h>
+@@ -451,7 +452,19 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+         return;
+     }
+ 
+-    glReadPixels(0, 0, m_bitmap->size().width(), m_bitmap->size().height(), GL_BGRA, GL_UNSIGNED_BYTE, m_bitmap->mutableSpan().data());
++    bool supportsBGRAReadback = true;
++#if USE(LIBEPOXY)
++    // BGRA texture support does not imply BGRA readback support on GLES.
++    supportsBGRAReadback = epoxy_is_desktop_gl() || epoxy_has_gl_extension("GL_EXT_read_format_bgra");
++#endif
++    ASSERT(m_bitmap->bytesPerRow() == static_cast<size_t>(m_bitmap->size().width()) * 4);
++    auto pixels = m_bitmap->mutableSpan().first(m_bitmap->sizeInBytes());
++    glReadPixels(0, 0, m_bitmap->size().width(), m_bitmap->size().height(), supportsBGRAReadback ? GL_BGRA : GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
++    if (!supportsBGRAReadback) {
++        // ShareableBitmap consumers expect BGRA; GLES guarantees RGBA/UNSIGNED_BYTE reads.
++        for (size_t offset = 0; offset < pixels.size(); offset += 4)
++            std::swap(pixels[offset], pixels[offset + 2]);
++    }
+ }
+ 
+ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
