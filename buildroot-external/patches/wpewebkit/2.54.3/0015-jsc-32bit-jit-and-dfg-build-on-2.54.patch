@@ -1,0 +1,571 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] JSC: make the 32-bit (ARMv7) baseline JIT and DFG build again on 2.54
+
+2.54 turned the JIT and the DFG off on every 32-bit build (see patch 0004, which turns them back on for ARMv7
+Linux), and the 32-bit code paths stopped compiling. Fixes, each matching the 64-bit or the 2.50.5 code:
+
+- Missing includes that 2.54 dropped from shared headers (JSCJSValue.h <wtf/Atomics.h>, InlineCacheCompiler.h
+  CCallHelpers.h, ScriptExecutable.cpp CompilationResult.h).
+- InlineCacheCompiler: 32-bit typos (propertyPayloadGPR -> propertyGPR), a link stub for
+  getByIdMegamorphicGetterHandler, and ArrayLengthStore's hole fill for tag/payload values (64-bit unchanged).
+- AssemblyHelpers: emitAllocateJSBigInt64 is 64-bit only; loadMegamorphicGetterSetter gets an unreachable 32-bit
+  stub (LoadMegamorphicGetter is only created for JSVALUE64).
+- MacroAssemblerARMv7: moveConditionally32 / moveConditionallyTest32 with an immediate thenCase (via
+  addressTempRegister when the immediate is not a single instruction).
+- DFG: the megamorphic and EnumeratorPutByVal nodes (64-bit backend only) fall back to the generic nodes on
+  32-bit; MapStorage for 32-bit (empty JSValue for a null storage); string equality calls the operation instead
+  of a 64-bit-only thunk; the 64-bit-only Array.prototype.sort nodes are guarded.
+
+Written by a DSH Agent Teams session and reviewed; build/jit254/REPORT.md and REVIEW-NOTES.md have the details.
+---
+diff --git a/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h b/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h
+index d764ed66..94741c96 100644
+--- a/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h
++++ b/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h
+@@ -3825,6 +3825,62 @@ public:
+         }
+     }
+ 
++    // Needed by DFGSpeculativeJIT::compileStringSlice/compileStringSubstr (shared 32_64 code),
++    // which computes size = max(0, min(length, temp)) as
++    //     moveConditionally32(LessThan, temp, TrustedImm32(0), TrustedImm32(0), temp, temp)
++    // ARM64/X86_64 already have this immediate-thenCase form; ARMv7 only had the RegisterID one.
++    // Inside an IT block move(thenCase) must be one instruction (mov/mvn of an encodable immediate). Other
++    // immediates (movw+movt) go through addressTempRegister, set before the compare, and the register form.
++    static bool isSingleInstructionImm32(TrustedImm32 imm)
++    {
++        return ARMThumbImmediate::makeEncodedImm(imm.m_value).isValid() || ARMThumbImmediate::makeEncodedImm(~imm.m_value).isValid();
++    }
++
++    void moveConditionally32(RelationalCondition cond, RegisterID left, TrustedImm32 right, TrustedImm32 thenCase, RegisterID elseCase, RegisterID dest)
++    {
++        if (!isSingleInstructionImm32(thenCase)) {
++            move(thenCase, addressTempRegister);
++            moveConditionally32(cond, left, right, addressTempRegister, elseCase, dest);
++            return;
++        }
++        if (!right.m_value) {
++            if (auto resultCondition = commuteCompareToZeroIntoTest(cond)) {
++                moveConditionallyTest32(*resultCondition, left, left, thenCase, elseCase, dest);
++                return;
++            }
++        }
++
++        compare32AndSetFlags(left, right);
++        if (elseCase == dest) {
++            m_assembler.it(armV7Condition(cond));
++            move(thenCase, dest);
++        } else {
++            m_assembler.it(armV7Condition(cond), false);
++            move(thenCase, dest);
++            move(elseCase, dest);
++        }
++    }
++
++    // RegisterID/TrustedImm32-thenCase form, mirroring MacroAssemblerARM64.h. Reached from
++    // moveConditionally32()'s zero-immediate specialisation, which passes thenCase as an immediate.
++    void moveConditionallyTest32(ResultCondition cond, RegisterID left, RegisterID right, TrustedImm32 thenCase, RegisterID elseCase, RegisterID dest)
++    {
++        if (!isSingleInstructionImm32(thenCase)) {
++            move(thenCase, addressTempRegister);
++            moveConditionallyTest32(cond, left, right, addressTempRegister, elseCase, dest);
++            return;
++        }
++        m_assembler.tst(left, right);
++        if (elseCase == dest) {
++            m_assembler.it(armV7Condition(cond));
++            move(thenCase, dest);
++        } else {
++            m_assembler.it(armV7Condition(cond), false);
++            move(thenCase, dest);
++            move(elseCase, dest);
++        }
++    }
++
+     void moveConditionallyTest32(ResultCondition cond, RegisterID testReg, RegisterID mask, RegisterID src, RegisterID dest)
+     {
+         if (src == dest)
+diff --git a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.cpp b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.cpp
+index c6ad00c2..a6a6ea50 100644
+--- a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.cpp
++++ b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.cpp
+@@ -2042,6 +2042,7 @@ void InlineCacheCompiler::generateWithGuard(unsigned index, AccessCase& accessCa
+         auto isInt32 = jit.branch32(CCallHelpers::Equal, scratchGPR, CCallHelpers::TrustedImm32(IsArray | Int32Shape));
+         auto isContiguous = jit.branch32(CCallHelpers::Equal, scratchGPR, CCallHelpers::TrustedImm32(IsArray | ContiguousShape));
+         fallThrough.append(jit.branch32(CCallHelpers::NotEqual, scratchGPR, CCallHelpers::TrustedImm32(IsArray | DoubleShape)));
++#if USE(JSVALUE64)
+         jit.move(CCallHelpers::TrustedImm64(std::bit_cast<int64_t>(PNaN)), scratchGPR);
+         auto holeReady = jit.jump();
+         isInt32.link(&jit);
+@@ -2049,6 +2050,14 @@ void InlineCacheCompiler::generateWithGuard(unsigned index, AccessCase& accessCa
+         jit.move(CCallHelpers::TrustedImm64(JSValue::encode(JSValue())), scratchGPR);
+         holeReady.link(&jit);
+ 
++#else
++        isInt32.link(&jit);
++        isContiguous.link(&jit);
++        // Every shape runs the guards below. Vacated elements are refilled with the hole value, PNaN for a Double
++        // butterfly and the empty value otherwise; the fill loop picks it from scratchGPR, which still holds the
++        // masked indexing type (the allocator locks it). storeTrustedValue() emits the right stores for the active
++        // JSValue representation (one 64-bit store, or tag + payload on 32-bit), so no 64-bit register holds it.
++#endif
+         m_failAndIgnore.append(jit.branchIfNotInt32(valueRegs));
+ 
+         auto allocator = makeDefaultScratchAllocator(scratchGPR);
+@@ -2062,12 +2071,32 @@ void InlineCacheCompiler::generateWithGuard(unsigned index, AccessCase& accessCa
+         jit.load32(CCallHelpers::Address(scratch2GPR, Butterfly::offsetOfPublicLength()), scratch3GPR);
+         failAndIgnore.append(jit.branch32(CCallHelpers::Above, valueRegs.payloadGPR(), scratch3GPR));
+ 
++#if USE(JSVALUE64)
+         auto loopStart = jit.label();
+         auto loopDone = jit.branch32(CCallHelpers::BelowOrEqual, scratch3GPR, valueRegs.payloadGPR());
+         jit.sub32(CCallHelpers::TrustedImm32(1), scratch3GPR);
+         jit.store64(scratchGPR, CCallHelpers::BaseIndex(scratch2GPR, scratch3GPR, CCallHelpers::TimesEight));
+         jit.jump().linkTo(loopStart, &jit);
+         loopDone.link(&jit);
++#else
++        auto isDoubleFill = jit.branch32(CCallHelpers::Equal, scratchGPR, CCallHelpers::TrustedImm32(IsArray | DoubleShape));
++        auto nonDoubleLoopStart = jit.label();
++        auto nonDoubleLoopDone = jit.branch32(CCallHelpers::BelowOrEqual, scratch3GPR, valueRegs.payloadGPR());
++        jit.sub32(CCallHelpers::TrustedImm32(1), scratch3GPR);
++        jit.storeTrustedValue(JSValue(), CCallHelpers::BaseIndex(scratch2GPR, scratch3GPR, CCallHelpers::TimesEight));
++        jit.jump().linkTo(nonDoubleLoopStart, &jit);
++        nonDoubleLoopDone.link(&jit);
++        auto fillDone = jit.jump();
++
++        isDoubleFill.link(&jit);
++        auto doubleLoopStart = jit.label();
++        auto doubleLoopDone = jit.branch32(CCallHelpers::BelowOrEqual, scratch3GPR, valueRegs.payloadGPR());
++        jit.sub32(CCallHelpers::TrustedImm32(1), scratch3GPR);
++        jit.storeTrustedValue(JSValue(JSValue::EncodeAsDouble, PNaN), CCallHelpers::BaseIndex(scratch2GPR, scratch3GPR, CCallHelpers::TimesEight));
++        jit.jump().linkTo(doubleLoopStart, &jit);
++        doubleLoopDone.link(&jit);
++        fillDone.link(&jit);
++#endif
+ 
+         jit.store32(valueRegs.payloadGPR(), CCallHelpers::Address(scratch2GPR, Butterfly::offsetOfPublicLength()));
+ 
+@@ -2468,7 +2497,7 @@ void InlineCacheCompiler::generateWithGuard(unsigned index, AccessCase& accessCa
+         fallThrough.append(jit.branchIfNotTrue(m_propertyCache.propertyGPR()));
+ #else
+         fallThrough.append(jit.branch32(CCallHelpers::NotEqual, m_propertyCache.propertyTagGPR(), CCallHelpers::TrustedImm32(JSValue::BooleanTag)));
+-        fallThrough.append(jit.branchTest32(CCallHelpers::Zero, m_propertyCache.propertyPayloadGPR(), CCallHelpers::TrustedImm32(1)));
++        fallThrough.append(jit.branchTest32(CCallHelpers::Zero, m_propertyCache.propertyGPR(), CCallHelpers::TrustedImm32(1)));
+ #endif
+         emitDefaultGuard();
+         break;
+@@ -2482,7 +2511,7 @@ void InlineCacheCompiler::generateWithGuard(unsigned index, AccessCase& accessCa
+         fallThrough.append(jit.branchIfNotFalse(m_propertyCache.propertyGPR()));
+ #else
+         fallThrough.append(jit.branch32(CCallHelpers::NotEqual, m_propertyCache.propertyTagGPR(), CCallHelpers::TrustedImm32(JSValue::BooleanTag)));
+-        fallThrough.append(jit.branchTest32(CCallHelpers::NonZero, m_propertyCache.propertyPayloadGPR(), CCallHelpers::TrustedImm32(1)));
++        fallThrough.append(jit.branchTest32(CCallHelpers::NonZero, m_propertyCache.propertyGPR(), CCallHelpers::TrustedImm32(1)));
+ #endif
+         emitDefaultGuard();
+         break;
+@@ -8382,6 +8411,7 @@ MacroAssemblerCodeRef<JITThunkPtrTag> getByIdMissHandler(VM&) { return { }; }
+ MacroAssemblerCodeRef<JITThunkPtrTag> getByIdCustomAccessorHandler(VM&) { return { }; }
+ MacroAssemblerCodeRef<JITThunkPtrTag> getByIdCustomValueHandler(VM&) { return { }; }
+ MacroAssemblerCodeRef<JITThunkPtrTag> getByIdGetterHandler(VM&) { return { }; }
++MacroAssemblerCodeRef<JITThunkPtrTag> getByIdMegamorphicGetterHandler(VM&) { return { }; }
+ MacroAssemblerCodeRef<JITThunkPtrTag> getByIdProxyObjectLoadHandler(VM&) { return { }; }
+ MacroAssemblerCodeRef<JITThunkPtrTag> getByIdModuleNamespaceLoadHandler(VM&) { return { }; }
+ MacroAssemblerCodeRef<JITThunkPtrTag> putByIdReplaceHandler(VM&) { return { }; }
+diff --git a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h
+index 41ac3348..6e3677ca 100644
+--- a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h
++++ b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h
+@@ -32,6 +32,7 @@
+ #include "JITStubRoutine.h"
+ #include "JSFunctionInlines.h"
+ #include "MacroAssembler.h"
++#include "CCallHelpers.h" // CCallHelpers must be complete here: the inline methods below take CCallHelpers& and return its nested Jump / JumpList
+ #include "PropertyInlineCacheClearingWatchpoint.h"
+ #include "ScratchRegisterAllocator.h"
+ #include <wtf/Vector.h>
+diff --git a/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp b/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp
+index 2430b94c..732743f4 100644
+--- a/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp
++++ b/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp
+@@ -9045,7 +9045,12 @@ void ByteCodeParser::parseBlock(unsigned limit)
+             addVarArgChild(base);
+             addVarArgChild(property);
+             addVarArgChild(nullptr); // Leave room for property storage.
+-            Node* getByVal = addToGraph(Node::VarArg, getByStatus.isMegamorphic() ? GetByValMegamorphic : GetByVal, OpInfo(arrayMode.asWord()), OpInfo(prediction));
++            // The megamorphic nodes are a 64-bit-only dispatch optimisation: their result is
++            // identical to the generic GetByVal/PutByVal/InByVal for the same IC state, but the
++            // 32-bit DFG backend has no implementation for them (they are in the "unexpected node
++            // in DFG backend" group in DFGSpeculativeJIT32_64.cpp). Fall back to the generic node
++            // on 32-bit, which is what 2.50.5 did before these nodes existed.
++            Node* getByVal = addToGraph(Node::VarArg, (is64Bit() && getByStatus.isMegamorphic()) ? GetByValMegamorphic : GetByVal, OpInfo(arrayMode.asWord()), OpInfo(prediction));
+             m_exitOK = false; // GetByVal must be treated as if it clobbers exit state, since FixupPhase may make it generic.
+             set(bytecode.m_dst, getByVal);
+             if (!getByStatus.isMegamorphic() && getByStatus.observedPropertyInlineCacheSlowPath())
+@@ -9063,7 +9068,7 @@ void ByteCodeParser::parseBlock(unsigned limit)
+             Node* property = get(bytecode.m_property);
+ 
+             GetByStatus getByStatus = GetByStatus::computeFor(m_inlineStackTop->m_profiledBlock, m_inlineStackTop->m_baselineMap, m_icContextStack, currentCodeOrigin());
+-            Node* getByValWithThis = addToGraph(getByStatus.isMegamorphic() ? GetByValWithThisMegamorphic : GetByValWithThis, OpInfo(), OpInfo(prediction), base, thisValue, property);
++            Node* getByValWithThis = addToGraph((is64Bit() && getByStatus.isMegamorphic()) ? GetByValWithThisMegamorphic : GetByValWithThis, OpInfo(), OpInfo(prediction), base, thisValue, property);
+             set(bytecode.m_dst, getByValWithThis);
+ 
+             NEXT_OPCODE(op_get_by_val_with_this);
+@@ -9311,7 +9316,7 @@ void ByteCodeParser::parseBlock(unsigned limit)
+             GetByStatus getByStatus = GetByStatus::computeFor(m_inlineStackTop->m_profiledBlock, m_inlineStackTop->m_baselineMap, m_icContextStack, currentCodeOrigin());
+ 
+             auto* data = m_graph.m_getByIdData.add(GetByIdData { CacheableIdentifier::createFromIdentifierOwnedByCodeBlock(m_inlineStackTop->m_profiledBlock, uid), CacheType::GetByIdSelf });
+-            set(bytecode.m_dst, addToGraph(getByStatus.isMegamorphic() && canUseMegamorphicGetById(*m_vm, uid) ? GetByIdWithThisMegamorphic : GetByIdWithThis, OpInfo(data), OpInfo(prediction), base, thisValue));
++            set(bytecode.m_dst, addToGraph(is64Bit() && getByStatus.isMegamorphic() && canUseMegamorphicGetById(*m_vm, uid) ? GetByIdWithThisMegamorphic : GetByIdWithThis, OpInfo(data), OpInfo(prediction), base, thisValue));
+ 
+             NEXT_OPCODE(op_get_by_id_with_this);
+         }
+@@ -10776,7 +10781,7 @@ void ByteCodeParser::parseBlock(unsigned limit)
+                     }
+                 }
+                 ArrayMode arrayMode = getArrayMode(bytecode.metadata(codeBlock).m_arrayProfile, Array::Read);
+-                set(bytecode.m_dst, addToGraph(status.isMegamorphic() ? InByValMegamorphic : InByVal, OpInfo(arrayMode.asWord()), base, property));
++                set(bytecode.m_dst, addToGraph((is64Bit() && status.isMegamorphic()) ? InByValMegamorphic : InByVal, OpInfo(arrayMode.asWord()), base, property));
+             }
+             NEXT_OPCODE(op_in_by_val);
+         }
+@@ -10925,7 +10930,7 @@ void ByteCodeParser::parseBlock(unsigned limit)
+             }
+ 
+             GetByStatus getByStatus = GetByStatus::computeFor(m_inlineStackTop->m_profiledBlock, m_inlineStackTop->m_baselineMap, m_icContextStack, currentCodeOrigin());
+-            if (getByStatus.isMegamorphic()) {
++            if (is64Bit() && getByStatus.isMegamorphic()) {
+                 SpeculatedType prediction = getPrediction();
+                 addVarArgChild(base);
+                 addVarArgChild(propertyName);
+@@ -10987,7 +10992,7 @@ void ByteCodeParser::parseBlock(unsigned limit)
+             Node* property = get(bytecode.m_propertyName);
+ 
+             InByStatus inByStatus = InByStatus::computeFor(m_inlineStackTop->m_profiledBlock, m_inlineStackTop->m_baselineMap, m_icContextStack, currentCodeOrigin());
+-            if (inByStatus.isMegamorphic()) {
++            if (is64Bit() && inByStatus.isMegamorphic()) {
+                 set(bytecode.m_dst, addToGraph(InByValMegamorphic, OpInfo(arrayMode.asWord()), base, property));
+                 NEXT_OPCODE(op_enumerator_in_by_val);
+             }
+@@ -11061,7 +11066,7 @@ void ByteCodeParser::parseBlock(unsigned limit)
+ 
+             // FIXME: Checking for a BadConstantValue causes us to always use the Generic variant if we switched from IndexedMode -> IndexedMode + OwnStructureMode even though that might be fine.
+             PutByStatus putByStatus = PutByStatus::computeFor(m_inlineStackTop->m_profiledBlock, m_inlineStackTop->m_baselineMap, m_icContextStack, currentCodeOrigin());
+-            if (putByStatus.isMegamorphic()) {
++            if (is64Bit() && putByStatus.isMegamorphic()) {
+                 addVarArgChild(base);
+                 addVarArgChild(propertyName);
+                 addVarArgChild(value);
+@@ -11096,6 +11101,21 @@ void ByteCodeParser::parseBlock(unsigned limit)
+                 NEXT_OPCODE(op_enumerator_put_by_val);
+             }
+ 
++            // EnumeratorPutByVal is a 64-bit-only fast path over the enumerator's observed mode; the
++            // 32-bit DFG backend has no implementation for it (it is in the "unexpected node in DFG
++            // backend" group in DFGSpeculativeJIT32_64.cpp). On 32-bit store through the generic
++            // PutByVal instead, which is what 2.50.5 did before this node existed.
++            if (!is64Bit()) {
++                addVarArgChild(base);
++                addVarArgChild(propertyName);
++                addVarArgChild(value);
++                addVarArgChild(nullptr); // For property storage to match PutByVal.
++                addVarArgChild(nullptr); // Leave room for length.
++                addToGraph(Node::VarArg, PutByVal, OpInfo(arrayMode.asWord()), OpInfo(bytecode.m_ecmaMode));
++                m_exitOK = false; // PutByVal must be treated as if it clobbers exit state, since FixupPhase may make it generic.
++                NEXT_OPCODE(op_enumerator_put_by_val);
++            }
++
+             addVarArgChild(base);
+             addVarArgChild(propertyName);
+             addVarArgChild(value);
+@@ -11489,7 +11509,7 @@ void ByteCodeParser::handlePutByVal(Bytecode bytecode, BytecodeIndex osrExitInde
+     addVarArgChild(value);
+     addVarArgChild(nullptr); // Leave room for property storage.
+     addVarArgChild(nullptr); // Leave room for length.
+-    Node* putByVal = addToGraph(Node::VarArg, isDirect ? PutByValDirect : status.isMegamorphic() ? PutByValMegamorphic : PutByVal, OpInfo(arrayMode.asWord()), OpInfo(bytecode.m_ecmaMode));
++    Node* putByVal = addToGraph(Node::VarArg, isDirect ? PutByValDirect : (is64Bit() && status.isMegamorphic()) ? PutByValMegamorphic : PutByVal, OpInfo(arrayMode.asWord()), OpInfo(bytecode.m_ecmaMode));
+     m_exitOK = false; // PutByVal and PutByValDirect must be treated as if they clobber exit state, since FixupPhase may make them generic.
+     if (!status.isMegamorphic() && status.observedPropertyInlineCacheSlowPath())
+         m_graph.m_slowPutByVal.add(putByVal);
+diff --git a/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.cpp b/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.cpp
+index 7cb4f8e0..1e46e940 100644
+--- a/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.cpp
++++ b/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.cpp
+@@ -7939,9 +7939,17 @@ void SpeculativeJIT::compileStringEquality(
+         slowCase.link(this);
+         silentSpill(savePlans);
+         setupArguments<decltype(operationCompareStringEq)>(LinkableConstant::globalObject(*this, node), leftGPR, rightGPR);
++#if USE(JSVALUE64)
+         prepareForExternalCall();
+         emitStoreCodeOrigin(node->origin.semantic);
+         nearCallThunk(CodeLocationLabel<JITThunkPtrTag>(vm().getCTIStub(stringEqualThunkGenerator).code()));
++#else
++        // stringEqualThunkGenerator is a 64-bit-only CTI thunk: it returns a boxed JSValue in
++        // returnValueGPR (a single register holds the whole EncodedJSValue), which has no meaning
++        // on JSVALUE32_64 where EncodedJSValue is a two-register pair. Call the operation instead;
++        // it returns a plain bool, which is what we are after.
++        appendCall(operationCompareStringEq);
++#endif
+         auto exceptionReg = tryHandleOrGetExceptionUnderSilentSpill<decltype(operationCompareStringEq)>(savePlans, leftTempGPR);
+         setupResults(leftTempGPR);
+         silentFill(savePlans);
+@@ -14961,6 +14969,40 @@ void SpeculativeJIT::compileIsEmptyStorage(Node* node)
+     unblessedBooleanResult(resultGPR, node);
+ }
+ 
++#if USE(JSVALUE32_64)
++// 64-bit: DFGSpeculativeJIT64.cpp. MapStorage feeds JSMapIterator/JSSetIterator's Storage internal field (the
++// FastMap/FastSet iterator-open path in DFGByteCodeParser has no is64Bit() guard). The storage pointer is null
++// until the map/set has storage; on 64-bit a null pointer is the empty JSValue, which the runtime checks for.
++// On 32-bit the empty JSValue is a different tag/payload pair, so produce it explicitly: EmptyValueTag/0 for a
++// null storage pointer, CellTag/pointer otherwise.
++void SpeculativeJIT::compileMapStorage(Node* node)
++{
++    SpeculateCellOperand map(this, node->child1());
++    GPRTemporary resultTag(this);
++    GPRTemporary resultPayload(this);
++
++    GPRReg mapGPR = map.gpr();
++    GPRReg resultTagGPR = resultTag.gpr();
++    GPRReg resultPayloadGPR = resultPayload.gpr();
++
++    if (node->child1().useKind() == MapObjectUse) {
++        speculateMapObject(node->child1(), mapGPR);
++        loadPtr(Address(mapGPR, JSMap::offsetOfStorage()), resultPayloadGPR);
++    } else if (node->child1().useKind() == SetObjectUse) {
++        speculateSetObject(node->child1(), mapGPR);
++        loadPtr(Address(mapGPR, JSSet::offsetOfStorage()), resultPayloadGPR);
++    } else
++        RELEASE_ASSERT_NOT_REACHED();
++
++    move(TrustedImm32(JSValue::CellTag), resultTagGPR);
++    auto hasStorage = branchTestPtr(NonZero, resultPayloadGPR);
++    move(TrustedImm32(JSValue::EmptyValueTag), resultTagGPR);
++    hasStorage.link(this);
++
++    jsValueResult(resultTagGPR, resultPayloadGPR, node);
++}
++#endif // USE(JSVALUE32_64)
++
+ void SpeculativeJIT::compileMapStorageOrSentinel(Node* node)
+ {
+     SpeculateCellOperand map(this, node->child1());
+@@ -15782,6 +15824,14 @@ void SpeculativeJIT::compileNewButterflyWithSize(Node* node)
+     storageResult(storageGPR, node);
+ }
+ 
++#if USE(JSVALUE64)
++// The following four nodes implement the inlined Array.prototype.sort() fast path. The byte
++// code parser only emits them from addArraySortCallOptimization(), which bails out with
++// `if (!is64Bit()) return CallOptimizationResult::DidNothing;` (DFGByteCodeParser.cpp), and the
++// JSVALUE32_64 dispatcher in DFGSpeculativeJIT32_64.cpp RELEASE_ASSERT_NOT_REACHED()s on them.
++// They move whole JSValues around with 64-bit register ops, which is exactly why they exist
++// for 64-bit only. compileNewButterflyWithSize() below them is not 64-bit specific and stays
++// shared.
+ void SpeculativeJIT::compileGetCellButterflySlot(Node* node)
+ {
+     SpeculateCellOperand scratch(this, node->child1());
+@@ -15891,6 +15941,7 @@ void SpeculativeJIT::compileArraySortCommit(Node* node)
+     storePtr(storageGPR, &vm().m_cachedSortScratch);
+     noResult(node);
+ }
++#endif // USE(JSVALUE64)
+ 
+ void SpeculativeJIT::compileNewArrayWithButterfly(Node* node)
+ {
+diff --git a/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.h b/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.h
+index 02cd753a..63961413 100644
+--- a/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.h
++++ b/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.h
+@@ -1809,10 +1809,15 @@ public:
+     void compileStrCat(Node*);
+     void compileNewArrayBuffer(Node*);
+     void compileNewButterflyWithSize(Node*);
++#if USE(JSVALUE64)
++    // These four implement the inlined Array.prototype.sort() fast path, which the byte code
++    // parser only builds on 64-bit (see addArraySortCallOptimization()). Their definitions in
++    // DFGSpeculativeJIT.cpp are guarded the same way.
+     void compileGetCellButterflySlot(Node*);
+     void compilePutCellButterflySlot(Node*);
+     void compileArraySortCompact(Node*);
+     void compileArraySortCommit(Node*);
++#endif
+     void compileNewArrayWithSize(Node*);
+     void compileNewArrayWithButterfly(Node*);
+     void compileNewArrayWithSpecies(Node*);
+diff --git a/Source/JavaScriptCore/dfg/DFGSpeculativeJIT32_64.cpp b/Source/JavaScriptCore/dfg/DFGSpeculativeJIT32_64.cpp
+index b5cbfcb1..0ddce405 100644
+--- a/Source/JavaScriptCore/dfg/DFGSpeculativeJIT32_64.cpp
++++ b/Source/JavaScriptCore/dfg/DFGSpeculativeJIT32_64.cpp
+@@ -30,6 +30,7 @@
+ #if ENABLE(DFG_JIT)
+ 
+ #include "ArrayPrototype.h"
++#include "BaselineJITRegisters.h"
+ #include "CallFrameShuffler.h"
+ #include "ClonedArguments.h"
+ #include "DFGAbstractInterpreterInlines.h"
+@@ -4045,6 +4046,10 @@ void SpeculativeJIT::compile(Node* node)
+         compileIsEmptyStorage(node);
+         break;
+ 
++    case MapStorage:
++        compileMapStorage(node);
++        break;
++
+     case MapStorageOrSentinel:
+         compileMapStorageOrSentinel(node);
+         break;
+@@ -4542,8 +4547,17 @@ void SpeculativeJIT::compile(Node* node)
+         DFG_CRASH(m_graph, node, "IsBigInt is only used when USE_BIGINT32, which can only be true in 64 bit mode");
+         break;
+ 
+-    case StringIteratorNextWithUndefined:
+-        DFG_CRASH(m_graph, node, "StringIteratorNextWithUndefined is only used in 64-bit DFG");
++    case StringIteratorNextWithUndefined: {
++        compileStringIteratorNext(node);
++        break;
++    }
++
++    // RegExpStringIteratorNext is only produced when the byte code parser's
++    // RegExpStringIteratorNextIntrinsic case passes its `if (!is64Bit()) return
++    // CallOptimizationResult::DidNothing;` guard (DFGByteCodeParser.cpp:3893), i.e. it cannot
++    // reach the 32-bit backend. Its result is also a JSValue in a single register on 64-bit.
++    case RegExpStringIteratorNext:
++        DFG_CRASH(m_graph, node, "RegExpStringIteratorNext is only produced in 64-bit DFG");
+         break;
+ 
+     case FilterCallLinkStatus:
+@@ -4639,7 +4653,6 @@ void SpeculativeJIT::compile(Node* node)
+     case InByValMegamorphic:
+     case MultiGetByVal:
+     case MultiPutByVal:
+-    case MapStorage:
+     case ArrayShift:
+     case ArrayUnshift:
+         DFG_CRASH(m_graph, node, "unexpected node in DFG backend");
+@@ -5674,6 +5687,8 @@ void SpeculativeJIT::compileStringIteratorNext(Node* node)
+     GPRReg resultValueGPR = resultValue.gpr();
+     GPRReg resultPositionGPR = resultPosition.gpr();
+ 
++    bool isStringIteratorNextWithUndefined = node->op() == StringIteratorNextWithUndefined;
++
+     speculateString(node->child1(), stringGPR);
+ 
+     VM& vm = this->vm();
+@@ -5701,6 +5716,14 @@ void SpeculativeJIT::compileStringIteratorNext(Node* node)
+     doneCases.append(jump());
+ 
+     isDone.link(this);
++    // The parser emits StringIteratorNextWithUndefined (its "value" on done is undefined, and
++    // every consumer checks `done` first); plain StringIteratorNext uses the empty string as a
++    // placeholder cell because a 32-bit tuple value slot holds a cell, not a JSValue. The
++    // undefined flavor cannot put undefined in the value slot at all: that slot is a JSValue
++    // on 64-bit but a single cell GPR here, and the undefined case is only ever reached with
++    // position == doneIndex, so we keep the empty string cell and mark done purely through the
++    // position. This mirrors the 64-bit code, which also falls through to the done value slot
++    // and only differs in which constant is stored there (handled by the slow path below).
+     loadLinkableConstant(LinkableConstant(*this, jsEmptyString(vm)), resultValueGPR);
+     move(TrustedImm32(JSStringIterator::doneIndex), resultPositionGPR);
+ 
+@@ -5709,13 +5732,26 @@ void SpeculativeJIT::compileStringIteratorNext(Node* node)
+     Vector<SilentRegisterSavePlan> savePlans;
+     silentSpillAllRegistersImpl(false, savePlans, resultValueGPR, resultPositionGPR);
+     Label doneOperationCall = label();
++    // The slow path below needs the empty-string cell as the "done" value for
++    // StringIteratorNextWithUndefined. LinkableConstant is a trivially copyable value, so it can be
++    // captured by value; `vm` cannot be (VM is non-copyable), hence it is resolved out here.
++    LinkableConstant emptyStringConstant(*this, jsEmptyString(vm));
+     addSlowPathGeneratorLambda([=, this, savePlans = WTF::move(savePlans), slowCases = WTF::move(slowCases)]() mutable {
+         slowCases.link(this);
+         silentSpill(savePlans);
++        // operationStringIteratorNext returns a UGPRPair, which is a uint64_t in 32-bit mode.
++        // It is returned in the returnValueGPR/returnValueGPR2 pair, so read both halves.
++        auto operation = operationStringIteratorNext;
+         setupArguments<decltype(operationStringIteratorNext)>(LinkableConstant::globalObject(*this, node), stringGPR, positionGPR);
+-        appendCall(operationStringIteratorNext);
++        appendCallSetResult(operation, resultValueGPR, resultPositionGPR);
+         std::optional<GPRReg> exceptionReg = tryHandleOrGetExceptionUnderSilentSpill<decltype(operationStringIteratorNext)>(savePlans, resultValueGPR, resultPositionGPR);
+-        setupResults(resultValueGPR, resultPositionGPR);
++        // Done means the position came back as doneIndex; that is the only place the value
++        // slot's content is defined, and the undefined flavor needs no separate cell for it.
++        if (isStringIteratorNextWithUndefined) {
++            auto notDone = branch32(NotEqual, resultPositionGPR, TrustedImm32(JSStringIterator::doneIndex));
++            loadLinkableConstant(emptyStringConstant, resultValueGPR);
++            notDone.link(this);
++        }
+         silentFill(savePlans);
+         if (exceptionReg)
+             exceptionCheck(*exceptionReg);
+diff --git a/Source/JavaScriptCore/jit/AssemblyHelpers.cpp b/Source/JavaScriptCore/jit/AssemblyHelpers.cpp
+index c5072f7e..53604f0c 100644
+--- a/Source/JavaScriptCore/jit/AssemblyHelpers.cpp
++++ b/Source/JavaScriptCore/jit/AssemblyHelpers.cpp
+@@ -617,6 +617,20 @@ AssemblyHelpers::JumpList AssemblyHelpers::loadMegamorphicGetterSetter(VM& vm, G
+     return slowCases;
+ }
+ 
++#endif // USE(JSVALUE64)
++
++#if USE(JSVALUE32_64)
++// webOS browser (32-bit JIT): InlineCacheCompiler only creates AccessCase::LoadMegamorphicGetter under
++// USE(JSVALUE64), so this emitter is never called on 32_64; it only has to link (InlineCacheCompiler references
++// it from code shared by both value representations). Fail loudly if that ever changes.
++AssemblyHelpers::JumpList AssemblyHelpers::loadMegamorphicGetterSetter(VM&, GPRReg, GPRReg, UniquedStringImpl*, GPRReg, GPRReg, GPRReg, GPRReg)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++    return { };
++}
++#endif // USE(JSVALUE32_64)
++
++#if USE(JSVALUE64)
+ std::tuple<AssemblyHelpers::JumpList, AssemblyHelpers::JumpList> AssemblyHelpers::storeMegamorphicProperty(VM& vm, GPRReg baseGPR, GPRReg uidGPR, UniquedStringImpl* uid, GPRReg valueGPR, GPRReg scratch1GPR, GPRReg scratch2GPR, GPRReg scratch3GPR)
+ {
+     // uidGPR can be InvalidGPRReg if uid is non-nullptr.
+diff --git a/Source/JavaScriptCore/jit/AssemblyHelpers.h b/Source/JavaScriptCore/jit/AssemblyHelpers.h
+index dde84d43..6f4e1880 100644
+--- a/Source/JavaScriptCore/jit/AssemblyHelpers.h
++++ b/Source/JavaScriptCore/jit/AssemblyHelpers.h
+@@ -2109,6 +2109,11 @@ public:
+         storePtr(TrustedImmPtr(nullptr), Address(resultGPR, JSObject::butterflyOffset()));
+     }
+ 
++    // 64-bit only: its sole caller is DFGSpeculativeJIT64.cpp, and heap BigInts as well as the
++    // 64-bit register ops it uses only exist under USE(JSVALUE64). Keeping the guard outside the
++    // template line matters: a dangling 'template<typename StructureType>' would otherwise bind
++    // to whatever declaration follows it on 32_64 builds.
++#if USE(JSVALUE64)
+     template<typename StructureType>
+     void emitAllocateJSBigInt64(VM& vm, GPRReg resultGPR, GPRReg valueGPR, GPRReg scratchGPR1, GPRReg scratchGPR2, StructureType structure, bool isSigned, JumpList& slowCases)
+     {
+@@ -2141,6 +2146,7 @@ public:
+ 
+         done.link(this);
+     }
++#endif // USE(JSVALUE64)
+ 
+     enum LazyGlobalObjectLoadTag { LazyBaselineGlobalObject };
+     JumpList branchIfValue(VM&, JSValueRegs, GPRReg scratch, GPRReg scratchIfShouldCheckMasqueradesAsUndefined, FPRReg, FPRReg, bool shouldCheckMasqueradesAsUndefined, Variant<JSGlobalObject*, GPRReg, LazyGlobalObjectLoadTag>, bool negateResult);
+diff --git a/Source/JavaScriptCore/runtime/JSCJSValue.h b/Source/JavaScriptCore/runtime/JSCJSValue.h
+index 5d51535b..6c12fcf0 100644
+--- a/Source/JavaScriptCore/runtime/JSCJSValue.h
++++ b/Source/JavaScriptCore/runtime/JSCJSValue.h
+@@ -27,6 +27,7 @@
+ #include <JavaScriptCore/PureNaN.h>
+ #include <atomic>
+ #include <cmath>
++#include <wtf/Atomics.h>
+ #include <wtf/Forward.h>
+ #include <wtf/HashFunctions.h>
+ #include <wtf/HashTraits.h>
+diff --git a/Source/JavaScriptCore/runtime/ScriptExecutable.cpp b/Source/JavaScriptCore/runtime/ScriptExecutable.cpp
+index 76a66a05..4220b213 100644
+--- a/Source/JavaScriptCore/runtime/ScriptExecutable.cpp
++++ b/Source/JavaScriptCore/runtime/ScriptExecutable.cpp
+@@ -26,6 +26,7 @@
+ #include "config.h"
+ 
+ #include "CodeBlock.h"
++#include "CompilationResult.h"
+ #include "Debugger.h"
+ #include "EvalCodeBlock.h"
+ #include "FunctionCodeBlock.h"
