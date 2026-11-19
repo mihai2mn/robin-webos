@@ -28,7 +28,8 @@ ifeq ($(WPEB_SOFTFP_JIT),y)
 WPEWEBKIT_CONF_OPTS += \
 	-DCMAKE_C_FLAGS="$(TARGET_CFLAGS) -mthumb" \
 	-DCMAKE_CXX_FLAGS="$(TARGET_CXXFLAGS) -mthumb"
-else ifneq ($(BR2_ARM_EABIHF),y)
+else ifeq ($(BR2_arm)$(BR2_ARM_EABIHF),y)
+# (32-bit softfp ARM only: aarch64 keeps WebKit's defaults, baseline + DFG + FTL JIT and WebAssembly)
 WPEWEBKIT_CONF_OPTS += \
 	-DENABLE_JIT=OFF \
 	-DENABLE_DFG_JIT=OFF \
