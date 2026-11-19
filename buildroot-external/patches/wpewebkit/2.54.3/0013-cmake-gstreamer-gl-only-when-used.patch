@@ -1,0 +1,22 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] cmake: GStreamer GL only for USE_GSTREAMER_GL
+
+2.54 asks for libgstgl whenever video is on, but every use of it in WebCore is behind USE(GSTREAMER_GL).
+Builds with USE_GSTREAMER_GL=OFF (the webOS browser: video goes to the platform's sinks) then need a
+library they never use.
+---
+--- a/Source/cmake/GStreamerChecks.cmake
++++ b/Source/cmake/GStreamerChecks.cmake
+@@ -9,7 +9,11 @@
+       else ()
+           set(GSTREAMER_COMPONENTS app pbutils)
+           if (ENABLE_VIDEO)
+-              list(APPEND GSTREAMER_COMPONENTS video mpegts tag gl)
++              list(APPEND GSTREAMER_COMPONENTS video mpegts tag)
++              # webOS browser: libgstgl only when USE_GSTREAMER_GL is on (all GL code is behind USE(GSTREAMER_GL)).
++              if (USE_GSTREAMER_GL)
++                  list(APPEND GSTREAMER_COMPONENTS gl)
++              endif ()
+           endif ()
+ 
+           if (ENABLE_WEB_AUDIO)
