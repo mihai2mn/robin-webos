@@ -64,3 +64,9 @@ else
 WPEWEBKIT_CONF_OPTS += -DENABLE_THUNDER=OFF
 endif
 endif
+
+# WebKit 2.54 turns on hyphenation (libhyphen) and spell checking (enchant) by default; neither library is in this
+# build, and a TV browser needs neither.
+ifeq ($(WPEWEBKIT_VERSION),2.54.3)
+WPEWEBKIT_CONF_OPTS += -DUSE_LIBHYPHEN=OFF -DENABLE_SPELLCHECK=OFF
+endif
