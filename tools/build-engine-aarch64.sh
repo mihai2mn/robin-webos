@@ -39,6 +39,10 @@ case "${1:-status}" in
     stage "configure"
     mk webos_browser_aarch64_defconfig
     stage "build ${TARGETS:-all}"
+    # linux/dma-buf.h appeared in Linux 4.6; WebKit (MemoryMappedGPUBuffer.cpp) includes it and the sysroot has 4.4 headers.
+    if [ ! -f /build/br-out-aarch64/staging/usr/include/linux/dma-buf.h ]; then
+      mk toolchain >/dev/null && inc=$(ls -d /build/br-out-aarch64/host/aarch64-buildroot-linux-gnu/sysroot/usr/include/linux) && cp /src/toolchain/extra-headers/linux/dma-buf.h "$inc/"
+    fi
     # shellcheck disable=SC2086
     mk $TARGETS
     stage "PASS" ;;
