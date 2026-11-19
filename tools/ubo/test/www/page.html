@@ -1,0 +1,39 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>wren-ubo test</title>
+<script>
+  // Scriptlets run before this: set-constant makes wrenTestConst true and read-only.
+  window.seenConst = window.wrenTestConst;
+  window.seenTrusted = window.wrenTrusted;
+  window.wrenTestConst = 'page tried to change it';
+</script>
+<script src="http://localhost:8802/wren-test/ads/adscript.js" onerror="window.adErrored=true"></script>
+<script src="http://localhost:8802/wren-test/redir/stub.js" onload="window.redirOnload=true" onerror="window.redirErrored=true"></script>
+<script src="http://localhost:8802/lib/ok.js"></script>
+</head><body>
+<div class="wren-specific-ad" id="specific">site-specific hide</div>
+<div class="ADBox" id="generic">generic class hide</div>
+<div id="ad_banner">generic id hide</div>
+<div class="wren-promo" id="proc">Sponsored content</div>
+<div class="wren-promo" id="proc-keep">Real content</div>
+<div class="wrapper-up" id="upward"><div class="inner-ad">upward target is the wrapper</div></div>
+<div id="later"></div>
+<img id="pixel" src="http://localhost:8802/wren-test/img/pixel.gif" onload="window.pixelOnload=true" onerror="window.pixelErrored=true">
+<div id="gifhost"></div>
+<script>
+  // GIFs served as videos, as Reddit does: one in a shadow root, one added later.
+  const host = document.getElementById('gifhost').attachShadow({ mode: 'open' });
+  host.innerHTML = '<video autoplay loop muted playsinline src="https://preview.redd.it/wrentest123.gif?width=200&format=mp4&s=abc"></video>';
+  setTimeout(() => { const v = document.createElement('video'); v.muted = true; v.loop = true; v.autoplay = true; v.src = 'https://media.giphy.com/media/WrenGiphy42/giphy.mp4'; v.id = 'giphyvid'; document.body.appendChild(v); }, 200);
+  window.gifImages = () => [...document.getElementById('gifhost').shadowRoot.querySelectorAll('img'), ...document.querySelectorAll('img')].map(i => i.src).filter(s => /redd\.it|giphy/.test(s)).join(' ');
+  window.gifVideosLeft = () => document.getElementById('gifhost').shadowRoot.querySelectorAll('video').length + document.querySelectorAll('video').length;
+</script>
+<p id="normal">normal content</p>
+<script>
+  // Added after load: generic hiding must follow the DOM.
+  setTimeout(() => { const d = document.createElement('div'); d.className = 'ADBox'; d.id = 'late-generic'; d.textContent = 'late'; document.body.appendChild(d); }, 300);
+  // Cross-origin without CORS headers: an opaque response still means the request went through (the server log
+  // shows which URL arrived, i.e. whether removeparam took utm_source out).
+  fetch('http://localhost:8802/lib/echo.txt?utm_source=test&keep=1', { mode: 'no-cors' }).then(r => window.echo = r.type).catch(e => window.echo = 'error ' + e);
+  window.hidden = id => { const e = document.getElementById(id); return !e ? 'removed' : getComputedStyle(e).display === 'none'; };
+</script>
+</body></html>

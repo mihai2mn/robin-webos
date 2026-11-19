@@ -1,0 +1,3 @@
+! Wren's own filters (compiled with uBO's lists, as a trusted list; scriptlets in tools/ubo/wren-scriptlets.js).
+! GIFs served as videos: shown as images, so the TV's single hardware video decoder isn't fought over.
+reddit.com##+js(wren-gif-videos)

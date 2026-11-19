@@ -1,0 +1,14 @@
+! Test rules for tools/ubo/test/run.sh. The test page is http://wrentest.127.0.0.1.nip.io:8801/page.html (EasyList
+! turns generic hiding off on 127.0.0.1 and localhost, so the page needs a real-looking host); "third party" is
+! http://localhost:8802. Compiled after uBO's lists, as a trusted list. (No ports in ||host anchors: adblock-rust,
+! like the real lists, matches hosts without them.)
+/wren-test/ads/adscript.js$script,third-party
+/wren-test/redir/stub.js$script,redirect=noop.js
+/wren-test/img/pixel.gif$image,redirect=1x1.gif
+$removeparam=utm_source,domain=wrentest.127.0.0.1.nip.io
+wrentest.127.0.0.1.nip.io##.wren-specific-ad
+wrentest.127.0.0.1.nip.io##.wren-promo:has-text(Sponsored)
+wrentest.127.0.0.1.nip.io##.wrapper-up > .inner-ad:upward(1)
+wrentest.127.0.0.1.nip.io##+js(set-constant, wrenTestConst, true)
+wrentest.127.0.0.1.nip.io##+js(trusted-set-constant, wrenTrusted, 42)
+wrentest.127.0.0.1.nip.io##+js(wren-gif-videos)

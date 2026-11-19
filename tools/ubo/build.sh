@@ -1,0 +1,77 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds the uBO-grade ad blocker (engine/ubo) into OUT (default build/ubo):
+#   OUT/data/      engine.dat, resources.json, cosmetic.js  -> the package's engine/ubo/
+#   OUT/<target>/  libwren-ubo.so                           -> the package's engine/lib/web-extensions/
+#
+#   tools/ubo/build.sh data            lists + uBO resources -> data/ (needs cargo and node on the build host)
+#   tools/ubo/build.sh lib [TARGET]    the web process extension; TARGET is a Rust target triple:
+#                                      armv7-unknown-linux-gnueabi (default: the TV's softfp userland) or "host"
+# Environment for `lib`:
+#   CC          C compiler (and linker) for TARGET. Default for the TV: zig cc for glibc 2.28, soft-float calls
+#               (compatible with the TV's softfp libraries). With Buildroot: its arm-...-gcc.
+#   EXT_CFLAGS  include flags for WPE WebKit's web process extension API, GLib, libsoup 3 and JSC for TARGET.
+#               Default: pkg-config wpe-web-process-extension-2.0 libsoup-3.0 (set PKG_CONFIG_* for a sysroot).
+# The extension links to nothing: WebKit, GLib and libsoup are already in the web process that loads it.
+set -eu
+SRC=$(cd "$(dirname "$0")/../.." && pwd)
+OUT=${OUT:-$SRC/build/ubo}
+UBO=$SRC/tools/ubo
+mode=${1:-}
+
+case "$mode" in
+data)
+    [ -f "$UBO/lists/lists.json" ] && [ -f "$UBO/ubo/COMMIT" ] || python3 "$UBO/update.py"
+    mkdir -p "$OUT/data"
+    node "$UBO/scriptlets-to-json.mjs" "$UBO/ubo/js/resources/scriptlets.js" "$OUT/scriptlets.json"
+    LISTS=$(python3 -c "
+import json,sys
+for l in json.load(open('$UBO/lists/lists.json')):
+    print('$UBO/lists/' + l['name'] + '.txt' + ''.join(':' + f for f in l['flags'].split(',') if f))")
+    # shellcheck disable=SC2086
+    cargo run --quiet --release --manifest-path "$SRC/engine/ubo/Cargo.toml" --features compiler \
+        --target-dir "$OUT/cargo-host" --bin wren-ubo-compile -- \
+        "$OUT/data" "$UBO/ubo/web_accessible_resources" "$UBO/ubo/js/redirect-resources.js" "$OUT/scriptlets.json" $LISTS "$UBO/wren-filters.txt:trusted"
+    cp "$SRC/engine/ubo/cosmetic.js" "$OUT/data/"
+    ls -l "$OUT/data"
+    ;;
+lib)
+    TARGET=${2:-armv7-unknown-linux-gnueabi}
+    # Rust's standard library needs an unwinder (_Unwind_*): linked in, so the extension needs no libgcc_s.
+    # zig cc: its libunwind; GCC (Buildroot): -static-libgcc.
+    UNWIND=${UNWIND:-}
+    if [ "$TARGET" = host ]; then
+        CC=${CC:-cc}
+        cargo build --quiet --release --lib --manifest-path "$SRC/engine/ubo/Cargo.toml" --target-dir "$OUT/cargo-host"
+        LIB=$OUT/cargo-host/release/libwren_ubo.a
+        TARGET=$(rustc -vV | sed -n 's/^host: //p')
+    else
+        if [ -z "${CC:-}" ]; then
+            CC="zig cc -target arm-linux-gnueabi.2.28 -mcpu=cortex_a9"
+            UNWIND=${UNWIND:--lunwind}
+        fi
+        UNWIND=${UNWIND:--static-libgcc}
+        # Rust links through the same compiler, so its standard library is bound to glibc 2.28 too.
+        printf '#!/bin/sh\nexec %s "$@"\n' "$CC" > "$OUT/cc-$TARGET"
+        chmod +x "$OUT/cc-$TARGET"
+        LINKER_VAR=CARGO_TARGET_$(echo "$TARGET" | tr 'a-z-' 'A-Z_')_LINKER
+        env "$LINKER_VAR=$OUT/cc-$TARGET" CC="$OUT/cc-$TARGET" \
+            cargo build --quiet --release --lib --manifest-path "$SRC/engine/ubo/Cargo.toml" \
+            --target "$TARGET" --target-dir "$OUT/cargo-target"
+        LIB=$OUT/cargo-target/$TARGET/release/libwren_ubo.a
+    fi
+    EXT_CFLAGS=${EXT_CFLAGS:-$(pkg-config --cflags wpe-web-process-extension-2.0 libsoup-3.0)}
+    mkdir -p "$OUT/$TARGET"
+    # Export only WebKit's entry point: Rust's symbols stay inside the extension.
+    printf '{ global: webkit_web_process_extension_initialize_with_user_data; local: *; };\n' > "$OUT/exports.map"
+    # shellcheck disable=SC2086
+    $CC -shared -fPIC -O2 -Wall -Wextra -Wno-unused-parameter -std=gnu11 $EXT_CFLAGS \
+        -o "$OUT/$TARGET/libwren-ubo.so" "$SRC/engine/ubo/extension.c" "$LIB" \
+        -Wl,--gc-sections -Wl,--version-script="$OUT/exports.map" -Wl,-s $UNWIND -lm -ldl -lpthread
+    ls -l "$OUT/$TARGET/libwren-ubo.so"
+    ;;
+*)
+    echo "usage: $0 data | lib [TARGET]" >&2
+    exit 2
+    ;;
+esac

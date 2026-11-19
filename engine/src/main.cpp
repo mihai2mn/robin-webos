@@ -1354,6 +1354,52 @@ void clear_data(const WpeClearData &c)
         what);
 }
 
+// The uBO-grade ad blocker (engine/ubo, docs/ad-blocking.md): a web process extension with uBlock Origin's lists.
+// This 0.3.3-based build has no ad-blocker setting in the UI, so the engine finds it next to itself
+// (engine/ubo/engine.dat, engine/lib/web-extensions/libwren-ubo.so) and turns it on. WREN_UBO=0 turns it off;
+// WREN_UBO_ALLOWED="host,host" leaves ads alone on those hosts (and their subdomains). Never on YouTube.
+std::string ubo_dir;
+
+void on_initialize_web_process_extensions(WebKitWebContext *context, gpointer)
+{
+    GVariantBuilder hosts;
+    g_variant_builder_init(&hosts, G_VARIANT_TYPE("as"));
+    if (const char *allowed = getenv("WREN_UBO_ALLOWED")) {
+        gchar **list = g_strsplit(allowed, ",", -1);
+        for (gchar **h = list; *h; ++h)
+            if (**h)
+                g_variant_builder_add(&hosts, "s", *h);
+        g_strfreev(list);
+    }
+    webkit_web_context_set_web_process_extensions_initialization_user_data(context,
+        g_variant_new("(sbas)", ubo_dir.c_str(), TRUE, &hosts));
+}
+
+void setup_ubo()
+{
+    if (g_strcmp0(getenv("WREN_UBO"), "0") == 0) {
+        log_msg("ad blocker: off (WREN_UBO=0)");
+        return;
+    }
+    gchar *exe = g_file_read_link("/proc/self/exe", nullptr);
+    gchar *base = exe ? g_path_get_dirname(exe) : nullptr;
+    g_free(exe);
+    if (!base)
+        return;
+    const std::string dir = std::string(base) + "/ubo", ext = std::string(base) + "/lib/web-extensions";
+    g_free(base);
+    if (::access((dir + "/engine.dat").c_str(), R_OK) != 0 || ::access((ext + "/libwren-ubo.so").c_str(), R_OK) != 0) {
+        log_msg("ad blocker: not in this package");
+        return;
+    }
+    ubo_dir = dir;
+    WebKitWebContext *context = webkit_web_context_get_default();
+    webkit_web_context_set_web_process_extensions_directory(context, ext.c_str());
+    webkit_web_context_add_path_to_sandbox(context, dir.c_str(), TRUE);
+    g_signal_connect(context, "initialize-web-process-extensions", G_CALLBACK(on_initialize_web_process_extensions), nullptr);
+    log_msg("ad blocker: uBO lists (%s)", dir.c_str());
+}
+
 void set_zoom(uint32_t permille)
 {
     g.zoom = std::clamp(permille, 250u, 5000u) / 1000.0;
@@ -1663,6 +1709,7 @@ int main(int, char **)
     if (const char *sites = getenv("WPE_BROWSER_DEBUG_FORGET_COOKIES"); sites && *sites)
         forget_cookies(sites);
 
+    setup_ubo();
     g_unix_fd_add(g.sock, static_cast<GIOCondition>(G_IO_IN | G_IO_HUP | G_IO_ERR), on_socket, nullptr);
 
     WpeEngineReady ready { WPE_IPC_VERSION, webkit_get_major_version(), webkit_get_minor_version(), webkit_get_micro_version() };

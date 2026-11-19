@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# wren-ubo: uBlock Origin-grade filtering for Wren's web process (engine/ubo/extension.c), on Brave's adblock-rust.
+#   staticlib  linked into libwren-ubo.so, the WebKit web process extension (ARM, built by tools/ubo/build.sh)
+#   wren-ubo-compile  build-time tool (host): filter lists + uBO resources -> engine.dat + resources.json
+[package]
+name = "wren-ubo"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "wren_ubo"
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "wren-ubo-compile"
+path = "src/bin/compile.rs"
+required-features = ["compiler"]
+
+[features]
+# css-validation: parse cosmetic filters properly (procedural operators like :has-text become procedural filters,
+# invalid selectors are dropped). Only needed where lists are parsed, i.e. at build time.
+compiler = ["adblock/resource-assembler", "adblock/css-validation"]
+
+[dependencies]
+adblock = { version = "=0.13.6", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling", "single-thread"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
