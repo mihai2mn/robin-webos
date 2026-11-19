@@ -1848,6 +1848,11 @@ std::string env_or(const char *name, const char *fallback)
 int main(int, char **)
 {
     signal(SIGPIPE, SIG_IGN);
+    // No on-disk media buffering on 32-bit systems: GStreamer's downloadbuffer keeps file offsets in gsize, so
+    // files over 4 GiB (long 4K movies) wrap and never play; it also wrote whole videos to the TV's storage.
+    // WebKit patch 0012 makes urisourcebin honour this too. Playback buffers in memory instead.
+    if (sizeof(gsize) < 8)
+        g_setenv("WPE_SHELL_DISABLE_MEDIA_DISK_CACHE", "1", FALSE);
     // No core dumps from the engine or its WebKit processes (inherited): the kernel writes them into the app's own
     // folder on the TV's small app partition (8 dumps, 1.4 GB, filled it on 2026-11-10). WPE_BROWSER_CORE_DUMPS=1
     // keeps them for debugging.

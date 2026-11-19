@@ -1,0 +1,26 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] gstreamer: a 416 for a range at or past the end of the file is EOS
+
+qtdemux seeks to the end of a file after reading a moov at its end; for files over 4 GiB (4K movies) that request
+starts exactly at the file size, servers answer 416, and playback failed with a READ error. Found on an LG TV.
+---
+diff -ru a/Source/WebCore/platform/graphics/gstreamer/WebKitWebSourceGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/WebKitWebSourceGStreamer.cpp
+--- a/Source/WebCore/platform/graphics/gstreamer/WebKitWebSourceGStreamer.cpp	2026-11-19 20:37:14.533864561 +0200
++++ b/Source/WebCore/platform/graphics/gstreamer/WebKitWebSourceGStreamer.cpp	2026-11-19 20:37:14.536598988 +0200
+@@ -1077,6 +1077,16 @@
+     members->pendingHttpHeadersMessage = adoptGRef(gst_message_new_element(GST_OBJECT_CAST(src.get()), gst_structure_copy(httpHeaders.get())));
+     members->pendingHttpHeadersEvent = adoptGRef(gst_event_new_custom(GST_EVENT_CUSTOM_DOWNSTREAM_STICKY, httpHeaders.release()));
+ 
++    // A range request at or past the end of the file (demuxers do seek there, e.g. qtdemux after a moov at the end of a
++    // file over 4 GiB) gets 416 Range Not Satisfiable from compliant servers: that is the end of the stream, not an error.
++    if (response.httpStatusCode() == 416 && members->size && members->requestedPosition >= *members->size) {
++        GST_DEBUG_OBJECT(src.get(), "R%u: 416 at %" G_GUINT64_FORMAT " (size %" G_GUINT64_FORMAT "): end of stream", m_requestNumber, members->requestedPosition, *members->size);
++        members->doesHaveEOS = true;
++        members->responseCondition.notifyOne();
++        completionHandler(ShouldContinuePolicyCheck::No);
++        return;
++    }
++
+     if (response.httpStatusCode() >= 400) {
+         GST_ELEMENT_ERROR(src.get(), RESOURCE, READ, ("R%u: Received %d HTTP error code", m_requestNumber, response.httpStatusCode()), (nullptr));
+         members->doesHaveEOS = true;
