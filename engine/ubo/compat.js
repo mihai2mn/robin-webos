@@ -68,4 +68,60 @@
     addEventListener('load', sweep);
     addEventListener('load', e => { if (e.target && (e.target.tagName === 'LINK' || e.target.tagName === 'STYLE')) later(); }, true);
     new MutationObserver(later).observe(document, { childList: true, subtree: true });
+
+    // Video: the TV has one hardware video decoder per app, and every video plays on it. A thumbnail's hover preview
+    // that starts while the page's main video plays takes the decoder away from it (and enough of those switches have
+    // hung the web process). So: (1) a preview may not start while a main video plays; (2) a preview the page has
+    // removed, or left paused and hidden, gives its stream back (decoder and buffers), and gets it back if played.
+    const mains = new Set();
+    const isMain = v => !v.muted || v.controls || v.getBoundingClientRect().width >= innerWidth * 0.45;
+    const mainPlaying = () => [...mains].some(v => v.isConnected && !v.paused && !v.ended && isMain(v));
+    const visible = v => { if (!v.isConnected) return false; const r = v.getBoundingClientRect(); const s = getComputedStyle(v);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05; };
+    const release = v => {
+        if (v.__wrenReleased || isMain(v)) return;
+        const src = v.getAttribute('src'), sources = [...v.querySelectorAll('source')];
+        if (!src && !sources.length) return;
+        v.__wrenReleased = { src, sources: sources.map(s => s.cloneNode(true)) };
+        try { v.pause(); } catch (e) {}
+        v.removeAttribute('src');
+        sources.forEach(s => s.remove());
+        try { v.load(); } catch (e) {}
+    };
+    const restore = v => {
+        const r = v.__wrenReleased;
+        if (!r) return;
+        v.__wrenReleased = null;
+        if (r.src) v.setAttribute('src', r.src);
+        r.sources.forEach(s => v.appendChild(s));
+        try { v.load(); } catch (e) {}
+    };
+    const play = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+        if (this instanceof HTMLVideoElement) {
+            if (!isMain(this) && mainPlaying())
+                return Promise.reject(new DOMException('A main video is playing', 'NotAllowedError'));
+            restore(this);
+        }
+        return play.apply(this, arguments);
+    };
+    // Media events don't bubble: listen in the capture phase. (Videos inside shadow roots are not seen.)
+    document.addEventListener('play', e => {
+        const v = e.target;
+        if (!(v instanceof HTMLVideoElement)) return;
+        if (isMain(v)) { mains.add(v); return; }
+        if (mainPlaying()) { try { v.pause(); } catch (err) {} }
+    }, true);
+    document.addEventListener('pause', e => {
+        const v = e.target;
+        if (!(v instanceof HTMLVideoElement) || isMain(v)) return;
+        setTimeout(() => { if (v.paused && !visible(v)) release(v); }, 1500);
+    }, true);
+    new MutationObserver(records => {
+        for (const r of records) for (const n of r.removedNodes) {
+            if (n.nodeType !== 1) continue;
+            const vids = n.tagName === 'VIDEO' ? [n] : [...n.querySelectorAll('video')];
+            vids.forEach(v => setTimeout(() => { if (!v.isConnected) { mains.delete(v); release(v); } }, 0));
+        }
+    }).observe(document, { childList: true, subtree: true });
 })();
