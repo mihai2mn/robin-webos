@@ -42,6 +42,7 @@
 #include <cctype>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <utility>
 
 // Also used by direct.cpp.
