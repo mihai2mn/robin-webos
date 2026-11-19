@@ -6,8 +6,8 @@ platform quirks (Rialto) put every other player's video on a hardware hole-punch
 thumbnail previews this way so they never take the TV's single hardware decoder from the main video.
 ---
 diff -ru a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
---- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp	2026-11-19 19:02:31.978773124 +0200
-+++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp	2026-11-19 19:02:31.986302815 +0200
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp	2026-11-19 20:23:29.274109108 +0200
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp	2026-11-19 20:23:29.280227017 +0200
 @@ -1184,7 +1184,7 @@
  void MediaPlayerPrivateGStreamer::syncOnClock(bool sync)
  {
@@ -32,7 +32,19 @@ diff -ru a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreame
      GStreamerQuirksManager::singleton().configureElement(element, WTFMove(characteristics));
  }
  
-@@ -4195,7 +4203,15 @@
+@@ -3360,6 +3368,11 @@
+     hasSoftwareColorBalance &= additionalFlags;
+     hasNativeVideo &= additionalFlags;
+     hasNativeAudio &= additionalFlags;
++    if (!isHolePunchRenderingEnabled()) {
++        // Wren: a software player (wren-software) decodes to raw frames: let playsink convert them for our sinks.
++        hasNativeVideo = 0;
++        hasNativeAudio = 0;
++    }
+ 
+     GST_INFO_OBJECT(pipeline(), "text %s, audio %s (native %s), video %s (native %s, software color balance %s)", boolForPrinting(hasText),
+         boolForPrinting(hasAudio), boolForPrinting(hasNativeAudio), boolForPrinting(hasVideo), boolForPrinting(hasNativeVideo),
+@@ -4195,7 +4208,15 @@
          return m_quirksManagerForTesting->supportsVideoHolePunchRendering();
  
      auto& quirksManager = GStreamerQuirksManager::singleton();
@@ -50,8 +62,8 @@ diff -ru a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreame
  
  GstElement* MediaPlayerPrivateGStreamer::createHolePunchVideoSink()
 diff -ru a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
---- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h	2026-11-19 19:02:31.982732150 +0200
-+++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h	2026-11-19 19:02:31.984547148 +0200
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h	2026-11-19 20:23:29.275399355 +0200
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h	2026-11-19 20:23:29.277407967 +0200
 @@ -305,6 +305,9 @@
      virtual void updatePlaybackRate();
  

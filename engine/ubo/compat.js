@@ -114,7 +114,8 @@
     const play = HTMLMediaElement.prototype.play;
     HTMLMediaElement.prototype.play = function () {
         if (this instanceof HTMLVideoElement) {
-            if (!isMain(this) && mainPlaying())
+            // A software preview (wren-software, WebKit patch 0010) never touches the hardware decoder: let it play.
+            if (!isMain(this) && !this.hasAttribute('wren-software') && mainPlaying())
                 return Promise.reject(new DOMException('A main video is playing', 'NotAllowedError'));
             restore(this);
         }
@@ -125,7 +126,7 @@
         const v = e.target;
         if (!(v instanceof HTMLVideoElement)) return;
         if (isMain(v)) { mains.add(v); return; }
-        if (mainPlaying()) { try { v.pause(); } catch (err) {} }
+        if (!v.hasAttribute('wren-software') && mainPlaying()) { try { v.pause(); } catch (err) {} }
     }, true);
     document.addEventListener('pause', e => {
         const v = e.target;
