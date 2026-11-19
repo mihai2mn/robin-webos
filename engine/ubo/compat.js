@@ -6,8 +6,11 @@
 // events), but the LG Magic Remote is a mouse-like pointer. Sites then turn off hover previews (thumbnails that
 // play on hover) and switch to touch layouts. So pages are told what a desktop with a mouse would tell them: matchMedia answers, CSS
 // @media rules the page can read are rewritten, and the touch event API is hidden.
-(function wrenCompat() {
+(function wrenCompat(envelope) {
     'use strict';
+    // The engine (engine/src/main.cpp, add_hybrid_video) tells us where it keeps this file, so the same code also runs
+    // in a build whose engine predates the hybrid video design (build/video/hybrid/DESIGN.md).
+    const base = (window.__wrenCompatBase || '/adblock/').replace(/\/?$/, '/');
     // Each media feature -> what a mouse-driven desktop answers. (min-width: 0px) is always true, (max-width: 0px)
     // never: they stand in for true and false inside any media query.
     const T = '(min-width: 0px)', F = '(max-width: 0px)';
@@ -79,7 +82,20 @@
     // decoder: previews get it before they load. A preview: muted, no controls, in a box under 60% of the screen wide.
     const isPreview = v => (v.muted || v.hasAttribute('muted') || v.defaultMuted) && !v.controls && !v.hasAttribute('controls') &&
         ((v.parentElement || v).getBoundingClientRect().width || 1) < innerWidth * 0.6;
-    const mark = v => { if (v instanceof HTMLVideoElement && !v.hasAttribute('wren-software') && isPreview(v)) v.setAttribute('wren-software', ''); };
+    // What a video is before it starts: a preview is marked (this is the floor; see the policy's previewMark), and
+    // everything is then given the video policy's decision (below).
+    const mark = v => {
+        if (!(v instanceof HTMLVideoElement)) return;
+        // The floor marks previews so a video the policy never gets to decide (a shadow-root video, a decide() that
+        // threw) still keeps the hardware decoder off the page's main video (DESIGN.md §2). It runs BEFORE the decision
+        // and must not write once a decision owns this element (it runs again on every load(), e.g. the reload a
+        // fullscreen transition does): re-adding it there would undo the decision.
+        if (v.__wrenDecided !== true && !v.hasAttribute('wren-software') && !pageMarked(v) && isPreview(v)) {
+            v.setAttribute('wren-software', '');
+            v.__wrenPreview = true;
+        }
+        if (markVideo) markVideo(v);
+    };
     const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
     if (srcDesc && srcDesc.set) Object.defineProperty(HTMLMediaElement.prototype, 'src', { ...srcDesc, set(value) { mark(this); srcDesc.set.call(this, value); } });
     const load = HTMLMediaElement.prototype.load;
@@ -140,4 +156,199 @@
             vids.forEach(v => setTimeout(() => { if (!v.isConnected) { mains.delete(v); release(v); } }, 0));
         }
     }).observe(document, { childList: true, subtree: true });
+
+    // Video policy (build/video/hybrid/DESIGN.md): a video that draws IN THE PAGE (<video wren-software>, WebKit patch
+    // 0010) scrolls with the page; one on the hardware plane does not, but costs no CPU. So: in the page while the box
+    // is small and nothing is fullscreen (the hole is invisible then anyway), on the hardware plane otherwise: a
+    // controls player, protected (DRM) content, any fullscreen, or anything bigger than kSoftwareBox. Fullscreen is
+    // the one case that changes a playing video: WebKit decides at start (patch 0010 reads the attribute once, and
+    // that decides the decoders too), so the element is reloaded at its own media time right after the transition
+    // into or out of fullscreen (the reporter says so, see the fullscreen wrapper below). Pages that mark a video
+    // themselves win: wren-software (in the page) or wren-hw (on the hardware plane).
+    const policy = window.__wrenVideoPolicy = {
+        // CSS pixels, both dimensions: at the TV's devicePixelRatio (2) this is half the screen's width and height.
+        box: 960 * 540,
+        // How many videos may decode in software at once (each also composites on the CPU).
+        players: 2,
+        // Set by the engine when it asked for the hybrid policy (engine/src/main.cpp, add_hybrid_video): without it a
+        // video is only marked the way previews always were, so an older engine keeps exactly its old behaviour.
+        on: false,
+        current: () => document.fullscreenElement || document.webkitFullscreenElement || null,
+    };
+    // Engine-provided settings (hybrid_video_script() fills this with {on: true}; an older engine leaves it undefined).
+    if (envelope) Object.assign(policy, envelope);
+    // Readings of the page (the engine log prints them: hybrid video: …): the policy's decisions, the transitions, and
+    // the decode health that decides how big a software video may be (DESIGN.md §3.5, §6).
+    const log = what => {
+        try {
+            const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.wpebHybrid;
+            if (h) h.postMessage(JSON.stringify(what));
+        } catch (e) {}
+    };
+    const report = (v, what) => {
+        try {
+            const r = v.getBoundingClientRect();
+            log({ decision: what, box: Math.round(r.width) + 'x' + Math.round(r.height),
+                src: String(v.currentSrc || v.src || '').split(/[?#]/)[0].slice(-80),
+                protected: !!v.__wrenEmeActive, fullscreen: !!policy.current() });
+        } catch (e) {}
+    };
+    // Software players on the page now: over budget, the newest demotes.
+    const software = v => v.hasAttribute('wren-software');
+    const playing = () => [...document.querySelectorAll('video')].filter(v => software(v) && !v.paused && !v.ended);
+    // The policy, for one element, at the moment before its player starts. `why` is the reason it is on the hardware
+    // plane ('' when it draws in the page); it is also the element's wren-policy attribute, for reading in the page.
+    // Between two starts of the same player (the marking hooks run once per load) the answer stays put, so a playing
+    // video is never reloaded on its own; a fullscreen transition is the one place that asks for the reload (below).
+    // Called on every new start of a player (the hooks above) and after a fullscreen transition. The first decision
+    // reads the element's box and the budget; a later call (a fullscreen transition) re-reads only what a transition
+    // changes, fullscreen; the page's own marking is never overruled.
+    const decide = v => {
+        if (!(v instanceof HTMLVideoElement)) return;
+        reconcile(v);
+        const first = v.__wrenDecided !== true;
+        let keep = v.getAttribute('wren-policy') === 'page'; // the page's own marking; decided once, then remembered
+        // A wren-software that was there BEFORE this build's first decision may be the page's (an older compat.js, a page
+        // that marks previews itself) or stale (a preview element reused for the main video, the page changing its mind).
+        // A stale marking on a page-sized element must not win: leaving a big video in the page is exactly the CPU
+        // meltdown this policy exists to prevent. So on the first decision, a pre-existing wren-software is only trusted
+        // when the element is small enough for the policy to put it in the page anyway (then keep is harmless and no
+        // reload is needed); otherwise the decision owns the element.
+        const stale = first && !v.__wrenPreview && !keep && v.hasAttribute('wren-software') &&
+            v.getBoundingClientRect().width * v.getBoundingClientRect().height > policy.box;
+        if (stale) keep = false;
+        // Package 2: the decision, from what can be read without writing anything.
+        let why;
+        if (keep) why = v.hasAttribute('wren-hw') ? 'page' : '';
+        else if (!policy.on) why = v.__wrenPreview ? '' : 'off';
+        else if (v.__wrenEmeActive) why = 'protected';
+        else if (policy.current()) why = 'fullscreen';
+        else if (v.controls && !v.muted) why = 'controls';
+        else if (first ? v.getBoundingClientRect().width * v.getBoundingClientRect().height > policy.box : v.__wrenBox > policy.box) why = 'box';
+        else if (first && playing().length >= policy.players) why = 'budget';
+        else why = '';
+        if (first) {
+            if (v.__wrenBox === undefined) v.__wrenBox = v.getBoundingClientRect().width * v.getBoundingClientRect().height;
+            v.__wrenDecided = true;
+            // A small pre-existing marking is the page's: it stays, and the element is never reloaded for the policy.
+            if (!keep && !stale && v.hasAttribute('wren-software') && !v.__wrenPreview) keep = true;
+        }
+        v.__wrenPolicy = why ? 'hw' : 'sw';
+        v.setAttribute('wren-policy', keep ? 'page' : why === '' ? 'small' : why);
+        if (first && !keep) {
+            v.__wrenPageMark = { hw: v.hasAttribute('wren-hw'), sw: v.hasAttribute('wren-software') && !v.__wrenPreview };
+            // Older compat.js in the same window, or the page itself: its marking is kept, to be restored when the policy
+            // is switched off (below).
+            v.__wrenSavedSoftware = v.__wrenPageMark.sw;
+        }
+        // Package 3: the consequence, for WebKit patch 0010, which reads the attribute ONCE, before the player starts,
+        // so the element must carry exactly what the NEXT player should do. The attribute follows the DECISION -- never
+        // "was it marked before": a preview the floor marked must be un-marked when the answer is the hardware plane
+        // (fullscreen, a big box), or it would stay in the page and melt the CPU.
+        if (keep) {
+            // The page's answer, left exactly as the page set it.
+        } else if (policy.on) {
+            if (why) { if (v.hasAttribute('wren-software')) v.removeAttribute('wren-software'); }
+            else if (!v.hasAttribute('wren-software')) v.setAttribute('wren-software', '');
+        } else {
+            // Policy off (an old engine, or WPE_BROWSER_DEBUG_HYBRID=0): yesterday's behaviour, exactly -- previews are
+            // marked, everything else is left as the page had it.
+            if (v.__wrenPreview && !v.hasAttribute('wren-software')) v.setAttribute('wren-software', '');
+        }
+        v.__wrenPreview = false; // the floor's input has been used; the decision owns the attribute from here
+        report(v, why ? 'hardware:' + why : 'software');
+    };
+    window.__wrenVideoPolicy.decide = decide;
+    // A page that marks a video itself wins and is never re-decided. A wren-software this build wrote is NOT the page's:
+    // the floor's preview marking (__wrenPreview) is an input to the policy, not an answer, and the floor writes it
+    // immediately before the decision runs -- so this must ignore it, or every preview would read as page intent.
+    function pageMarked(v) {
+        if (v.hasAttribute('wren-hw')) return true;
+        // A wren-software written by a previous decision of ours (the element is marked decided) is ours, not the page's.
+        return v.hasAttribute('wren-software') && !v.__wrenPreview && v.__wrenDecided !== true;
+    }
+    // Read once per start, before anything is written: a page's wren-hw paired with its own wren-software means
+    // hardware (wren-hw is the decoder choice, wren-software the renderer's default), and the default is then dropped.
+    const reconcile = v => {
+        if (v.__wrenPreview || !v.hasAttribute('wren-hw') || !v.hasAttribute('wren-software')) return;
+        v.removeAttribute('wren-software');
+        v.__wrenPreview = true; // "do not treat the removal as the page's own marking again"
+    };
+    // The marking hooks above (src setter, load(), inserted nodes) call this, before the player starts.
+    const markVideo = v => {
+        if (!(v instanceof HTMLVideoElement)) return;
+        // The marking hooks run on every load; the answer is decided once per element, the first time it starts.
+        if (v.__wrenDecided && v.getAttribute('wren-policy') !== 'page' && v.__wrenPolicy !== null) return;
+        reconcile(v);
+        if (pageMarked(v)) { if (v.getAttribute('wren-policy') !== 'page') { v.setAttribute('wren-policy', 'page'); v.__wrenPolicy = v.hasAttribute('wren-software') ? 'sw' : 'hw'; report(v, 'page'); } return; }
+        decide(v);
+    };
+    // The reload a fullscreen transition needs, at the element's own media time: only when the answer changes.
+    const transition = v => {
+        const t = v.currentTime || 0, wasPlaying = !v.paused && !v.ended;
+        log({ reload: true, at: t, from: v.__wrenPolicy });
+        decide(v);
+        v.addEventListener('loadedmetadata', () => {
+            if (t > 0.01) { try { v.currentTime = t; } catch (e) {} }
+            if (wasPlaying) { const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+        }, { once: true });
+        try { v.load(); } catch (e) {}
+    };
+    // The reasons a fullscreen transition can create or destroy: `fullscreen` is the one it always changes (into it,
+    // and out of it back to the box rule).
+    const FULLSCREEN_WHY = new Set(['fullscreen']);
+    const onFullscreenChange = () => {
+        // Videos whose answer a transition changes: the fullscreen one (and, on the way out, those that were hardware
+        // only because they were fullscreen). Each is decided afresh, then compared with what its player has, and the
+        // player that no longer matches is reloaded once, at its media time.
+        const work = [];
+        for (const v of document.querySelectorAll('video')) {
+            if (!v.isConnected || v.getAttribute('wren-policy') === 'page' || !policy.on) continue;
+            // An MSE stream (blob: source) cannot be reloaded: load() detaches its MediaSource and the site's player breaks.
+            // It keeps the player it started with; the new decision applies on its next natural load.
+            if (String(v.currentSrc || v.src || '').startsWith('blob:')) { log({ reload: false, reason: 'mse' }); continue; }
+            const was = v.getAttribute('wren-policy'), running = v.__wrenPolicy;
+            decide(v);
+            if (v.__wrenPolicy !== running && (FULLSCREEN_WHY.has(was) || FULLSCREEN_WHY.has(v.getAttribute('wren-policy'))))
+                work.push(v);
+        }
+        for (const v of work) transition(v);
+    };
+    for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener(ev, onFullscreenChange, true);
+    // Announced synchronously inside the page's own user-gesture handler (never deferred: the original runs at once),
+    // so the engine log has the edge the transition can be measured against (DESIGN.md §3.5).
+    const announce = el => {
+        log({ fullscreen: !policy.current() ? 'enter' : 'leave', tag: (el && el.tagName) || '' });
+    };
+    {
+        const proto = Element.prototype;
+        const rf = proto.requestFullscreen;
+        if (rf) proto.requestFullscreen = function () { announce(this); return rf.apply(this, arguments); };
+        const wrf = proto.webkitRequestFullscreen || proto.webkitRequestFullScreen;
+        if (wrf) proto.webkitRequestFullscreen = proto.webkitRequestFullScreen = function () { announce(this); return wrf.apply(this, arguments); };
+    }
+    // Protected (DRM) content only plays on the hardware plane (the CDM is 32-bit and decodes in hardware), so the
+    // policy has to know. Later than the decision if the page sets the keys after load(); the next load() and any
+    // fullscreen transition pick it up, and a running player is not touched (it is showing something).
+    {
+        const mk = HTMLMediaElement.prototype.setMediaKeys;
+        if (mk) HTMLMediaElement.prototype.setMediaKeys = function (keys) {
+            if (keys) { this.__wrenEmeActive = true; try { this.setAttribute('wren-policy', 'protected'); } catch (e) {} }
+            return mk.apply(this, arguments);
+        };
+    }
+    // Playback health of a software player, 2 s in and 2 s later: frames decoded, frames WebKit gave up on, and the
+    // source's real size. The numbers that say whether a 480p video on this TV is smooth (DESIGN.md §6).
+    const quality = (v, when) => { try {
+        const q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
+        if (q) log({ quality: when, decoded: q.totalVideoFrames, dropped: q.droppedVideoFrames, inPage: software(v),
+            source: (v.videoWidth || 0) + 'x' + (v.videoHeight || 0) });
+    } catch (e) {} };
+    document.addEventListener('play', e => {
+        const v = e.target;
+        if (!(v instanceof HTMLVideoElement)) return;
+        setTimeout(() => quality(v, 'after 2s'), 2000);
+        setTimeout(() => quality(v, 'after 4s'), 4000);
+    }, true);
+    window.__wrenHybridReady = true;
 })();

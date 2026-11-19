@@ -938,6 +938,71 @@ void on_console_message(WebKitUserContentManager *, JSCValue *value, gpointer da
     g_free(text);
 }
 
+// Hybrid video policy (build/video/hybrid/DESIGN.md): compat.js decides, per video element and before its player
+// starts, whether it draws in the page (<video wren-software>, WebKit patch 0010: software decode, scrolls with the
+// page) or on the TV's hardware video plane (the hole punch: no CPU, and the only way to show HD). This script
+// evaluates compat.js with the policy switched on (it has normally already run in the web process extension; then this
+// is the same file, run again, cheap) and reports its decisions to the engine log ("hybrid video:" lines). The policy
+// itself stays in compat.js, so it can be changed without rebuilding the engine, and an engine that predates it keeps
+// its old preview-only behaviour. WPE_BROWSER_DEBUG_HYBRID=0 turns this off.
+constexpr const char *kHybridVideoLoader = R"JS((function () {
+  // compat.js has already run in this page: it is the web process extension's script (engine/ubo/compat.js, the same
+  // file wren:// serves). Its policy object is the switch; everything else is unchanged from the engine's point of view.
+  if (window.__wrenVideoPolicy && window.__wrenHybridReady) { window.__wrenVideoPolicy.on = true; return; }
+  // An engine without the extension (or an older build): read the file synchronously, at document start, so the policy
+  // exists before the page's own scripts can start a video. compat.js is an IIFE that runs itself and ignores its
+  // arguments (proven in build/video/lead-check/loader-probe.js: new Function(text)(env) hands it nothing), so the
+  // policy is switched on through the object it publishes, not by passing it in.
+  const xhr = new XMLHttpRequest();
+  try { xhr.open('GET', __WPEB_COMPAT__, false); xhr.send(); } catch (e) { return; }
+  if (xhr.status !== 200 && xhr.status !== 0) return;
+  try { new Function(xhr.responseText)(); } catch (e) { return; }
+  if (window.__wrenVideoPolicy) window.__wrenVideoPolicy.on = true;
+})();)JS";
+
+// The page's answers (compat.js -> wpebHybrid), one log line each: "hybrid video: <what>". WPE_BROWSER_DEBUG_CONSOLE
+// also prints the element's own console, which is where a debugging session on a site starts.
+void on_hybrid_message(WebKitUserContentManager *, JSCValue *value, gpointer data)
+{
+    gchar *text = jsc_value_to_string(value);
+    if (text && *text)
+        log_msg("tab %u hybrid video: %s", GPOINTER_TO_UINT(data), text);
+    g_free(text);
+}
+
+std::string hybrid_video_script()
+{
+    if (getenv("WPE_BROWSER_DEBUG_HYBRID") && !strcmp(getenv("WPE_BROWSER_DEBUG_HYBRID"), "0"))
+        return {};
+    // compat.js is engine/ubo/compat.js, served by this engine as a wren:// resource (on_wren_scheme): the TV keeps the
+    // installed package's compat.js and a new one is a rebuild, but the policy's numbers do not need the file to come
+    // from the package.
+    std::string script = kHybridVideoLoader;
+    // The replacement keeps the quotes of the C literal: the page needs a JS string, and the C++ literal is the only
+    // place the URI appears (build/video/lead-check/loader-probe.js checks the result parses).
+    const std::string marker = "__WPEB_COMPAT__";
+    script.replace(script.find(marker), marker.size(), "\"wren://adblock/compat.js\"");
+    return script;
+}
+
+void add_hybrid_video(WebKitWebView *web_view, uint32_t id)
+{
+    static const std::string source = hybrid_video_script();
+    WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(web_view);
+    if (!ucm || source.empty())
+        return;
+    // The decision log is a message handler every page could post to, and engine.log lives in the TV's RAM (/tmp):
+    // only while debugging (WPE_BROWSER_DEBUG_HYBRID=log, or the console reporter is on anyway).
+    if ((getenv("WPE_BROWSER_DEBUG_HYBRID") && !strcmp(getenv("WPE_BROWSER_DEBUG_HYBRID"), "log")) || getenv("WPE_BROWSER_DEBUG_CONSOLE")) {
+        if (webkit_user_content_manager_register_script_message_handler(ucm, "wpebHybrid", nullptr))
+            g_signal_connect(ucm, "script-message-received::wpebHybrid", G_CALLBACK(on_hybrid_message), GUINT_TO_POINTER(id));
+    }
+    WebKitUserScript *script = webkit_user_script_new(source.c_str(), WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+        WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
+    webkit_user_content_manager_add_script(ucm, script);
+    webkit_user_script_unref(script);
+}
+
 void add_console_reporter(WebKitWebView *web_view, uint32_t id)
 {
     static const bool enabled = getenv("WPE_BROWSER_DEBUG_CONSOLE") != nullptr;
@@ -979,6 +1044,7 @@ void add_scroll_reporter(WebKitWebView *web_view, uint32_t id)
 {
     add_site_quirks(web_view);
     add_media_limits(web_view);
+    add_hybrid_video(web_view, id);
     add_console_reporter(web_view, id); // after the limits, so it wraps them and logs what pages are told
     WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(web_view);
     if (!ucm || !webkit_user_content_manager_register_script_message_handler(ucm, "wpebScroll", kScrollWorld))
@@ -1616,8 +1682,21 @@ document.getElementById('host').addEventListener('keydown', e => { if (e.key ===
 void on_wren_scheme(WebKitURISchemeRequest *request, gpointer)
 {
     const char *uri = webkit_uri_scheme_request_get_uri(request);
-    std::string body;
-    if (g_str_has_prefix(uri, "wren://adblock") && !ubo.dir.empty()) {
+    std::string body, type = "text/html";
+    if (g_str_has_prefix(uri, "wren://adblock/compat.js") && !ubo.dir.empty()) {
+        // The video policy (add_hybrid_video): the same file the web process extension runs, for the one case where
+        // the extension is missing (reactor or the engine's own older builds).
+        gchar *code = nullptr;
+        if (!g_file_get_contents((ubo.dir + "/compat.js").c_str(), &code, nullptr, nullptr)) {
+            GError *e = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "compat.js missing");
+            webkit_uri_scheme_request_finish_error(request, e);
+            g_error_free(e);
+            return;
+        }
+        body = code;
+        type = "application/javascript";
+        g_free(code);
+    } else if (g_str_has_prefix(uri, "wren://adblock") && !ubo.dir.empty()) {
         body = ubo_page();
     } else if (g_str_has_prefix(uri, "wren://adblock")) {
         body = "<!doctype html><meta charset=utf-8><title>Ad blocker</title><body style=\"font:24px system-ui;padding:48px\">"
@@ -1630,7 +1709,7 @@ void on_wren_scheme(WebKitURISchemeRequest *request, gpointer)
     }
     gsize len = body.size();
     GInputStream *in = g_memory_input_stream_new_from_data(g_memdup2(body.data(), len), len, g_free);
-    webkit_uri_scheme_request_finish(request, in, len, "text/html");
+    webkit_uri_scheme_request_finish(request, in, len, type.c_str());
     g_object_unref(in);
 }
 

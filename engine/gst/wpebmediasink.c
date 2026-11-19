@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
@@ -39,12 +40,36 @@
 GST_DEBUG_CATEGORY_STATIC(wpeb_media_debug);
 #define GST_CAT_DEFAULT wpeb_media_debug
 
+/* ---- timing of the hole's rectangle (WPEB_MEDIA_AREA) -------------------------------------------------------
+ *
+ * WebKit sets "rectangle" once per composited frame, while it paints the frame that draws the transparent hole
+ * (SkiaCompositingLayer::paintContents -> CoordinatedPlatformLayerBufferHolePunch::setHolePunchVideoRectangle ->
+ * GStreamerQuirksManager::setHolePunchVideoRectangle -> GStreamerHolePunchQuirkRialto::setHolePunchVideoRectangle ->
+ * g_object_set(sink, "rectangle")). At the same moment video_window_place() moves the page's exported video window,
+ * which is what the user sees as "the hole". The area goes to the UI process, which moves LG's video window, so
+ * whatever delays the UI's applying it shows as the picture lagging behind the hole while the page scrolls.
+ *
+ * WPE_BROWSER_DEBUG_MEDIA_AREA=1 makes every rectangle WebKit paints one line in engine.log (the UI's own log is not
+ * available to us: it is the official 0.3.3 UI binary):
+ *   [hole] <mono µs> set <x,y> <wxh> <c|=: changed/unchanged> dt=<µs since the previous set> v=<mono µs of the page
+ *          surface's last commit, 0: none> gl=<mono µs of this call> pl=<µs the page place() took> q=<bytes queued on
+ *          the media socket> sent=<1: this rectangle went to the UI> u=<x,y sent to the UI>
+ * `set` is the instant the frame that moves the hole was painted, because WebKit sets the property inside that paint;
+ * `v - gl` is how old the page's last commit was at that moment (small: the hole moves with the frames); `q` is the
+ * backlog the UI must read before it sees the area (a large, growing q means the *stream* is what is late, not the
+ * area); `u` is what the UI was told, which differs from x,y only in `early` mode (the predictor).
+ * With WPE_BROWSER_DEBUG_MEDIA_AREA=early the scroll predictor (area_extrapolate) is on too.
+ */
+#define WPEB_AREA_DEBUG (g_getenv("WPE_BROWSER_DEBUG_MEDIA_AREA"))
+#define WPEB_AREA_EARLY (g_getenv("WPE_BROWSER_DEBUG_MEDIA_AREA") && !strcmp(g_getenv("WPE_BROWSER_DEBUG_MEDIA_AREA"), "early"))
+
 /* ---- the page's video window (engine/webos-backend, loaded by libwpe in this process) ------------------------- */
 
 static struct {
     gsize once;
     int (*open)(char *id, size_t size, unsigned timeout_ms);
     void (*place)(int sw, int sh, int x, int y, int w, int h);
+    void (*place_unflushed)(int sw, int sh, int x, int y, int w, int h);
     void (*close)(void);
 } video_window;
 
@@ -56,10 +81,24 @@ static void video_window_init(void)
     if (lib) {
         video_window.open = (int (*)(char *, size_t, unsigned))dlsym(lib, "wpeb_webos_video_open");
         video_window.place = (void (*)(int, int, int, int, int, int))dlsym(lib, "wpeb_webos_video_place");
+        video_window.place_unflushed =
+            (void (*)(int, int, int, int, int, int))dlsym(lib, "wpeb_webos_video_place_unflushed");
         video_window.close = (void (*)(void))dlsym(lib, "wpeb_webos_video_close");
     }
     GST_INFO("page video window %s", video_window.open ? "available" : "unavailable (no webOS backend in this process)");
     g_once_init_leave(&video_window.once, 1);
+}
+
+/* The hole moves without the target's Wayland connection being flushed from here (see the backend). The target's
+ * queue is dispatched on the compositing thread, so a flush from this one (the thread libwpe runs the sink on) cannot
+ * dispatch it, and every painted frame of the page carries the move in its own commit: that is what makes the hole
+ * and the page's pixels travel together. An app with an older backend has no entry point yet: the old place(). */
+static void video_window_place(int sw, int sh, int x, int y, int w, int h)
+{
+    if (video_window.place_unflushed)
+        video_window.place_unflushed(sw, sh, x, y, w, h);
+    else if (video_window.place)
+        video_window.place(sw, sh, x, y, w, h);
 }
 
 /* ---- video sink ------------------------------------------------------------------------------------------- */
@@ -72,8 +111,21 @@ struct _WpebVideoSink {
     GMutex lock; /* fd, area */
     int fd;
     uint32_t codec;
-    gboolean have_area, area_sent;
-    WpebMediaArea area;
+    gboolean have_area;    /* the page window has been told where the hole is at least once */
+    gboolean area_pending; /* the UI has not got the current rectangle yet (see area_flush_pending_locked) */
+    WpebMediaArea area;    /* the rectangle to send: the painted one, or the predicted one in `early` mode */
+    /* What was last sent as WPEB_MEDIA_AREA, and the earliest time another one may go (the UI applies areas when it
+     * reads them: a burst of useless ones only makes the good one wait). Set on WebKit's main thread only. */
+    WpebMediaArea sent_area;
+    int64_t area_next_us;
+    /* The hole's rectangle as WebKit last painted it, and the scroll speed it followed (WPEB_AREA_EARLY). */
+    WpebMediaArea painted_area;
+    gboolean painted_area_valid;
+    int64_t paint_us;
+    double scroll_pps;
+    gint64 area_send_gap_us; /* 0: none */
+    int64_t place_us;
+    guint64 sets; /* rectangle property sets, and how many were different from the last one */
     guint64 sent;
     int64_t last_pts_us; /* media time of the last unit sent */
     /* MP4's length-prefixed H.264/HEVC (avc/hvc1): LG's decoder takes Annex B, so NAL lengths become start codes
@@ -148,7 +200,16 @@ static GstStaticPadTemplate video_sink_template = GST_STATIC_PAD_TEMPLATE("sink"
                     "video/x-h265, stream-format = (string) { byte-stream, hvc1, hev1 }, alignment = (string) au; "
                     "video/x-vp9"));
 
-/* Lock held. One message; false when the UI is gone (the stream then errors out). */
+/* Lock held by the caller (every caller locks: send_msg, area_painted, area_flush_pending_locked). One message; TRUE
+ * when all of it went out.
+ *
+ * The socket is BLOCKING with SO_SNDTIMEO = 2 s, not O_NONBLOCK, so a send can stop in the middle of a message: if the
+ * UI stops reading for 2 s during a large access unit (the 16 MiB limit of WPEB_MEDIA_MAX_PAYLOAD; a keyframe at 4K can
+ * be hundreds of KB), sendmsg() returns the partial count on one call and then -1/EAGAIN on the next. A partial
+ * message CANNOT be completed later -- the stream is a byte stream and the receiver would take the next header as
+ * payload -- so a short write is unrecoverable: the connection is closed and FALSE is returned, which makes render()
+ * error the element and WebKit tear the pipeline down (a new pipeline reconnects in start()). Do not "retry" a short
+ * write, and do not soften this to a warning. */
 static gboolean send_locked(WpebVideoSink *self, uint32_t type, int64_t pts_us, const void *data, uint32_t size)
 {
     if (self->fd < 0)
@@ -182,6 +243,15 @@ static gboolean send_locked(WpebVideoSink *self, uint32_t type, int64_t pts_us, 
             }
         }
     }
+    if (want) {
+        /* Half a message is on the wire (the UI stopped reading for SO_SNDTIMEO mid-unit): this connection can never be
+         * in step again, so drop it; the caller sees FALSE and errors the element. */
+        GST_WARNING_OBJECT(self, "media server: %" G_GSIZE_FORMAT " bytes of a %u-byte message not sent: dropping the "
+                                 "connection", want, size);
+        close(self->fd);
+        self->fd = -1;
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -193,11 +263,163 @@ static gboolean send_msg(WpebVideoSink *self, uint32_t type, int64_t pts_us, con
     return ok;
 }
 
-static void send_area_locked(WpebVideoSink *self)
+static int64_t now_us(void)
 {
-    if (self->have_area && !self->area_sent && self->fd >= 0) {
-        if (send_locked(self, WPEB_MEDIA_AREA, 0, &self->area, sizeof(self->area)))
-            self->area_sent = TRUE;
+    return g_get_monotonic_time();
+}
+
+/* Sends area_pending if there is one. Called with the lock already held, from three places: render() and start() on
+ * the streaming thread, and area_painted() on WebKit's main thread (which locks first). This is the path that
+ * guarantees the last rectangle of a scroll is never lost, because it does not depend on another paint ever happening
+ * (WebKit paints nothing once the page is idle, so a rectangle skipped in area_painted -- the streaming thread held
+ * the lock, or the send failed -- would otherwise never go out and the LG window would stay where it was while the
+ * page's own window moved: the hole and the picture permanently apart). Lock held. */
+static void area_flush_pending_locked(WpebVideoSink *self)
+{
+    if (!self->area_pending || self->fd < 0)
+        return;
+    if (send_locked(self, WPEB_MEDIA_AREA, 0, &self->area, sizeof(self->area))) {
+        self->area_pending = FALSE;
+        self->sent_area = self->area;
+        self->area_next_us = now_us() + self->area_send_gap_us;
+    }
+}
+
+/* ---- the hole's rectangle over time ------------------------------------------------------------------------ */
+
+/* CLOCK_MONOTONIC of the page surface's commit that carried the hole's move last (engine/webos-backend), 0 when none:
+ * WebKit sets the property inside the paint, and the move reaches the compositor with the frame's commit after it. */
+static int64_t video_window_last_commit_us(void)
+{
+    static struct {
+        gsize once;
+        int64_t (*last_commit_us)(void);
+    } fn = {0};
+    if (g_once_init_enter(&fn.once)) {
+        void *lib = dlopen("libWPEBackend-webos.so", RTLD_NOW | RTLD_NOLOAD);
+        if (lib)
+            fn.last_commit_us = (int64_t (*)(void))dlsym(lib, "wpeb_webos_video_last_commit_us");
+        g_once_init_leave(&fn.once, 1);
+    }
+    return fn.last_commit_us ? fn.last_commit_us() : 0;
+}
+
+/* Bytes queued on the connection towards the UI (-1 when unknown): with a slow UI, a big number means the area sent
+ * now waits behind that many bytes of access units before the UI even reads it. */
+static int area_queue_bytes(int fd)
+{
+    int q = 0;
+    if (fd >= 0 && ioctl(fd, TIOCOUTQ, &q) == 0)
+        return q;
+    return -1;
+}
+
+/* Taking the hole's lag out of a scroll: the page keeps scrolling for a while after WebKit paints the frame that
+ * moved the hole, so an area sent now should say where the hole is going to be then, not where it was painted.
+ * `previous` is the rectangle of the frame before the one being painted now; the lead is the interval between the
+ * two paints (one measure-apply round trip: the UI's next frame plus LG's window update). Off by default: it is only
+ * on with WPE_BROWSER_DEBUG_MEDIA_AREA=early, and the numbers to tune it have to come from the TV.
+ *
+ * The two limits exist to keep a wrong prediction from making the picture WORSE than no prediction (an overshoot is
+ * visible as the video jumping past its hole, which reads as a glitch; a late window reads as lag):
+ *   - WPEB_AREA_LEAD_MAX_MS = 50: the lead is capped, so one slow frame (a 100 ms hitch) cannot extrapolate a long
+ *     run at the speed measured before it (at 1200 px/s that would throw the window 120 px);
+ *   - the speed only comes from two consecutive paints 4-100 ms apart that keep the hole's height, so a resize or a
+ *     pause resets it (a stale speed would otherwise be reused after the scroll stops);
+ *   - the result is clamped to [-hole height, previous position + hole height]: the UI moves a window, it does not
+ *     clip it, so the rectangle stays inside the range where the hole can still be seen. */
+#define WPEB_AREA_LEAD_MAX_MS 50
+
+static gboolean area_extrapolate(WpebVideoSink *self, const WpebMediaArea *previous, WpebMediaArea *a, int64_t dt_us)
+{
+    const double dt_ms = (double)dt_us / 1000.0;
+    if (dt_ms < 4.0 || !(self->scroll_pps > 0.000050))
+        return FALSE;
+    const int lead = (int)(dt_ms > WPEB_AREA_LEAD_MAX_MS ? WPEB_AREA_LEAD_MAX_MS : dt_ms);
+    int y = a->y + (int)(self->scroll_pps * (double)lead + 0.5);
+    /* The UI moves a window, it does not clip it: never past the hole having left the page. */
+    if (y > previous->y + previous->height)
+        y = previous->y + previous->height;
+    if (y < -previous->height)
+        y = -previous->height;
+    a->y = y;
+    return y != previous->y;
+}
+
+/* A rectangle WebKit just painted, on the web process's main thread, inside the paint that draws the hole: the page's
+ * own video window (this process, and the hole the user sees) follows it at once, and the UI process gets
+ * WPEB_MEDIA_AREA to move LG's video window. The UI's copy is rate-limited
+ * (WPE_BROWSER_DEBUG_MEDIA_AREA_MIN_GAP_MS) because the UI applies areas between access units, so a denser stream only
+ * adds work between the good one and its apply. The video window's own place() is NOT rate-limited: it is the hole.
+ * With WPE_BROWSER_DEBUG_MEDIA_AREA=1 it logs the [hole] line (see the top of this file). */
+static void area_painted(WpebVideoSink *self, WpebMediaArea a)
+{
+    const int64_t now = now_us();
+    /* Everything below that set_caps() also reads (painted_area, painted_area_valid) changes under the lock: set_caps
+     * runs on the streaming thread, this on WebKit's main thread. */
+    g_mutex_lock(&self->lock);
+    const int64_t previous_us = self->paint_us;
+    const WpebMediaArea previous = self->painted_area;
+    const gboolean have_previous = self->painted_area_valid;
+    const int64_t dt_us = have_previous && previous_us > 0 ? now - previous_us : -1;
+    const gboolean changed = !have_previous || memcmp(&a, &previous, sizeof(a));
+    self->sets++;
+    if (changed) {
+        /* The speed the area extrapolates with is the one between the last two paints (kept for the next one). */
+        if (dt_us >= 4000 && a.height == previous.height && dt_us < 100000)
+            self->scroll_pps = (double)(previous.y - a.y) * 1e6 / (double)dt_us;
+        else if (dt_us > 200000 || a.height != previous.height)
+            self->scroll_pps = 0;
+        self->painted_area = a;
+        self->painted_area_valid = TRUE;
+        self->paint_us = now;
+    }
+    /* What the UI is told: where the hole will be when the UI gets to it, if it is worth predicting. */
+    WpebMediaArea out = a;
+    if (changed && WPEB_AREA_EARLY && dt_us >= 0)
+        area_extrapolate(self, &previous, &out, dt_us);
+    WpebMediaArea sent = {0};
+    gboolean did_send = FALSE;
+    /* The UI's copy. Skipping it for the gap is not lost: area_pending stays set, so a later painted rectangle sends
+     * it (one goes out per painted frame at most) -- and if there IS no later rectangle (the scroll's last paint), the
+     * streaming thread's next render() sends it (area_flush_pending_locked). The lock is held HERE already, so the send
+     * goes through send_locked() directly: g_mutex_trylock() on a mutex this thread owns always fails (GMutex is not
+     * recursive), which is what made an earlier version of this silent -- it sent nothing, ever. */
+    if (changed) {
+        self->have_area = TRUE;
+        self->area = out;
+        self->area_pending = TRUE;
+        if (now >= self->area_next_us &&
+            send_locked(self, WPEB_MEDIA_AREA, 0, &self->area, sizeof(self->area))) {
+            self->area_pending = FALSE;
+            self->sent_area = self->area;
+            self->area_next_us = now + self->area_send_gap_us;
+            did_send = TRUE;
+            sent = self->sent_area;
+        }
+    }
+    const gboolean have_window = self->have_window;
+    const int vw = self->video_width, vh = self->video_height;
+    g_mutex_unlock(&self->lock);
+    if (have_window && video_window.place) {
+        const int64_t t0 = now_us();
+        video_window_place(vw, vh, a.x, a.y, a.width, a.height);
+        self->place_us = now_us() - t0;
+    }
+    if (WPEB_AREA_DEBUG) {
+        /* v: the page surface's commit that carried this move (engine/webos-backend, 0: unknown), or when the last
+         * one was; gl: when this call was made, so v - gl is that last commit's age; pl: how long video_window_place()
+         * took; q: bytes queued on the media socket when this line was written. Every argument is cast to the exact
+         * type its conversion wants (gint64 / int): the ARM build is softfp and %ld is 32-bit there. */
+        const int q = area_queue_bytes(self->fd);
+        const int64_t gl = now_us();
+        const int64_t v = video_window_last_commit_us();
+        GST_INFO_OBJECT(self, "[hole] %" G_GINT64_FORMAT " set %d,%d %dx%d %c dt=%" G_GINT64_FORMAT
+                        " v=%" G_GINT64_FORMAT " gl=%" G_GINT64_FORMAT " pl=%" G_GINT64_FORMAT " q=%d sent=%d"
+                        " u=%d,%d",
+                        (gint64)now, (int)a.x, (int)a.y, (int)a.width, (int)a.height, (int)(changed ? 'c' : '='),
+                        (gint64)dt_us, (gint64)v, (gint64)gl, (gint64)self->place_us, (int)q,
+                        (int)(did_send ? 1 : 0), (int)sent.x, (int)sent.y);
     }
 }
 
@@ -305,10 +527,14 @@ static gboolean wpeb_video_sink_start(GstBaseSink *sink)
     self->codec = 0;
     memset(&self->load, 0, sizeof(self->load));
     self->sent = 0;
-    self->area_sent = FALSE;
     uint32_t version = WPEB_MEDIA_IPC_VERSION;
     send_locked(self, WPEB_MEDIA_HELLO, 0, &version, sizeof(version));
-    send_area_locked(self);
+    /* The hole's rectangle before anything else goes out (the UI has no window to run until it knows where). A new
+     * connection has sent nothing, so the rectangle we hold -- the last painted one -- goes now, whether or not it
+     * already went over the previous connection. */
+    if (self->have_area)
+        self->area_pending = TRUE;
+    area_flush_pending_locked(self);
     g_mutex_unlock(&self->lock);
     GST_INFO_OBJECT(self, "connected to %s", path);
     return TRUE;
@@ -403,10 +629,14 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
         self->have_window = FALSE;
     if (self->have_window) {
         GST_INFO_OBJECT(self, "video window %s on the page surface", load.window_id);
+        /* At once, not on the next painted frame: the window is new and LG's pipeline is about to show the first
+         * frame in it (this is the streaming thread: no flush here, see video_window_place). */
         g_mutex_lock(&self->lock);
-        if (self->have_area)
-            video_window.place(width, height, self->area.x, self->area.y, self->area.width, self->area.height);
+        const gboolean known = self->painted_area_valid || self->have_area;
+        const WpebMediaArea a = self->painted_area_valid ? self->painted_area : self->area;
         g_mutex_unlock(&self->lock);
+        if (known)
+            video_window_place(width, height, a.x, a.y, a.width, a.height); /* backend serializes with g_video_lock */
     }
     self->load = load;
     gboolean sent = send_msg(self, WPEB_MEDIA_LOAD, 0, &load, sizeof(load));
@@ -489,6 +719,12 @@ static GstFlowReturn wpeb_video_sink_render(GstBaseSink *sink, GstBuffer *buffer
         GST_ELEMENT_ERROR(self, RESOURCE, WRITE, ("Hardware video service lost"), (NULL));
         return GST_FLOW_ERROR;
     }
+    /* A rectangle the paint path could not hand over (the streaming thread held the lock, or the send failed) goes
+     * now, in the stream's own message order: this is what makes the last rectangle of a scroll safe once the page
+     * stops painting and never asks again. The lock is free here (send_msg above released it). */
+    g_mutex_lock(&self->lock);
+    area_flush_pending_locked(self);
+    g_mutex_unlock(&self->lock);
     GST_LOG_OBJECT(self, "unit %" G_GUINT64_FORMAT ": media %" G_GINT64_FORMAT " us, %" G_GSIZE_FORMAT " bytes", self->sent + 1, pts_us, size);
     if (++self->sent == 1)
         GST_INFO_OBJECT(self, "first access unit: media time %" G_GINT64_FORMAT " us, %" G_GSIZE_FORMAT " bytes", pts_us, map.size);
@@ -536,18 +772,8 @@ static void wpeb_video_sink_set_property(GObject *object, guint id, const GValue
     WpebMediaArea a = {0};
     if (!text || sscanf(text, "%d,%d,%d,%d", &a.x, &a.y, &a.width, &a.height) != 4)
         return;
-    g_mutex_lock(&self->lock);
-    /* WebKit sets this on every composited frame: only changes go out. */
-    if (!self->have_area || memcmp(&a, &self->area, sizeof(a))) {
-        self->area = a;
-        self->have_area = TRUE;
-        self->area_sent = FALSE;
-        GST_DEBUG_OBJECT(self, "rectangle %d,%d %dx%d", a.x, a.y, a.width, a.height);
-        send_area_locked(self);
-        if (self->have_window && video_window.place)
-            video_window.place(self->video_width, self->video_height, a.x, a.y, a.width, a.height);
-    }
-    g_mutex_unlock(&self->lock);
+    /* WebKit sets this on every composited frame, inside the paint that draws the hole (see area_painted). */
+    area_painted(self, a);
 }
 
 static void wpeb_video_sink_get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
@@ -580,6 +806,13 @@ static void wpeb_video_sink_init(WpebVideoSink *self)
     self->fd = -1;
     self->parameter_sets = g_byte_array_new();
     self->scratch = g_byte_array_new();
+    /* The hole's rectangle: at most one per this many µs (the UI applies areas between access units, so a narrower
+     * gap buys nothing); WPE_BROWSER_DEBUG_* in the environment overrides it (measurements: the UI lets those through
+     * {"wpebEnv": {...}}, browser/engine_client.cpp, and not WPEB_*). */
+    self->area_send_gap_us = 16000;
+    const char *gap = g_getenv("WPE_BROWSER_DEBUG_MEDIA_AREA_MIN_GAP_MS");
+    if (gap)
+        self->area_send_gap_us = (gint64)g_ascii_strtoll(gap, NULL, 0) * 1000;
     gst_base_sink_set_sync(GST_BASE_SINK(self), TRUE);
     /* Late access units still go to the decoder: dropping encoded data breaks the frames after it. */
     gst_base_sink_set_max_lateness(GST_BASE_SINK(self), -1);

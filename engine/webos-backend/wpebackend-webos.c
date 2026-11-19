@@ -1141,6 +1141,7 @@ __attribute__((visibility("default"))) struct wpe_loader_interface _wpe_loader_i
 
 static pthread_cond_t g_video_cond = PTHREAD_COND_INITIALIZER;
 static char g_video_id[128]; // window_id_assigned (g_video_lock)
+static struct timespec g_video_commit_at; // the last set_exported_window (CLOCK_MONOTONIC, g_video_lock)
 
 static void video_window_id_assigned(void *data, struct wl_webos_exported *exported, const char *id, uint32_t type)
 {
@@ -1197,8 +1198,10 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
 }
 
 // Source: the coded picture; destination: page-surface pixels (the page surface covers the screen; the page itself
-// is its bottom part, see surface_height, so page coordinates move down by the strip above it).
-__attribute__((visibility("default"))) void wpeb_webos_video_place(int sw, int sh, int x, int y, int w, int h)
+// is its bottom part, see surface_height, so page coordinates move down by the strip above it). `commit`: flush the
+// target's connection now (a caller outside the compositing thread's frame loop needs that; the media sink does not,
+// see wpeb_webos_video_place_unflushed).
+static void video_place(int sw, int sh, int x, int y, int w, int h, gboolean commit)
 {
     pthread_mutex_lock(&g_video_lock);
     struct target *t = g_shown_target;
@@ -1210,9 +1213,36 @@ __attribute__((visibility("default"))) void wpeb_webos_video_place(int sw, int s
         wl_webos_exported_set_exported_window(t->video, src, dst);
         wl_region_destroy(src);
         wl_region_destroy(dst);
-        wl_display_flush(t->renderer->display);
+        clock_gettime(CLOCK_MONOTONIC, &g_video_commit_at);
+        if (commit)
+            wl_display_flush(t->renderer->display);
     }
     pthread_mutex_unlock(&g_video_lock);
+}
+
+__attribute__((visibility("default"))) void wpeb_webos_video_place(int sw, int sh, int x, int y, int w, int h)
+{
+    video_place(sw, sh, x, y, w, h, TRUE);
+}
+
+// For the media sink (engine/gst/wpebmediasink.c, same process), on every painted frame: the same hole, without the
+// flush. The target's Wayland queue is dispatched by a GSource attached to the thread that created the target
+// (target_initialize, g_main_context_ref_thread_default), which is the thread that runs WPE's event loop -- WebKit's
+// compositing thread, not the thread that runs libwpe's frame callbacks and the sink: a flush from here cannot
+// dispatch it either, so it only wakes the compositor. That dispatch (WaylandSource, target_on_wayland_source)
+// flushes the queue before it reads the compositor's answers, so the hole's move and the frame that shows it leave
+// together -- which is the point: the page and its hole must not travel by separate departures.
+__attribute__((visibility("default"))) void wpeb_webos_video_place_unflushed(int sw, int sh, int x, int y, int w,
+                                                                            int h)
+{
+    video_place(sw, sh, x, y, w, h, FALSE);
+}
+
+// CLOCK_MONOTONIC of the last set_exported_window (0: none), for comparing with the media sink's own timestamps
+// (g_get_monotonic_time is CLOCK_MONOTONIC).
+__attribute__((visibility("default"))) int64_t wpeb_webos_video_last_commit_us(void)
+{
+    return (int64_t)g_video_commit_at.tv_sec * 1000000 + g_video_commit_at.tv_nsec / 1000;
 }
 
 __attribute__((visibility("default"))) void wpeb_webos_video_close(void)
