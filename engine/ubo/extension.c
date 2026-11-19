@@ -16,6 +16,7 @@
  * on/allowed/lists, sent when the settings change. ("(sbas)"/"(bas)" without lists are accepted too.)
  * The blocker is never applied on YouTube (see adblock_wanted in engine/src/main.cpp) or on allowed hosts.
  * WREN_UBO_LOG=1 logs every blocked, redirected or rewritten request (without query strings). */
+#define _GNU_SOURCE /* strcasestr */
 #include <wpe/webkit-web-process-extension.h>
 #include <jsc/jsc.h>
 #include <libsoup/soup.h>
@@ -159,11 +160,61 @@ static void log_request(const char *what, const char *uri, const char *type)
     g_message("wren-ubo: %s %s %.*s", what, type, cut ? (int)(cut - uri) : (int)strlen(uri), uri);
 }
 
+/* This WebKit has no AVIF decoder. Sites that ask their image server for AVIF (...jpg?format=avif,
+ * imgix's fm=avif) then show nothing, so image requests lose those parameters and "image/avif" leaves the Accept
+ * header: the server sends its default format. A compatibility fix, so it runs with the blocker off too. */
+static void avoid_avif(WebKitURIRequest *request, const char *uri)
+{
+    SoupMessageHeaders *headers = webkit_uri_request_get_http_headers(request);
+    const char *accept = headers ? soup_message_headers_get_one(headers, "Accept") : NULL;
+    if (accept && strstr(accept, "image/avif")) {
+        GString *a = g_string_new(accept);
+        g_string_replace(a, "image/avif,", "", 0);
+        g_string_replace(a, ",image/avif", "", 0);
+        soup_message_headers_replace(headers, "Accept", a->str);
+        g_string_free(a, TRUE);
+    }
+    const char *q = strchr(uri, '?');
+    if (!q || !(strcasestr(q, "format=avif") || strcasestr(q, "fm=avif")))
+        return;
+    const char *hash = strchr(q, '#');
+    char *query = g_strndup(q + 1, hash ? (gsize)(hash - q - 1) : strlen(q + 1));
+    char **parts = g_strsplit(query, "&", -1);
+    GString *out = g_string_new_len(uri, q - uri);
+    gboolean first = TRUE;
+    for (char **p = parts; *p; ++p) {
+        if (!**p || !g_ascii_strcasecmp(*p, "format=avif") || !g_ascii_strcasecmp(*p, "fm=avif"))
+            continue;
+        g_string_append_c(out, first ? '?' : '&');
+        g_string_append(out, *p);
+        first = FALSE;
+    }
+    if (hash)
+        g_string_append(out, hash);
+    if (g.log)
+        g_message("wren-ubo: avif -> default format: %.*s", (int)(q - uri), uri);
+    webkit_uri_request_set_uri(request, out->str);
+    g_string_free(out, TRUE);
+    g_strfreev(parts);
+    g_free(query);
+}
+
 static gboolean on_send_request(WebKitWebPage *page, WebKitURIRequest *request, WebKitURIResponse *redirected, gpointer data unused)
 {
     const char *page_uri = webkit_web_page_get_uri(page);
     const char *uri = webkit_uri_request_get_uri(request);
-    if (!uri || !(g_str_has_prefix(uri, "http:") || g_str_has_prefix(uri, "https:")) || !wanted(page_uri))
+    if (!uri || !(g_str_has_prefix(uri, "http:") || g_str_has_prefix(uri, "https:")))
+        return FALSE;
+    {
+        SoupMessageHeaders *h = webkit_uri_request_get_http_headers(request);
+        const char *dest = h ? soup_message_headers_get_one(h, "Sec-Fetch-Dest") : NULL;
+        const char *accept = h ? soup_message_headers_get_one(h, "Accept") : NULL;
+        if (g_strcmp0(dest, "image") == 0 || (accept && g_str_has_prefix(accept, "image/"))) {
+            avoid_avif(request, uri);
+            uri = webkit_uri_request_get_uri(request);
+        }
+    }
+    if (!wanted(page_uri))
         return FALSE;
     const char *type = request_type(request, uri);
     if (g.log_all) {

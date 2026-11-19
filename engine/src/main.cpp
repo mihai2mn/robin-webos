@@ -1185,14 +1185,19 @@ void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener)
     WebKitWebView *web_view = nullptr;
     // Its own content manager: a related view would otherwise share the first tab's (scroll reports per tab).
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
+    // Autoplay: muted videos only (thumbnails' hover previews keep working; a video with sound waits for Play), except
+    // in tabs opened on YouTube, whose TV app plays the next video by itself. Set once per tab (construct-only).
+    const bool youtube = uri.find("youtube.com") != std::string::npos || uri.find("youtu.be") != std::string::npos;
+    WebKitWebsitePolicies *policies = webkit_website_policies_new_with_policies("autoplay",
+        youtube ? WEBKIT_AUTOPLAY_ALLOW : WEBKIT_AUTOPLAY_ALLOW_WITHOUT_SOUND, nullptr);
     if (g.direct) {
         WebKitWebViewBackend *backend = direct::create_backend(id, g.width, g.height, &tab.direct);
         if (backend) {
             web_view = related
                 ? WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "related-view", related,
-                    "settings", g.settings, "user-content-manager", ucm, nullptr))
+                    "settings", g.settings, "user-content-manager", ucm, "website-policies", policies, nullptr))
                 : WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "network-session", g.session,
-                    "settings", g.settings, "user-content-manager", ucm, nullptr));
+                    "settings", g.settings, "user-content-manager", ucm, "website-policies", policies, nullptr));
             tab.ime = direct::create_ime(id, on_direct_ime);
             webkit_web_view_set_input_method_context(web_view, tab.ime);
             g_object_unref(tab.ime); // the web view keeps it
@@ -1202,12 +1207,13 @@ void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener)
             // The display must be passed to related views too: without it WebKit would use
             // wpe_display_get_default(), which creates a display of another platform instead of ours.
             ? WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "related-view", related, "display", g.display,
-                "settings", g.settings, "user-content-manager", ucm, nullptr))
+                "settings", g.settings, "user-content-manager", ucm, "website-policies", policies, nullptr))
             : WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", g.display, "network-session", g.session,
-                "settings", g.settings, "user-content-manager", ucm, nullptr));
+                "settings", g.settings, "user-content-manager", ucm, "website-policies", policies, nullptr));
         tab.view = webkit_web_view_get_wpe_view(web_view);
     }
     g_object_unref(ucm); // the view keeps its own reference
+    g_object_unref(policies);
     if (!web_view || (!tab.view && !tab.direct)) {
         log_msg("WebKit did not create a view for tab %u", id);
         if (web_view)
