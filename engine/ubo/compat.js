@@ -75,6 +75,21 @@
     // removed, or left paused and hidden, gives its stream back (decoder and buffers), and gets it back if played.
     const mains = new Set();
     const isMain = v => !v.muted || v.controls || v.getBoundingClientRect().width >= innerWidth * 0.45;
+    // (0) With WebKit patch 0010, a <video wren-software> decodes in software and draws in the page, off the hardware
+    // decoder: previews get it before they load. A preview: muted, no controls, in a box under 60% of the screen wide.
+    const isPreview = v => (v.muted || v.hasAttribute('muted') || v.defaultMuted) && !v.controls && !v.hasAttribute('controls') &&
+        ((v.parentElement || v).getBoundingClientRect().width || 1) < innerWidth * 0.6;
+    const mark = v => { if (v instanceof HTMLVideoElement && !v.hasAttribute('wren-software') && isPreview(v)) v.setAttribute('wren-software', ''); };
+    const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+    if (srcDesc && srcDesc.set) Object.defineProperty(HTMLMediaElement.prototype, 'src', { ...srcDesc, set(value) { mark(this); srcDesc.set.call(this, value); } });
+    const load = HTMLMediaElement.prototype.load;
+    HTMLMediaElement.prototype.load = function () { mark(this); return load.apply(this, arguments); };
+    new MutationObserver(records => {
+        for (const r of records) for (const n of r.addedNodes) {
+            if (n.nodeType !== 1) continue;
+            (n.tagName === 'VIDEO' ? [n] : n.querySelectorAll ? [...n.querySelectorAll('video')] : []).forEach(mark);
+        }
+    }).observe(document, { childList: true, subtree: true });
     const mainPlaying = () => [...mains].some(v => v.isConnected && !v.paused && !v.ended && isMain(v));
     const visible = v => { if (!v.isConnected) return false; const r = v.getBoundingClientRect(); const s = getComputedStyle(v);
         return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05; };
