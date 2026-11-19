@@ -25,6 +25,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -291,7 +292,7 @@ void on_frame(void *, WPEView *view, WPEBuffer *buffer, const WPERectangle *dama
     }
     g.in_flight[slot] = WPE_BUFFER(g_object_ref(buffer));
     g.in_flight_view[slot] = WPE_VIEW(g_object_ref(view));
-    if (!send_msg(WPE_ENGINE_FRAME, tab, &f, sizeof(f))) {
+    if (!send_msg(WPE_ENGINE_FRAME, tab, &f, WPE_IPC_PAYLOAD_BYTES(WpeFrame, damage))) {
         g_clear_object(&g.in_flight[slot]);
         g_clear_object(&g.in_flight_view[slot]);
         webos_view_frame_shown(WEBOS_VIEW(view), buffer);
@@ -804,7 +805,9 @@ constexpr const char *kMediaLimitScript = R"JS((function () {
 
 std::string media_limit_script()
 {
-    unsigned long pixels = 1280 * 720, fps = 30;
+    // uint64_t, not unsigned long: 32-bit on the softfp engine, 64-bit on the aarch64 one, and the same "PIXELS@FPS"
+    // values must parse to the same numbers in both.
+    uint64_t pixels = 1280 * 720, fps = 30;
     bool vp9 = false;
     // LG's decoder (hardware video, WPEB_MEDIA_SOCKET) plays 4K60 H.264/HEVC/VP9.
     if (getenv("WPEB_MEDIA_SOCKET")) {
@@ -816,13 +819,13 @@ std::string media_limit_script()
         if (!strcmp(v, "off"))
             return {};
         char *end = nullptr;
-        if (unsigned long p = strtoul(v, &end, 10)) pixels = p;
-        if (end && *end == '@') fps = strtoul(end + 1, &end, 10);
+        if (uint64_t p = strtoull(v, &end, 10)) pixels = p;
+        if (end && *end == '@') fps = strtoull(end + 1, &end, 10);
         vp9 = strstr(v, "+vp9") != nullptr;
-        log_msg("media limit: %lu pixels, %lu fps%s", pixels, fps, vp9 ? ", VP9 allowed" : "");
+        log_msg("media limit: %" PRIu64 " pixels, %" PRIu64 " fps%s", pixels, fps, vp9 ? ", VP9 allowed" : "");
     }
     char cfg[128];
-    snprintf(cfg, sizeof(cfg), "{pixels: %lu, fps: %lu, vp9: %s}", pixels, fps, vp9 ? "true" : "false");
+    snprintf(cfg, sizeof(cfg), "{pixels: %" PRIu64 ", fps: %" PRIu64 ", vp9: %s}", pixels, fps, vp9 ? "true" : "false");
     std::string script = kMediaLimitScript;
     const std::string marker = "__WPEB_MEDIA__";
     script.replace(script.find(marker), marker.size(), cfg);

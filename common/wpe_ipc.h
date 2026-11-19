@@ -22,6 +22,7 @@
 #ifndef WPE_IPC_H
 #define WPE_IPC_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define WPE_IPC_VERSION 11u
@@ -95,6 +96,14 @@ typedef enum {
 
 /* Tabs the engine opens itself (popups) get ids from here, so they never collide with the UI's. */
 #define WPE_ENGINE_TAB_ID_BASE 0x40000000u
+
+/* The wire size of a payload up to its last member: it is what a sender must put in WpeMsgHeader.size for that,
+ * independently of how the compiler rounds the struct up. The aarch64 engine (64-bit) and the 32-bit UI pass the
+ * same messages: every field is fixed-width, so the structs have the same size and offsets on 32- and 64-bit
+ * (checked below); but the bytes on the wire must not depend on the compiler's struct padding (TCF,
+ * -fpack-struct, ...), and a receiver reading just these bytes can never pick up stale stack.
+ * For an array member sizeof() is the whole array, so this is "up to and including the last member" for arrays too. */
+#define WPE_IPC_PAYLOAD_BYTES(type, last) ((uint32_t)(offsetof(type, last) + sizeof(((type *)0)->last)))
 
 typedef struct {
     uint32_t opener; /* the tab whose page opened it (0 if unknown) */
@@ -215,5 +224,59 @@ typedef struct {
 #ifdef __cplusplus
 }
 #endif
+
+/* The wire layout is the same on every ABI the browser runs on (32-bit ARM softfp UI and engine, the aarch64 engine,
+ * and the x86_64 host tests): every member is fixed-width and nothing has an alignment above 4, so no struct has
+ * padding and none contains a pointer, size_t or long. Any change that breaks that is a compile error rather than
+ * two processes that disagree about a message. WPE_IPC_PAYLOAD_BYTES is what the engine sends for a whole struct;
+ * for these it must be exactly sizeof. */
+#if defined(__cplusplus)
+#define WPE_IPC_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define WPE_IPC_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+#define WPE_IPC_SIZE(type, bytes) WPE_IPC_STATIC_ASSERT(sizeof(type) == (bytes), #type ": unexpected wire size")
+#define WPE_IPC_AT(type, member, offset) WPE_IPC_STATIC_ASSERT(offsetof(type, member) == (offset), #type "." #member ": unexpected offset")
+#define WPE_IPC_WHOLE(type, last) WPE_IPC_STATIC_ASSERT(WPE_IPC_PAYLOAD_BYTES(type, last) == sizeof(type), #type ": payload size differs from sizeof")
+
+WPE_IPC_SIZE(WpeMsgHeader, 12);
+WPE_IPC_SIZE(WpeTabCreated, 4);
+WPE_IPC_SIZE(WpeAppHello, 16);
+WPE_IPC_SIZE(WpeEngineReady, 16);
+WPE_IPC_SIZE(WpeText, 2052);
+WPE_IPC_AT(WpeText, text, 4);
+WPE_IPC_SIZE(WpeError, 2060);
+WPE_IPC_AT(WpeError, message, 8);
+WPE_IPC_SIZE(WpeSize, 8);
+WPE_IPC_SIZE(WpeFlag, 4);
+WPE_IPC_SIZE(WpeKey, 16);
+WPE_IPC_SIZE(WpePointer, 20);
+WPE_IPC_SIZE(WpeScroll, 16);
+WPE_IPC_SIZE(WpeFrames, 8);
+WPE_IPC_SIZE(WpeRect, 16);
+WPE_IPC_SIZE(WpeFrame, 152);
+WPE_IPC_AT(WpeFrame, damage, 24);
+WPE_IPC_SIZE(WpeFrameDone, 8);
+WPE_IPC_SIZE(WpeProgress, 4);
+WPE_IPC_SIZE(WpeLoad, 4);
+WPE_IPC_SIZE(WpeHistory, 8);
+WPE_IPC_SIZE(WpeIme, 24);
+WPE_IPC_SIZE(WpeClearData, 8);
+WPE_IPC_SIZE(WpeDataCleared, 8);
+WPE_IPC_SIZE(WpeZoom, 4);
+WPE_IPC_SIZE(WpePresent, 16);
+
+/* The structs the engine sends in full (send_msg(..., sizeof(x)) or WPE_IPC_PAYLOAD_BYTES). */
+WPE_IPC_WHOLE(WpeFrame, damage);
+WPE_IPC_WHOLE(WpeError, message);
+WPE_IPC_WHOLE(WpeText, text);
+WPE_IPC_WHOLE(WpeAppHello, reserved);
+WPE_IPC_WHOLE(WpeEngineReady, webkit_micro);
+WPE_IPC_WHOLE(WpeKey, modifiers);
+WPE_IPC_WHOLE(WpePointer, time_ms);
+WPE_IPC_WHOLE(WpeScroll, delta_y);
+WPE_IPC_WHOLE(WpeIme, height);
+WPE_IPC_WHOLE(WpePresent, height);
+WPE_IPC_WHOLE(WpeFrames, slots);
 
 #endif /* WPE_IPC_H */

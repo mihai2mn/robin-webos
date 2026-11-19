@@ -1,4 +1,50 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// WPEB_NO_DIRECT (the aarch64 engine, engine/CMakeLists.txt): libWPEBackend-webos.so is built for the 32-bit softfp
+// engine against the TV's own libwayland/EGL (tools/build-webos-backend.sh) and a 64-bit process cannot load it, so
+// the aarch64 engine has only the SHM path (platform.cpp). init() returns false there, and main.cpp falls back to SHM.
+// The #ifdef covers the #includes too: a build without direct presentation does not need WebKit's headers here.
+#ifdef WPEB_NO_DIRECT
+
+#include "direct.h"
+
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+
+void log_msg(const char *fmt, ...);
+
+namespace direct {
+
+bool init(const char *, const char *, StatusFn)
+{
+    log_msg("direct presentation is not part of the aarch64 engine (the backend is 32-bit); using SHM frames");
+    return false;
+}
+
+WebKitWebViewBackend *create_backend(uint32_t, uint32_t, uint32_t, View **view)
+{
+    *view = nullptr;
+    return nullptr;
+}
+
+void set_size(View *, uint32_t, uint32_t) { }
+void set_scale(View *, double) { }
+void set_shown(View *, bool) { }
+bool shown(const View *) { return false; }
+bool is_detached_status(int32_t) { return false; }
+void set_focused(View *, bool) { }
+void set_layer(const char *) { }
+void reattach(View *) { }
+WebKitInputMethodContext *create_ime(uint32_t, ImeFn) { return nullptr; }
+void commit_text(WebKitInputMethodContext *, const char *) { }
+void key(View *, const WpeKey &) { }
+void pointer(View *, const WpePointer &, uint32_t &) { }
+void scroll(View *, const WpeScroll &, uint32_t) { }
+
+} // namespace direct
+
+#else
+
 #include "direct.h"
 
 #include "../webos-backend/protocol.h"
@@ -355,3 +401,5 @@ void commit_text(WebKitInputMethodContext *ime, const char *text)
 }
 
 } // namespace direct
+
+#endif // WPEB_NO_DIRECT

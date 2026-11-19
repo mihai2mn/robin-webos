@@ -7,7 +7,15 @@
 #include "../../common/wpe_ipc.h"
 
 #include <cstdint>
+
+#ifdef WPEB_NO_DIRECT
+// The aarch64 engine has no direct presentation (see direct.cpp): only the two WebKit types its signatures name are
+// needed here, so a build without it does not depend on WebKit's headers at all.
+typedef struct _WebKitWebViewBackend WebKitWebViewBackend;
+typedef struct _WebKitInputMethodContext WebKitInputMethodContext;
+#else
 #include <wpe/webkit.h>
+#endif
 
 namespace direct {
 
