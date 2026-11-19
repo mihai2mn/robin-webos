@@ -1188,7 +1188,9 @@ void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener)
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
     // Autoplay: muted videos only (thumbnails' hover previews keep working; a video with sound waits for Play), except
     // in tabs opened on YouTube, whose TV app plays the next video by itself. Set once per tab (construct-only).
-    const bool youtube = uri.find("youtube.com") != std::string::npos || uri.find("youtu.be") != std::string::npos;
+    // WPE_BROWSER_DEBUG_AUTOPLAY=allow: every tab may autoplay with sound (tests without a remote).
+    const bool youtube = uri.find("youtube.com") != std::string::npos || uri.find("youtu.be") != std::string::npos
+        || g_strcmp0(getenv("WPE_BROWSER_DEBUG_AUTOPLAY"), "allow") == 0;
     WebKitWebsitePolicies *policies = webkit_website_policies_new_with_policies("autoplay",
         youtube ? WEBKIT_AUTOPLAY_ALLOW : WEBKIT_AUTOPLAY_ALLOW_WITHOUT_SOUND, nullptr);
     if (g.direct) {
