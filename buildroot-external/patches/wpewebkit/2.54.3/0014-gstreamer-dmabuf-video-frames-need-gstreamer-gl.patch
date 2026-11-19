@@ -1,0 +1,78 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] gstreamer: the DMABuf video frame path needs GStreamer GL
+
+VideoFrameGStreamer::MemoryType::DMABuf only exists with USE(GSTREAMER_GL) (and USE(GBM)), but getDMABuf() and
+CoordinatedPlatformLayerBufferVideo::createBufferFromDMABufMemory() were built for USE(GBM) alone, so a build with
+GBM on and GStreamer GL off (the webOS browser: video goes to the platform's sinks) did not compile. Give them the
+same condition as the memory type they use.
+---
+diff --git a/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp
+index 49dc1b6f..d5a14702 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp
+@@ -821,7 +821,7 @@ void VideoFrameGStreamer::setMemoryTypeFromCaps()
+     m_memoryType = MemoryType::System;
+ }
+ 
+-#if USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
++#if USE(GSTREAMER_GL) && USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
+ RefPtr<DMABufBuffer> VideoFrameGStreamer::getDMABuf()
+ {
+     if (m_memoryType != MemoryType::DMABuf)
+diff --git a/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.h b/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.h
+index 706b6903..db2378ca 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.h
++++ b/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.h
+@@ -103,7 +103,7 @@ public:
+     };
+     MemoryType memoryType() const { return m_memoryType; }
+ 
+-#if USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
++#if USE(GSTREAMER_GL) && USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
+     RefPtr<DMABufBuffer> getDMABuf();
+ #endif
+     const GstVideoInfo& info() const LIFETIME_BOUND { return m_info.info; }
+diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferVideo.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferVideo.cpp
+index 53c81ac0..19a21693 100644
+--- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferVideo.cpp
++++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferVideo.cpp
+@@ -127,7 +127,7 @@ std::unique_ptr<CoordinatedPlatformLayerBuffer> CoordinatedPlatformLayerBufferVi
+         return CoordinatedPlatformLayerBufferExternalOES::create(GRefPtr(buffer), dmabufFormat->first, yuvColorSpace, sampleRange, m_size, m_flags);
+     }
+ 
+-#if GST_CHECK_VERSION(1, 24, 0)
++#if USE(GSTREAMER_GL) && GST_CHECK_VERSION(1, 24, 0) // the DMABuf frame path needs VideoFrameGStreamer::MemoryType::DMABuf (GStreamer GL)
+     if (gst_is_dmabuf_memory(memory))
+         return createBufferFromDMABufMemory();
+ #endif // GST_CHECK_VERSION(1, 24, 0)
+@@ -156,7 +156,7 @@ std::unique_ptr<CoordinatedPlatformLayerBuffer> CoordinatedPlatformLayerBufferVi
+     return nullptr;
+ }
+ 
+-#if USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
++#if USE(GSTREAMER_GL) && USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
+ std::unique_ptr<CoordinatedPlatformLayerBuffer> CoordinatedPlatformLayerBufferVideo::createBufferFromDMABufMemory()
+ {
+     auto videoInfo = m_videoFrame->info();
+@@ -167,7 +167,7 @@ std::unique_ptr<CoordinatedPlatformLayerBuffer> CoordinatedPlatformLayerBufferVi
+     RELEASE_ASSERT(dmabuf);
+     return CoordinatedPlatformLayerBufferDMABuf::create(dmabuf.releaseNonNull(), m_flags, nullptr);
+ }
+-#endif // USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
++#endif // USE(GSTREAMER_GL) && USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
+ 
+ #if USE(GSTREAMER_GL)
+ static std::optional<CoordinatedPlatformLayerBufferYUV::Format> yuvFormatFromGstVideoFormat(GstVideoFormat format)
+diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferVideo.h b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferVideo.h
+index bedc03c5..43803c62 100644
+--- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferVideo.h
++++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferVideo.h
+@@ -50,7 +50,7 @@ private:
+ #endif
+ 
+     std::unique_ptr<CoordinatedPlatformLayerBuffer> createBufferIfNeeded(bool gstGLEnabled);
+-#if USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
++#if USE(GSTREAMER_GL) && USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
+     std::unique_ptr<CoordinatedPlatformLayerBuffer> createBufferFromDMABufMemory();
+ #endif
+ #if USE(GSTREAMER_GL)
