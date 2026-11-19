@@ -898,7 +898,7 @@ constexpr const char *kConsoleScript = R"JS((function () {
     MS.isTypeSupported = function (t) { const r = its(t); ask(name + '.isTypeSupported', t, r); return r; };
   }
   if (window.HTMLMediaElement) {
-    for (const ev of ['loadedmetadata', 'playing', 'waiting', 'stalled', 'encrypted', 'waitingforkey', 'error', 'abort', 'emptied']) {
+    for (const ev of ['loadedmetadata', 'canplay', 'play', 'playing', 'pause', 'seeking', 'seeked', 'waiting', 'stalled', 'encrypted', 'waitingforkey', 'error', 'abort', 'emptied']) {
       addEventListener(ev, (e) => {
         const v = e.target; if (!(v instanceof HTMLMediaElement)) return;
         send('media', [ev, (v.currentSrc || v.src || '').slice(0, 120), 't=' + v.currentTime.toFixed(1), 'rs=' + v.readyState,

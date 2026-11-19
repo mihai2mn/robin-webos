@@ -48,6 +48,7 @@ static struct {
     char *dir;                  /* the data directory (engine.dat, lists/) */
     char **lists;               /* extra lists in use */
     char *cosmetic_js;          /* cosmetic.js, run in the isolated world */
+    char *compat_js;            /* compat.js, run in every page's main world */
     WebKitScriptWorld *world;   /* the isolated world */
     gboolean on;
     char **allowed;             /* hosts (and their subdomains) where the UI allows ads */
@@ -279,6 +280,12 @@ static void on_window_object_cleared(WebKitScriptWorld *world, WebKitWebPage *pa
             uri ? uri : "(none)");
     if (!uri || !(g_str_has_prefix(uri, "http:") || g_str_has_prefix(uri, "https:")))
         return;
+    /* Compatibility fixes (compat.js: a mouse-like pointer instead of a touchscreen): every page, ads blocked or not. */
+    if (g.compat_js) {
+        JSCContext *main = webkit_frame_get_js_context_for_script_world(frame, world);
+        evaluate(main, g.compat_js, "wren-compat.js", uri);
+        g_object_unref(main);
+    }
     const char *top = webkit_frame_is_main_frame(frame) ? uri : webkit_web_page_get_uri(page);
     if (!wanted(top))
         return;
@@ -453,6 +460,10 @@ G_MODULE_EXPORT void webkit_web_process_extension_initialize_with_user_data(WebK
         g_warning("wren-ubo: %s (no cosmetic filtering)", error->message);
         g_clear_error(&error);
     }
+    char *compat_path = g_build_filename(dir, "compat.js", NULL);
+    if (!g_file_get_contents(compat_path, &g.compat_js, NULL, NULL))
+        g_warning("wren-ubo: %s missing (no compatibility fixes)", compat_path);
+    g_free(compat_path);
     g_free(dat);
     g_free(res);
     g_free(dat_path);

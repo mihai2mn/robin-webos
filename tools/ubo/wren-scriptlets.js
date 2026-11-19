@@ -75,6 +75,69 @@ function wrenGifVideos() {
     document.addEventListener('DOMContentLoaded', () => scan(document), { once: true });
 }
 
+// wren-media-debug.js: logs each MSE SourceBuffer's buffered ranges (after appends, and on seeks) and the video's
+// state, through console.log (which WPE_BROWSER_DEBUG_CONSOLE=1 sends to engine.log). Diagnosis only.
+function wrenMediaDebug() {
+    'use strict';
+    const ranges = r => { const o = []; for (let i = 0; i < r.length; i++) o.push(r.start(i).toFixed(3) + '-' + r.end(i).toFixed(3)); return o.join(',') || 'none'; };
+    const buffers = [];
+    // MediaSource can be hidden on the site (wren-no-mse): then there are no buffers to log.
+    const add = self.MediaSource && MediaSource.prototype.addSourceBuffer;
+    let appends = 0;
+    if (add) MediaSource.prototype.addSourceBuffer = function (type) {
+        const sb = add.call(this, type);
+        const label = /audio/.test(type) ? 'audio' : /video/.test(type) ? 'video' : type;
+        buffers.push([label, sb]);
+        sb.addEventListener('updateend', () => {
+            if (++appends <= 12 || appends % 20 === 0) console.log('[wren-media] append ' + label + ' #' + appends + ' buffered ' + ranges(sb.buffered) + ' offset ' + sb.timestampOffset);
+        });
+        return sb;
+    };
+    const state = (ev, v) => console.log('[wren-media] ' + ev + ' t=' + v.currentTime.toFixed(3) + ' rs=' + v.readyState + ' paused=' + v.paused +
+        ' video.buffered=' + ranges(v.buffered) + ' ' + buffers.map(([l, sb]) => { try { return l + '=' + ranges(sb.buffered); } catch (e) { return l + '=gone'; } }).join(' '));
+    for (const ev of ['seeking', 'seeked', 'waiting', 'playing', 'canplay', 'loadeddata']) {
+        addEventListener(ev, e => { if (e.target instanceof HTMLVideoElement) state(ev, e.target); }, true);
+    }
+    // What covers a playing video (hardware video sits behind the page: anything painted above it hides it).
+    const name = el => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/).slice(0, 3).join('.') : '');
+    const describe = el => { const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+        return name(el) + '[bg ' + s.backgroundColor + (s.backgroundImage !== 'none' ? ' img' : '') + ' op ' + s.opacity + ' z ' + s.zIndex + ' pos ' + s.position + ' ' + Math.round(r.width) + 'x' + Math.round(r.height) + ']'; };
+    const stack = (why, v) => {
+        const r = v.getBoundingClientRect();
+        const pts = [[0.5, 0.5], [0.2, 0.2], [0.8, 0.8]];
+        for (const [fx, fy] of pts) {
+            const x = r.left + r.width * fx, y = r.top + r.height * fy;
+            if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+            const els = document.elementsFromPoint(x, y);
+            const i = els.indexOf(v);
+            console.log('[wren-media] ' + why + ' ' + name(v) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height) + ' at ' + fx + ',' + fy +
+                ': above it ' + (i < 0 ? '(video not hit) ' + els.slice(0, 5).map(describe).join(' > ') : els.slice(0, i).map(describe).join(' > ') || 'nothing') +
+                ' | below: ' + (i < 0 ? '' : els.slice(i + 1, i + 3).map(describe).join(' > ')));
+        }
+    };
+    addEventListener('playing', e => { if (e.target instanceof HTMLVideoElement) { const v = e.target; setTimeout(() => stack('covering', v), 1500); } }, true);
+    // Also once the page has settled, for every video, playing or not (layout is what matters).
+    addEventListener('load', () => setTimeout(() => {
+        const vids = [...document.querySelectorAll('video')];
+        console.log('[wren-media] page has ' + vids.length + ' video element(s)');
+        const mq = q => q + '=' + matchMedia(q).matches;
+        console.log('[wren-media] input: ' + ['(hover: hover)', '(any-hover: hover)', '(pointer: fine)', '(pointer: coarse)', '(any-pointer: fine)'].map(mq).join(' ') +
+            ' touch=' + ('ontouchstart' in window) + ' maxTouchPoints=' + navigator.maxTouchPoints + ' ua=' + navigator.userAgent.slice(0, 120));
+        // How thumbnails do their previews: the first element whose attributes mention one.
+        const thumb = [...document.querySelectorAll('img')].find(i => /screenshot|thumb|preview/i.test(i.currentSrc || i.src || i.getAttribute('data-src') || ''));
+        let box = thumb;
+        for (let n = 0; box && n < 3 && box.parentElement && box.parentElement !== document.body; n++) box = box.parentElement;
+        if (box) console.log('[wren-media] preview markup: ' + box.outerHTML.replace(/\s+/g, ' ').slice(0, 2500));
+        vids.slice(0, 4).forEach(v => {
+            stack('layout', v);
+            const chain = []; let p = v.parentElement;
+            for (let n = 0; p && n < 6; n++, p = p.parentElement) chain.push(describe(p));
+            console.log('[wren-media] parents of ' + name(v) + ': ' + chain.join(' < '));
+        });
+    }, 6000), { once: true });
+}
+
 export const wrenScriptlets = [
     { name: 'wren-gif-videos.js', fn: wrenGifVideos, aliases: ['wren-gif-videos'] },
+    { name: 'wren-media-debug.js', fn: wrenMediaDebug, aliases: ['wren-media-debug'] },
 ];

@@ -33,7 +33,7 @@ for l in json.load(open('$UBO/lists/lists.json')):
     cargo run --quiet --release --manifest-path "$SRC/engine/ubo/Cargo.toml" --features compiler \
         --target-dir "$OUT/cargo-host" --bin wren-ubo-compile -- \
         "$OUT/data" "$UBO/ubo/web_accessible_resources" "$UBO/ubo/js/redirect-resources.js" "$OUT/scriptlets.json" $LISTS "$UBO/wren-filters.txt:trusted"
-    cp "$SRC/engine/ubo/cosmetic.js" "$OUT/data/"
+    cp "$SRC/engine/ubo/cosmetic.js" "$SRC/engine/ubo/compat.js" "$OUT/data/"
     # Extra lists: one engine each, with uBO's Unbreak and Quick fixes so their exceptions apply inside it, and
     # lists/catalog.ini for the engine's settings page (title, what it does, on by default, size).
     python3 -c "
