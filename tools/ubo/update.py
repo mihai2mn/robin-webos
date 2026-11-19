@@ -38,6 +38,36 @@ LISTS = [
     ("plowe", "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=1&mimetype=plaintext", "hosts"),
 ]
 
+# Extra lists, each compiled into its own engine (lists/<name>.dat) that wren://adblock turns on and off. uBO's
+# Unbreak and Quick fixes go into each one too, so their exceptions still apply. (name, url, flags, on by default,
+# title, what it does). On by default: the extra lists commonly recommended on top of uBO's defaults.
+OPTIONAL = [
+    ("adguard-url-tracking", "https://ublockorigin.github.io/uAssets/filters/privacy-removeparam.txt", "trusted", True,
+     "AdGuard URL Tracking Protection", "Removes tracking parameters (utm_, fbclid, ...) from links"),
+    ("ublock-annoyances", "https://ublockorigin.github.io/uAssets/filters/annoyances.txt", "trusted", True,
+     "uBlock filters – Annoyances", "Pop-ups, overlays, 'turn off your ad blocker' nags and other clutter"),
+    ("cookie-notices", "https://ublockorigin.github.io/uAssets/filters/annoyances-cookies.txt", "trusted", True,
+     "Cookie notices (EasyList/uBO)", "Hides cookie banners and consent pop-ups"),
+    ("easylist-social", "https://ublockorigin.github.io/uAssets/thirdparties/easylist-social.txt", "", True,
+     "EasyList – Social widgets", "Share buttons and social media embeds"),
+    ("easylist-annoyances", "https://ublockorigin.github.io/uAssets/thirdparties/easylist-annoyances.txt", "", True,
+     "EasyList – Other annoyances", "Sticky bars, 'download our app' banners and similar"),
+    ("easylist-newsletters", "https://ublockorigin.github.io/uAssets/thirdparties/easylist-newsletters.txt", "", True,
+     "EasyList – Newsletter notices", "Newsletter sign-up pop-ups"),
+    ("easylist-notifications", "https://ublockorigin.github.io/uAssets/thirdparties/easylist-notifications.txt", "", True,
+     "EasyList – Notification prompts", "'Allow notifications' prompts"),
+    ("easylist-chat", "https://ublockorigin.github.io/uAssets/thirdparties/easylist-chat.txt", "", True,
+     "EasyList – Chat widgets", "Support chat bubbles"),
+    ("phishing", "https://malware-filter.gitlab.io/phishing-filter/phishing-filter.txt", "", True,
+     "Phishing URL Blocklist", "Known phishing sites"),
+    ("adguard-base", "https://filters.adtidy.org/extension/ublock/filters/2_without_easylist.txt", "", False,
+     "AdGuard Base", "More ad blocking; overlaps with EasyList and uses more memory"),
+    ("easylist-ai", "https://ublockorigin.github.io/uAssets/thirdparties/easylist-ai.txt", "", False,
+     "EasyList – AI widgets", "AI assistant widgets and suggestions"),
+    ("block-lan", "https://ublockorigin.github.io/uAssets/filters/lan-block.txt", "trusted", False,
+     "Block outsider intrusion into LAN", "Stops websites from reaching devices on your home network; can break local services"),
+]
+
 # uBO's `!#if` tokens, as uBO itself would set them in a WebKit browser with no HTML filtering.
 TOKENS = {
     "ext_ublock": True, "ext_ubol": False, "ext_abp": False, "adguard": False, "ext_devbuild": False,
@@ -94,15 +124,19 @@ def resolve(url, depth=0):
 def update_lists():
     d = HERE / "lists"
     d.mkdir(exist_ok=True)
-    manifest = []
-    for name, url, flags in LISTS:
+    def fetch_list(name, url):
         lines = resolve(url)
         (d / f"{name}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         version = next((l.split(":", 1)[1].strip() for l in lines[:80]
                         if l.lower().startswith(("! version:", "# version:", "! last modified:", "# last modified:", "! updated:"))), "?")
         print(f"{name}: {len(lines)} lines, version {version}")
-        manifest.append({"name": name, "url": url, "flags": flags, "version": version})
+        return version
+
+    manifest = [{"name": n, "url": u, "flags": f, "version": fetch_list(n, u)} for n, u, f in LISTS]
     (d / "lists.json").write_text(json.dumps(manifest, indent=1) + "\n")
+    optional = [{"name": n, "url": u, "flags": f, "default": on, "title": t, "about": a, "version": fetch_list(n, u)}
+                for n, u, f, on, t, a in OPTIONAL]
+    (d / "optional.json").write_text(json.dumps(optional, indent=1, ensure_ascii=False) + "\n")
 
 
 def update_ubo(commit):

@@ -26,6 +26,7 @@ cargo run --quiet --release --manifest-path "$SRC/engine/ubo/Cargo.toml" --featu
     "$B/data" "$UBO/ubo/web_accessible_resources" "$UBO/ubo/js/redirect-resources.js" "$OUT/scriptlets.json" \
     $LISTS "$UBO/wren-filters.txt:trusted" "$T/test-filters.txt:trusted" 2>&1 | grep -E 'engine:|FAIL' || true
 cp "$SRC/engine/ubo/cosmetic.js" "$B/data/"
+rm -rf "$B/data/lists" && cp -r "$OUT/data/lists" "$B/data/"
 
 # 127.0.0.1:8801 serves the page; localhost:8802 is the "third party" (ads/, redir/, img/, lib/).
 mkdir -p "$B/www3/wren-test/ads" "$B/www3/wren-test/redir" "$B/www3/wren-test/img" "$B/www3/lib"
@@ -67,6 +68,9 @@ export WREN_UBO_LOG=${WREN_UBO_LOG:-1}
 echo "== blocker on"
 timeout 60 "$B/harness" "$B/data" "$B/ext" 1500 "$PAGE" "$CHECK"
 grep -o 'GET /lib/echo.txt[^ ]*' "$B/third-party.log" | tail -1 | sed 's/^/removeparam: /'
+echo "== blocker on, with every extra list on by default"
+DEFAULT_LISTS=$(awk -F'[][]' '/^\[/ {n = $2} /^default=true/ {print n}' "$B/data/lists/catalog.ini" | paste -sd,)
+TEST_LISTS=$DEFAULT_LISTS timeout 60 "$B/harness" "$B/data" "$B/ext" 1500 "$PAGE" "$CHECK" 2>&1 | grep -E "RESULT|loaded in|not loaded"
 echo "== blocker off"
 TEST_ADS_OFF=1 timeout 60 "$B/harness" "$B/data" "$B/ext" 1500 "$PAGE" "$CHECK"
 echo "== ads allowed on the test host"

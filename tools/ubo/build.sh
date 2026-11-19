@@ -21,8 +21,9 @@ mode=${1:-}
 
 case "$mode" in
 data)
-    [ -f "$UBO/lists/lists.json" ] && [ -f "$UBO/ubo/COMMIT" ] || python3 "$UBO/update.py"
-    mkdir -p "$OUT/data"
+    [ -f "$UBO/lists/lists.json" ] && [ -f "$UBO/lists/optional.json" ] && [ -f "$UBO/ubo/COMMIT" ] ||
+        python3 "$UBO/update.py" $(cat "$UBO/ubo/COMMIT" 2>/dev/null)
+    rm -rf "$OUT/data" && mkdir -p "$OUT/data/lists"
     node "$UBO/scriptlets-to-json.mjs" "$UBO/ubo/js/resources/scriptlets.js" "$OUT/scriptlets.json"
     LISTS=$(python3 -c "
 import json,sys
@@ -33,7 +34,28 @@ for l in json.load(open('$UBO/lists/lists.json')):
         --target-dir "$OUT/cargo-host" --bin wren-ubo-compile -- \
         "$OUT/data" "$UBO/ubo/web_accessible_resources" "$UBO/ubo/js/redirect-resources.js" "$OUT/scriptlets.json" $LISTS "$UBO/wren-filters.txt:trusted"
     cp "$SRC/engine/ubo/cosmetic.js" "$OUT/data/"
-    ls -l "$OUT/data"
+    # Extra lists: one engine each, with uBO's Unbreak and Quick fixes so their exceptions apply inside it, and
+    # lists/catalog.ini for the engine's settings page (title, what it does, on by default, size).
+    python3 -c "
+import json
+for l in json.load(open('$UBO/lists/optional.json')):
+    print(l['name'], '$UBO/lists/' + l['name'] + '.txt' + ''.join(':' + f for f in l['flags'].split(',') if f))" |
+    while read -r name spec; do
+        cargo run --quiet --release --manifest-path "$SRC/engine/ubo/Cargo.toml" --features compiler \
+            --target-dir "$OUT/cargo-host" --bin wren-ubo-compile -- --list-engine "$OUT/data/lists/$name.dat" \
+            "$spec" "$UBO/lists/ublock-unbreak.txt:trusted" "$UBO/lists/ublock-quick-fixes.txt:trusted"
+    done
+    python3 - "$UBO/lists/optional.json" "$OUT/data/lists" <<'PY'
+import json, os, sys
+lists, out = json.load(open(sys.argv[1])), sys.argv[2]
+with open(os.path.join(out, "catalog.ini"), "w", encoding="utf-8") as f:
+    f.write("# The extra filter lists wren://adblock offers (tools/ubo/update.py, OPTIONAL).\n")
+    for l in lists:
+        size = os.path.getsize(os.path.join(out, l["name"] + ".dat"))
+        f.write(f"\n[{l['name']}]\ntitle={l['title']}\nabout={l['about']}\ndefault={'true' if l['default'] else 'false'}\n"
+                f"size={size}\nversion={l['version']}\n")
+PY
+    ls -l "$OUT/data" "$OUT/data/lists"
     ;;
 lib)
     TARGET=${2:-armv7-unknown-linux-gnueabi}

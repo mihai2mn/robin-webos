@@ -25,9 +25,17 @@ static void on_init(WebKitWebContext *context, gpointer data)
         if (**a)
             g_variant_builder_add(&hosts, "s", *a);
     g_strfreev(allowed);
+    /* TEST_LISTS="name,name": extra lists (lists/<name>.dat) to use. */
+    GVariantBuilder lists;
+    g_variant_builder_init(&lists, G_VARIANT_TYPE("as"));
+    char **names = g_strsplit(g_getenv("TEST_LISTS") ? g_getenv("TEST_LISTS") : "", ",", -1);
+    for (char **n = names; *n; ++n)
+        if (**n)
+            g_variant_builder_add(&lists, "s", *n);
+    g_strfreev(names);
     const gboolean on = g_strcmp0(g_getenv("TEST_ADS_OFF"), "1") != 0;
     webkit_web_context_set_web_process_extensions_initialization_user_data(context,
-        g_variant_new("(sbas)", ubo_dir, on, &hosts));
+        g_variant_new("(sbasas)", ubo_dir, on, &hosts, &lists));
 }
 
 static gboolean run_check(gpointer data);

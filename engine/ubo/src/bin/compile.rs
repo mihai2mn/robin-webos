@@ -19,8 +19,44 @@ use std::process::ExitCode;
 /// uBO's "trusted source" permission: bit 0, matching `requiresTrust` in tools/ubo/scriptlets-to-json.mjs.
 const TRUSTED: PermissionMask = PermissionMask::from_bits(1);
 
+/// Parses LIST[:trusted][:hosts] arguments into a filter set.
+fn filter_set(specs: &[String]) -> Result<FilterSet, String> {
+    let mut set = FilterSet::new(false);
+    for spec in specs {
+        let mut parts = spec.split(':');
+        let path = parts.next().unwrap();
+        let flags: Vec<&str> = parts.collect();
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let opts = ParseOptions {
+            format: if flags.contains(&"hosts") { FilterFormat::Hosts } else { FilterFormat::Standard },
+            permissions: if flags.contains(&"trusted") { TRUSTED } else { PermissionMask::default() },
+            ..Default::default()
+        };
+        set.add_filter_list(text, opts);
+    }
+    Ok(set)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    // wren-ubo-compile --list-engine OUT.dat LIST...: one extra list's own engine (wren://adblock turns it on).
+    if args.len() >= 4 && args[1] == "--list-engine" {
+        let set = match filter_set(&args[3..]) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let dat = Engine::new_with_filter_set(set).serialize();
+        let mut check = Engine::default();
+        if let Err(e) = std::fs::write(&args[2], &dat).map_err(|e| e.to_string()).and_then(|_| check.deserialize(&dat).map_err(|e| format!("{e:?}"))) {
+            eprintln!("{}: {e}", args[2]);
+            return ExitCode::FAILURE;
+        }
+        eprintln!("list engine {}: {:.1} MB", args[2], dat.len() as f64 / 1e6);
+        return ExitCode::SUCCESS;
+    }
     if args.len() < 6 {
         eprintln!("usage: wren-ubo-compile OUT_DIR WAR_DIR REDIRECT_RESOURCES_JS SCRIPTLETS_JSON LIST[:trusted][:hosts]...");
         return ExitCode::from(2);

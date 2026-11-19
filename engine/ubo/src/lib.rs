@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! C interface to adblock-rust for Wren's web process extension (engine/ubo/extension.c).
 //!
-//! The engine is built ahead of time by `wren-ubo-compile` (engine.dat: every list, already parsed) so the TV only
-//! deserializes it. Strings cross the boundary as NUL-terminated UTF-8; strings returned to C are owned by C and
-//! go back through `wren_ubo_string_free`.
+//! Engines are built ahead of time by `wren-ubo-compile` so the TV only deserializes them: the core (engine.dat:
+//! uBO's default lists) and one per extra list (lists/<name>.dat, each with uBO's Unbreak and Quick fixes inside),
+//! which wren://adblock turns on and off. As in Brave, which also keeps one engine per list group, a request is
+//! checked against the core first, then each extra list; exceptions apply within their own engine.
+//! Strings cross the boundary as NUL-terminated UTF-8; strings returned to C go back through
+//! `wren_ubo_string_free`.
 use adblock::request::Request;
 use adblock::resources::Resource;
 use adblock::Engine;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
 pub struct WrenUbo {
-    engine: Engine,
+    resources: Vec<Resource>,
+    /// (name, engine); the core is first and is named "core".
+    engines: Vec<(String, Engine)>,
 }
 
 /// What to do with a request.
@@ -30,7 +35,7 @@ pub struct WrenUboVerdict {
     pub text: *mut c_char,
 }
 
-/// Cosmetic resources for one document.
+/// Cosmetic resources for one document, from every engine.
 #[repr(C)]
 pub struct WrenUboCosmetic {
     /// A style sheet hiding this site's specific selectors ("" when none).
@@ -39,9 +44,10 @@ pub struct WrenUboCosmetic {
     pub script: *mut c_char,
     /// JSON array of procedural filters (`:has-text`, `:upward`, `:remove`, ...), "[]" when none.
     pub procedural: *mut c_char,
-    /// JSON array of class/id selectors excepted on this site; give back to `wren_ubo_hidden`.
+    /// JSON object: engine name -> its class/id exceptions on this site, or null where generic hiding is off
+    /// (`$generichide`). Give back to `wren_ubo_hidden`.
     pub exceptions: *mut c_char,
-    /// Nonzero when generic hiding is off for the site (`$generichide`).
+    /// Nonzero when no engine does generic hiding on the site.
     pub generichide: i32,
 }
 
@@ -71,24 +77,29 @@ fn style_sheet<'a>(selectors: impl IntoIterator<Item = &'a String>) -> String {
     css
 }
 
-/// Loads a serialized engine (engine.dat) and the uBO resources (resources.json: redirect targets and scriptlets).
+fn load_engine(dat: &[u8], resources: &[Resource]) -> Option<Engine> {
+    let mut engine = Engine::default();
+    engine.deserialize(dat).ok()?;
+    engine.use_resources(resources.iter().cloned());
+    Some(engine)
+}
+
+/// Loads the core engine (engine.dat) and the uBO resources (resources.json: redirect targets and scriptlets).
 /// Returns null when either is unusable.
 #[no_mangle]
 pub extern "C" fn wren_ubo_new(dat: *const u8, dat_len: usize, resources_json: *const c_char) -> *mut WrenUbo {
     if dat.is_null() || dat_len == 0 {
         return ptr::null_mut();
     }
-    let bytes = unsafe { std::slice::from_raw_parts(dat, dat_len) };
-    let mut engine = Engine::default();
-    if engine.deserialize(bytes).is_err() {
-        return ptr::null_mut();
-    }
     let resources: Vec<Resource> = match serde_json::from_str(str_of(resources_json)) {
         Ok(r) => r,
         Err(_) => return ptr::null_mut(),
     };
-    engine.use_resources(resources);
-    Box::into_raw(Box::new(WrenUbo { engine }))
+    let bytes = unsafe { std::slice::from_raw_parts(dat, dat_len) };
+    match load_engine(bytes, &resources) {
+        Some(core) => Box::into_raw(Box::new(WrenUbo { resources, engines: vec![("core".into(), core)] })),
+        None => ptr::null_mut(),
+    }
 }
 
 #[no_mangle]
@@ -96,6 +107,39 @@ pub extern "C" fn wren_ubo_free(ubo: *mut WrenUbo) {
     if !ubo.is_null() {
         drop(unsafe { Box::from_raw(ubo) });
     }
+}
+
+/// Adds (or replaces) an extra list's engine. Returns 1 when loaded, 0 when the data is unusable.
+#[no_mangle]
+pub extern "C" fn wren_ubo_add_list(ubo: *mut WrenUbo, name: *const c_char, dat: *const u8, dat_len: usize) -> i32 {
+    let Some(ubo) = (unsafe { ubo.as_mut() }) else { return 0 };
+    let name = str_of(name);
+    if dat.is_null() || dat_len == 0 || name.is_empty() || name == "core" {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(dat, dat_len) };
+    let Some(engine) = load_engine(bytes, &ubo.resources) else { return 0 };
+    ubo.engines.retain(|(n, _)| n != name);
+    ubo.engines.push((name.to_owned(), engine));
+    1
+}
+
+/// Removes an extra list's engine (its memory is freed). Returns 1 when it was loaded.
+#[no_mangle]
+pub extern "C" fn wren_ubo_remove_list(ubo: *mut WrenUbo, name: *const c_char) -> i32 {
+    let Some(ubo) = (unsafe { ubo.as_mut() }) else { return 0 };
+    let name = str_of(name);
+    let before = ubo.engines.len();
+    ubo.engines.retain(|(n, _)| n == "core" || n != name);
+    (ubo.engines.len() != before) as i32
+}
+
+/// Whether an extra list's engine is loaded.
+#[no_mangle]
+pub extern "C" fn wren_ubo_has_list(ubo: *const WrenUbo, name: *const c_char) -> i32 {
+    let Some(ubo) = (unsafe { ubo.as_ref() }) else { return 0 };
+    let name = str_of(name);
+    ubo.engines.iter().any(|(n, _)| n == name) as i32
 }
 
 #[no_mangle]
@@ -119,19 +163,25 @@ pub extern "C" fn wren_ubo_check(
     let Ok(request) = Request::new(str_of(url), str_of(source_url), str_of(request_type), "GET") else {
         return allow;
     };
-    let result = ubo.engine.check_network_request(&request);
-    if result.should_block() {
-        // A redirect replaces the blocked resource with uBO's neutered version (an empty script, a stub of the
-        // ad library, a 1x1 GIF, ...), so pages waiting on it keep working.
-        if let Some(redirect) = result.redirect {
-            return WrenUboVerdict { action: WREN_UBO_REDIRECT, text: c_string(redirect) };
+    let mut rewritten = None;
+    for (_, engine) in &ubo.engines {
+        let result = engine.check_network_request(&request);
+        if result.should_block() {
+            // A redirect replaces the blocked resource with uBO's neutered version (an empty script, a stub of
+            // the ad library, a 1x1 GIF, ...), so pages waiting on it keep working.
+            if let Some(redirect) = result.redirect {
+                return WrenUboVerdict { action: WREN_UBO_REDIRECT, text: c_string(redirect) };
+            }
+            return WrenUboVerdict { action: WREN_UBO_BLOCK, text: ptr::null_mut() };
         }
-        return WrenUboVerdict { action: WREN_UBO_BLOCK, text: ptr::null_mut() };
+        if rewritten.is_none() {
+            rewritten = result.rewritten_url;
+        }
     }
-    if let Some(rewritten) = result.rewritten_url {
-        return WrenUboVerdict { action: WREN_UBO_REWRITE, text: c_string(rewritten) };
+    match rewritten {
+        Some(r) => WrenUboVerdict { action: WREN_UBO_REWRITE, text: c_string(r) },
+        None => allow,
     }
-    allow
 }
 
 /// The cosmetic resources (site-specific hiding, scriptlets, procedural filters) for a document at `url`.
@@ -141,19 +191,33 @@ pub extern "C" fn wren_ubo_cosmetic(ubo: *const WrenUbo, url: *const c_char) -> 
         css: c_string(String::new()),
         script: c_string(String::new()),
         procedural: c_string("[]".into()),
-        exceptions: c_string("[]".into()),
-        generichide: 0,
+        exceptions: c_string("{}".into()),
+        generichide: 1,
     };
     let Some(ubo) = (unsafe { ubo.as_ref() }) else { return empty() };
-    let r = ubo.engine.url_cosmetic_resources(str_of(url));
-    let procedural: Vec<&String> = r.procedural_actions.iter().collect();
-    let exceptions: Vec<&String> = r.exceptions.iter().collect();
+    let mut hide: HashSet<String> = HashSet::new();
+    let mut procedural: HashSet<String> = HashSet::new();
+    let mut script = String::new();
+    let mut exceptions: HashMap<&str, Option<Vec<String>>> = HashMap::new();
+    let mut all_generichide = true;
+    for (name, engine) in &ubo.engines {
+        let r = engine.url_cosmetic_resources(str_of(url));
+        hide.extend(r.hide_selectors);
+        procedural.extend(r.procedural_actions);
+        if !r.injected_script.is_empty() {
+            script.push_str(&r.injected_script);
+            script.push('\n');
+        }
+        all_generichide &= r.generichide;
+        exceptions.insert(name, if r.generichide { None } else { Some(r.exceptions.into_iter().collect()) });
+    }
+    let procedural: Vec<&String> = procedural.iter().collect();
     WrenUboCosmetic {
-        css: c_string(style_sheet(r.hide_selectors.iter())),
-        script: c_string(r.injected_script),
+        css: c_string(style_sheet(hide.iter())),
+        script: c_string(script),
         procedural: c_string(serde_json::to_string(&procedural).unwrap_or_else(|_| "[]".into())),
-        exceptions: c_string(serde_json::to_string(&exceptions).unwrap_or_else(|_| "[]".into())),
-        generichide: r.generichide as i32,
+        exceptions: c_string(serde_json::to_string(&exceptions).unwrap_or_else(|_| "{}".into())),
+        generichide: all_generichide as i32,
     }
 }
 
@@ -177,8 +241,19 @@ pub extern "C" fn wren_ubo_hidden(
     exceptions_json: *const c_char,
 ) -> *mut c_char {
     let Some(ubo) = (unsafe { ubo.as_ref() }) else { return c_string(String::new()) };
-    let exceptions: HashSet<String> = serde_json::from_str(str_of(exceptions_json)).unwrap_or_default();
+    let exceptions: HashMap<String, Option<HashSet<String>>> =
+        serde_json::from_str(str_of(exceptions_json)).unwrap_or_default();
     let split = |p| str_of(p).split('\n').filter(|s| !s.is_empty()).collect::<Vec<_>>();
-    let selectors = ubo.engine.hidden_class_id_selectors(split(classes), split(ids), &exceptions);
+    let (classes, ids) = (split(classes), split(ids));
+    let mut selectors: HashSet<String> = HashSet::new();
+    for (name, engine) in &ubo.engines {
+        // An engine added after the document's cosmetic data was made has no entry: no exceptions for it.
+        let exc = match exceptions.get(name) {
+            Some(None) => continue, // generic hiding off on this site for that engine
+            Some(Some(e)) => e.clone(),
+            None => HashSet::new(),
+        };
+        selectors.extend(engine.hidden_class_id_selectors(&classes, &ids, &exc));
+    }
     c_string(style_sheet(selectors.iter()))
 }

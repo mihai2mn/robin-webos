@@ -1017,6 +1017,7 @@ void on_history_changed(WebKitBackForwardList *, WebKitBackForwardListItem *, gp
 }
 
 void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener = nullptr);
+void ubo_attach(WebKitUserContentManager *ucm, WebKitWebView *view);
 
 // window.close() from a page: the UI closes the tab (and shows its opener).
 // WPE_BROWSER_DEBUG_FORGET_COOKIES="example.com,other.org": removes those sites' cookies (only theirs) before the
@@ -1216,6 +1217,7 @@ void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener)
     }
     tab.web_view = web_view;
     g.tabs[id] = tab;
+    ubo_attach(webkit_web_view_get_user_content_manager(web_view), web_view);
 
     g_signal_connect(web_view, "notify::uri", G_CALLBACK(on_uri), nullptr);
     g_signal_connect(web_view, "notify::title", G_CALLBACK(on_title), nullptr);
@@ -1355,28 +1357,289 @@ void clear_data(const WpeClearData &c)
 }
 
 // The uBO-grade ad blocker (engine/ubo, docs/ad-blocking.md): a web process extension with uBlock Origin's lists.
-// This 0.3.3-based build has no ad-blocker setting in the UI, so the engine finds it next to itself
-// (engine/ubo/engine.dat, engine/lib/web-extensions/libwren-ubo.so) and turns it on. WREN_UBO=0 turns it off;
-// WREN_UBO_ALLOWED="host,host" leaves ads alone on those hosts (and their subdomains). Never on YouTube.
-std::string ubo_dir;
+// This 0.3.3-based build has no ad-blocker setting in the UI, so the engine finds the blocker next to itself
+// (engine/ubo/engine.dat, engine/lib/web-extensions/libwren-ubo.so) and offers its settings at wren://adblock:
+// on/off, the extra filter lists (engine/ubo/lists/catalog.ini) and the sites where ads are allowed. They are kept in
+// $WPE_BROWSER_DATA_DIR/ubo-settings.ini and sent to the web process when they change ("wren-ubo:state" (basas)).
+// WREN_UBO=0 in the environment turns the blocker off altogether. It never runs on YouTube (engine/ubo/extension.c).
+struct UboList {
+    std::string name, title, about;
+    bool on_by_default = false;
+    guint64 size = 0;
+};
+
+struct Ubo {
+    std::string dir;              // engine/ubo (empty: no blocker in this package)
+    std::string settings_path;    // $WPE_BROWSER_DATA_DIR/ubo-settings.ini
+    std::vector<UboList> catalog; // extra lists on offer
+    bool on = true;
+    std::vector<std::string> allowed, lists;
+};
+Ubo ubo;
+
+std::vector<std::string> ubo_split(const gchar *const *v)
+{
+    std::vector<std::string> out;
+    for (; v && *v; ++v) {
+        std::string s = *v;
+        for (char &c : s)
+            c = g_ascii_tolower(c);
+        while (!s.empty() && (s.back() == ' ' || s.back() == '/'))
+            s.pop_back();
+        while (!s.empty() && s.front() == ' ')
+            s.erase(0, 1);
+        if (s.rfind("https://", 0) == 0) s.erase(0, 8);
+        if (s.rfind("http://", 0) == 0) s.erase(0, 7);
+        if (s.rfind("www.", 0) == 0) s.erase(0, 4);
+        if (!s.empty() && std::find(out.begin(), out.end(), s) == out.end())
+            out.push_back(s);
+    }
+    return out;
+}
+
+void ubo_load_settings()
+{
+    GKeyFile *catalog = g_key_file_new();
+    if (g_key_file_load_from_file(catalog, (ubo.dir + "/lists/catalog.ini").c_str(), G_KEY_FILE_NONE, nullptr)) {
+        gchar **groups = g_key_file_get_groups(catalog, nullptr);
+        for (gchar **gr = groups; gr && *gr; ++gr) {
+            UboList l;
+            l.name = *gr;
+            gchar *t = g_key_file_get_string(catalog, *gr, "title", nullptr), *a = g_key_file_get_string(catalog, *gr, "about", nullptr);
+            l.title = t ? t : l.name;
+            l.about = a ? a : "";
+            g_free(t);
+            g_free(a);
+            l.on_by_default = g_key_file_get_boolean(catalog, *gr, "default", nullptr);
+            l.size = g_key_file_get_uint64(catalog, *gr, "size", nullptr);
+            ubo.catalog.push_back(l);
+        }
+        g_strfreev(groups);
+    }
+    g_key_file_unref(catalog);
+
+    for (const UboList &l : ubo.catalog)
+        if (l.on_by_default)
+            ubo.lists.push_back(l.name);
+    GKeyFile *kf = g_key_file_new();
+    if (g_key_file_load_from_file(kf, ubo.settings_path.c_str(), G_KEY_FILE_NONE, nullptr)) {
+        GError *e = nullptr;
+        const gboolean on = g_key_file_get_boolean(kf, "ubo", "enabled", &e);
+        if (!e)
+            ubo.on = on;
+        g_clear_error(&e);
+        gchar **v = g_key_file_get_string_list(kf, "ubo", "allowed", nullptr, nullptr);
+        ubo.allowed = ubo_split(v);
+        g_strfreev(v);
+        if (g_key_file_has_key(kf, "ubo", "lists", nullptr)) {
+            v = g_key_file_get_string_list(kf, "ubo", "lists", nullptr, nullptr);
+            ubo.lists.clear();
+            for (const std::string &n : ubo_split(v))
+                for (const UboList &l : ubo.catalog)
+                    if (l.name == n)
+                        ubo.lists.push_back(n);
+            g_strfreev(v);
+        }
+    }
+    g_key_file_unref(kf);
+}
+
+void ubo_save_settings()
+{
+    GKeyFile *kf = g_key_file_new();
+    g_key_file_set_comment(kf, nullptr, nullptr, " Wren ad blocker settings (wren://adblock)", nullptr);
+    g_key_file_set_boolean(kf, "ubo", "enabled", ubo.on);
+    std::vector<const gchar *> a, l;
+    for (const std::string &s : ubo.allowed) a.push_back(s.c_str());
+    for (const std::string &s : ubo.lists) l.push_back(s.c_str());
+    g_key_file_set_string_list(kf, "ubo", "allowed", a.data(), a.size());
+    g_key_file_set_string_list(kf, "ubo", "lists", l.data(), l.size());
+    GError *e = nullptr;
+    if (!g_key_file_save_to_file(kf, ubo.settings_path.c_str(), &e)) {
+        log_msg("ad blocker: settings not saved: %s", e->message);
+        g_clear_error(&e);
+    }
+    g_key_file_unref(kf);
+}
+
+GVariant *ubo_strv(const std::vector<std::string> &v)
+{
+    GVariantBuilder b;
+    g_variant_builder_init(&b, G_VARIANT_TYPE("as"));
+    for (const std::string &s : v)
+        g_variant_builder_add(&b, "s", s.c_str());
+    return g_variant_builder_end(&b);
+}
 
 void on_initialize_web_process_extensions(WebKitWebContext *context, gpointer)
 {
-    GVariantBuilder hosts;
-    g_variant_builder_init(&hosts, G_VARIANT_TYPE("as"));
-    if (const char *allowed = getenv("WREN_UBO_ALLOWED")) {
-        gchar **list = g_strsplit(allowed, ",", -1);
-        for (gchar **h = list; *h; ++h)
-            if (**h)
-                g_variant_builder_add(&hosts, "s", *h);
-        g_strfreev(list);
-    }
     webkit_web_context_set_web_process_extensions_initialization_user_data(context,
-        g_variant_new("(sbas)", ubo_dir.c_str(), TRUE, &hosts));
+        g_variant_new("(sb@as@as)", ubo.dir.c_str(), ubo.on, ubo_strv(ubo.allowed), ubo_strv(ubo.lists)));
 }
 
-void setup_ubo()
+void ubo_broadcast()
 {
+    webkit_web_context_send_message_to_all_extensions(webkit_web_context_get_default(),
+        webkit_user_message_new("wren-ubo:state", g_variant_new("(b@as@as)", ubo.on, ubo_strv(ubo.allowed), ubo_strv(ubo.lists))));
+    log_msg("ad blocker: %s, %zu extra list(s), %zu site(s) allowed", ubo.on ? "on" : "off", ubo.lists.size(), ubo.allowed.size());
+}
+
+std::string html_escape(const std::string &s)
+{
+    std::string out;
+    for (char c : s) {
+        switch (c) {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        case '"': out += "&quot;"; break;
+        case '\'': out += "&#39;"; break;
+        default: out += c;
+        }
+    }
+    return out;
+}
+
+// wren://adblock: the settings page. Big, remote-friendly controls (the engine turns spatial navigation on).
+std::string ubo_page()
+{
+    std::string h = R"HTML(<!doctype html><html><head><meta charset="utf-8"><title>Ad blocker settings</title>
+<meta name="viewport" content="width=device-width">
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--card:#151c33;--ink:#e8ecf8;--dim:#9aa6c4;--on:#3f7cff;--line:#28314f}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:22px/1.4 system-ui,sans-serif;padding:40px 64px}
+h1{font-size:40px;margin:0 0 6px}h2{font-size:26px;margin:36px 0 12px;color:var(--dim);font-weight:600}
+p.note{color:var(--dim);margin:0 0 20px}
+button{font:inherit;color:inherit;background:var(--card);border:3px solid var(--line);border-radius:14px;padding:16px 22px;cursor:pointer}
+button:focus{outline:none;border-color:#fff;box-shadow:0 0 0 4px var(--on)}
+.row{display:flex;align-items:center;gap:20px;width:100%;text-align:left;margin:0 0 12px}
+.row .t{flex:1}.row small{display:block;color:var(--dim);font-size:18px}
+.sw{width:84px;height:44px;border-radius:22px;background:#3a4363;position:relative;flex:none}
+.sw::after{content:"";position:absolute;top:5px;left:6px;width:34px;height:34px;border-radius:50%;background:#cfd6ea;transition:left .15s}
+[aria-pressed=true] .sw{background:var(--on)}[aria-pressed=true] .sw::after{left:44px;background:#fff}
+.size{color:var(--dim);font-size:18px;flex:none}
+.add{display:flex;gap:12px;margin-bottom:12px}input{font:inherit;flex:1;padding:16px;border-radius:14px;border:3px solid var(--line);background:#0f1530;color:inherit}
+input:focus{outline:none;border-color:#fff}
+.host{display:flex;align-items:center;gap:16px;margin-bottom:8px}.host span{flex:1}
+#saved{position:fixed;right:40px;top:30px;background:var(--on);padding:10px 18px;border-radius:12px;opacity:0;transition:opacity .2s}
+</style></head><body>
+<div id="saved">Saved</div>
+<h1>Ad blocker</h1><p class="note">uBlock Origin's lists, matched inside Wren. Changes apply to pages loaded from now on. Never used on YouTube.</p>
+)HTML";
+    h += "<button class=\"row\" data-cmd=\"on\" aria-pressed=\"" + std::string(ubo.on ? "true" : "false") +
+         "\"><span class=\"t\">Block ads and trackers<small>uBlock filters, EasyList, EasyPrivacy, malware and Peter Lowe's lists (always used when on)</small></span><span class=\"sw\"></span></button>\n";
+    h += "<h2>More filter lists</h2><p class=\"note\">Each list uses some of the TV's memory while it is on.</p>\n";
+    for (const UboList &l : ubo.catalog) {
+        const bool on = std::find(ubo.lists.begin(), ubo.lists.end(), l.name) != ubo.lists.end();
+        char size[32];
+        snprintf(size, sizeof size, "%.1f MB", l.size / 1e6);
+        h += "<button class=\"row\" data-cmd=\"list\" data-name=\"" + html_escape(l.name) + "\" aria-pressed=\"" +
+             (on ? "true" : "false") + "\"><span class=\"t\">" + html_escape(l.title) + "<small>" + html_escape(l.about) +
+             "</small></span><span class=\"size\">" + size + "</span><span class=\"sw\"></span></button>\n";
+    }
+    h += "<h2>Sites where ads are allowed</h2><div class=\"add\"><input id=\"host\" placeholder=\"example.com\" "
+         "autocapitalize=\"off\" autocomplete=\"off\" spellcheck=\"false\"><button id=\"addhost\">Allow ads</button></div><div id=\"hosts\">\n";
+    for (const std::string &a : ubo.allowed)
+        h += "<div class=\"host\"><span>" + html_escape(a) + "</span><button data-cmd=\"disallow\" data-name=\"" +
+             html_escape(a) + "\">Remove</button></div>\n";
+    h += R"HTML(</div>
+<script>
+const send = m => { try { window.webkit.messageHandlers.wrenAdblock.postMessage(m); flash(); } catch (e) {} };
+const flash = () => { const s = document.getElementById('saved'); s.style.opacity = 1; clearTimeout(flash.t); flash.t = setTimeout(() => s.style.opacity = 0, 900); };
+document.addEventListener('click', e => {
+  const b = e.target.closest('button[data-cmd]');
+  if (!b) return;
+  if (b.dataset.cmd === 'disallow') { send('disallow\n' + b.dataset.name); b.parentNode.remove(); return; }
+  const on = b.getAttribute('aria-pressed') !== 'true';
+  b.setAttribute('aria-pressed', on);
+  send(b.dataset.cmd === 'on' ? 'on\n' + (on ? 1 : 0) : 'list\n' + b.dataset.name + '\n' + (on ? 1 : 0));
+});
+const add = () => {
+  const i = document.getElementById('host'), v = i.value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
+  if (!v) return;
+  send('allow\n' + v);
+  const d = document.createElement('div'); d.className = 'host';
+  d.innerHTML = '<span></span><button data-cmd="disallow">Remove</button>';
+  d.firstChild.textContent = v; d.lastChild.dataset.name = v;
+  document.getElementById('hosts').appendChild(d); i.value = '';
+};
+document.getElementById('addhost').addEventListener('click', add);
+document.getElementById('host').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+</script></body></html>
+)HTML";
+    return h;
+}
+
+void on_wren_scheme(WebKitURISchemeRequest *request, gpointer)
+{
+    const char *uri = webkit_uri_scheme_request_get_uri(request);
+    std::string body;
+    if (g_str_has_prefix(uri, "wren://adblock") && !ubo.dir.empty()) {
+        body = ubo_page();
+    } else if (g_str_has_prefix(uri, "wren://adblock")) {
+        body = "<!doctype html><meta charset=utf-8><title>Ad blocker</title><body style=\"font:24px system-ui;padding:48px\">"
+               "This Wren package has no ad blocker.";
+    } else {
+        GError *e = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "No such page: try wren://adblock");
+        webkit_uri_scheme_request_finish_error(request, e);
+        g_error_free(e);
+        return;
+    }
+    gsize len = body.size();
+    GInputStream *in = g_memory_input_stream_new_from_data(g_memdup2(body.data(), len), len, g_free);
+    webkit_uri_scheme_request_finish(request, in, len, "text/html");
+    g_object_unref(in);
+}
+
+// Messages from wren://adblock ("on\n1", "list\nNAME\n0", "allow\nHOST", "disallow\nHOST"). Only a tab showing
+// wren://adblock is listened to: the handler exists in every page's main world, so a web page could post too.
+void on_adblock_message(WebKitUserContentManager *, JSCValue *value, gpointer view)
+{
+    const char *uri = webkit_web_view_get_uri(WEBKIT_WEB_VIEW(view));
+    if (!uri || !g_str_has_prefix(uri, "wren://adblock") || ubo.dir.empty() || !jsc_value_is_string(value))
+        return;
+    gchar *text = jsc_value_to_string(value);
+    gchar **p = g_strsplit(text, "\n", 3);
+    g_free(text);
+    const std::string cmd = p[0] ? p[0] : "", arg = p[0] && p[1] ? p[1] : "", arg2 = p[0] && p[1] && p[2] ? p[2] : "";
+    g_strfreev(p);
+    if (cmd == "on") {
+        ubo.on = arg == "1";
+    } else if (cmd == "list") {
+        const bool known = std::any_of(ubo.catalog.begin(), ubo.catalog.end(), [&](const UboList &l) { return l.name == arg; });
+        ubo.lists.erase(std::remove(ubo.lists.begin(), ubo.lists.end(), arg), ubo.lists.end());
+        if (known && arg2 == "1")
+            ubo.lists.push_back(arg);
+    } else if (cmd == "allow" || cmd == "disallow") {
+        const gchar *one[] = { arg.c_str(), nullptr };
+        const std::vector<std::string> host = ubo_split(one);
+        if (host.empty())
+            return;
+        ubo.allowed.erase(std::remove(ubo.allowed.begin(), ubo.allowed.end(), host[0]), ubo.allowed.end());
+        if (cmd == "allow")
+            ubo.allowed.push_back(host[0]);
+    } else {
+        return;
+    }
+    ubo_save_settings();
+    ubo_broadcast();
+}
+
+// Called for every new tab (tab_open): the settings page's message handler on the tab's content manager.
+void ubo_attach(WebKitUserContentManager *ucm, WebKitWebView *view)
+{
+    if (webkit_user_content_manager_register_script_message_handler(ucm, "wrenAdblock", nullptr))
+        g_signal_connect(ucm, "script-message-received::wrenAdblock", G_CALLBACK(on_adblock_message), view);
+}
+
+void setup_ubo(const std::string &data_dir)
+{
+    WebKitWebContext *context = webkit_web_context_get_default();
+    webkit_web_context_register_uri_scheme(context, "wren", on_wren_scheme, nullptr, nullptr);
+    // Pages from the web can't load or frame it; it counts as a secure context of its own.
+    WebKitSecurityManager *security = webkit_web_context_get_security_manager(context);
+    webkit_security_manager_register_uri_scheme_as_local(security, "wren");
+    webkit_security_manager_register_uri_scheme_as_secure(security, "wren");
     if (g_strcmp0(getenv("WREN_UBO"), "0") == 0) {
         log_msg("ad blocker: off (WREN_UBO=0)");
         return;
@@ -1392,12 +1655,14 @@ void setup_ubo()
         log_msg("ad blocker: not in this package");
         return;
     }
-    ubo_dir = dir;
-    WebKitWebContext *context = webkit_web_context_get_default();
+    ubo.dir = dir;
+    ubo.settings_path = data_dir + "/ubo-settings.ini";
+    ubo_load_settings();
     webkit_web_context_set_web_process_extensions_directory(context, ext.c_str());
     webkit_web_context_add_path_to_sandbox(context, dir.c_str(), TRUE);
     g_signal_connect(context, "initialize-web-process-extensions", G_CALLBACK(on_initialize_web_process_extensions), nullptr);
-    log_msg("ad blocker: uBO lists (%s)", dir.c_str());
+    log_msg("ad blocker: uBO lists, %s, %zu of %zu extra list(s), %zu site(s) allowed; settings at wren://adblock",
+        ubo.on ? "on" : "off", ubo.lists.size(), ubo.catalog.size(), ubo.allowed.size());
 }
 
 void set_zoom(uint32_t permille)
@@ -1709,7 +1974,7 @@ int main(int, char **)
     if (const char *sites = getenv("WPE_BROWSER_DEBUG_FORGET_COOKIES"); sites && *sites)
         forget_cookies(sites);
 
-    setup_ubo();
+    setup_ubo(data_dir);
     g_unix_fd_add(g.sock, static_cast<GIOCondition>(G_IO_IN | G_IO_HUP | G_IO_ERR), on_socket, nullptr);
 
     WpeEngineReady ready { WPE_IPC_VERSION, webkit_get_major_version(), webkit_get_minor_version(), webkit_get_micro_version() };

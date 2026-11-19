@@ -11,8 +11,9 @@
  *   cosmetic   cosmetic.js runs in an isolated world: the site's hiding rules, generic hiding for the classes and
  *              ids the document uses (asked from here, __wrenUboHidden), and procedural filters.
  *
- * Initialization data (from the engine): "(sbas)" = data directory, on, hosts where ads are allowed.
- * User message "wren-ubo:state" "(bas)": the same on/allowed, sent when the UI changes them.
+ * Initialization data (from the engine): "(sbasas)" = data directory, on, hosts where ads are allowed, extra
+ * lists to use (lists/<name>.dat, see wren://adblock). User message "wren-ubo:state" "(basas)": the same
+ * on/allowed/lists, sent when the settings change. ("(sbas)"/"(bas)" without lists are accepted too.)
  * The blocker is never applied on YouTube (see adblock_wanted in engine/src/main.cpp) or on allowed hosts.
  * WREN_UBO_LOG=1 logs every blocked, redirected or rewritten request (without query strings). */
 #include <wpe/webkit-web-process-extension.h>
@@ -37,9 +38,14 @@ WrenUboVerdict wren_ubo_check(const WrenUbo *ubo, const char *url, const char *s
 WrenUboCosmetic wren_ubo_cosmetic(const WrenUbo *ubo, const char *url);
 void wren_ubo_cosmetic_free(WrenUboCosmetic *c);
 char *wren_ubo_hidden(const WrenUbo *ubo, const char *classes, const char *ids, const char *exceptions_json);
+int32_t wren_ubo_add_list(WrenUbo *ubo, const char *name, const uint8_t *dat, size_t dat_len);
+int32_t wren_ubo_remove_list(WrenUbo *ubo, const char *name);
+int32_t wren_ubo_has_list(const WrenUbo *ubo, const char *name);
 
 static struct {
     WrenUbo *ubo;
+    char *dir;                  /* the data directory (engine.dat, lists/) */
+    char **lists;               /* extra lists in use */
     char *cosmetic_js;          /* cosmetic.js, run in the isolated world */
     WebKitScriptWorld *world;   /* the isolated world */
     gboolean on;
@@ -217,6 +223,9 @@ static void evaluate(JSCContext *ctx, const char *code, const char *what, const 
 static void on_window_object_cleared(WebKitScriptWorld *world, WebKitWebPage *page, WebKitFrame *frame, gpointer data unused)
 {
     const char *uri = webkit_frame_get_uri(frame);
+    if (g.log_all)
+        g_message("wren-ubo: window object cleared, page %" G_GUINT64_FORMAT ", frame %s", webkit_web_page_get_id(page),
+            uri ? uri : "(none)");
     if (!uri || !(g_str_has_prefix(uri, "http:") || g_str_has_prefix(uri, "https:")))
         return;
     const char *top = webkit_frame_is_main_frame(frame) ? uri : webkit_web_page_get_uri(page);
@@ -259,22 +268,66 @@ static void on_window_object_cleared(WebKitScriptWorld *world, WebKitWebPage *pa
     wren_ubo_cosmetic_free(&c);
 }
 
-static void set_state(GVariant *on_allowed)
+/* An "as" variant -> a NULL-terminated array of lower-case strings (empty ones dropped). */
+static char **strv_of(GVariant *as)
 {
-    gboolean on = TRUE;
-    GVariantIter *iter = NULL;
-    g_variant_get(on_allowed, "(bas)", &on, &iter);
-    GPtrArray *hosts = g_ptr_array_new();
-    const char *h;
-    while (iter && g_variant_iter_next(iter, "&s", &h))
-        if (*h)
-            g_ptr_array_add(hosts, g_ascii_strdown(h, -1));
-    g_ptr_array_add(hosts, NULL);
-    if (iter)
-        g_variant_iter_free(iter);
+    GPtrArray *out = g_ptr_array_new();
+    GVariantIter iter;
+    const char *s;
+    if (as) {
+        g_variant_iter_init(&iter, as);
+        while (g_variant_iter_next(&iter, "&s", &s))
+            if (*s)
+                g_ptr_array_add(out, g_ascii_strdown(s, -1));
+    }
+    g_ptr_array_add(out, NULL);
+    return (char **)g_ptr_array_free(out, FALSE);
+}
+
+/* Loads the extra lists now wanted and frees the ones no longer wanted. A list name is a file name in lists/. */
+static void apply_lists(void)
+{
+    static char **loaded;
+    for (char **l = loaded; l && *l; ++l)
+        if (!g.lists || !g_strv_contains((const char *const *)g.lists, *l))
+            wren_ubo_remove_list(g.ubo, *l);
+    GPtrArray *now = g_ptr_array_new();
+    for (char **l = g.lists; l && *l; ++l) {
+        if (strchr(*l, '/') || strchr(*l, '.'))
+            continue;
+        if (!wren_ubo_has_list(g.ubo, *l)) {
+            char *file = g_strconcat(*l, ".dat", NULL);
+            char *path = g_build_filename(g.dir, "lists", file, NULL);
+            char *dat = NULL;
+            gsize len = 0;
+            if (g_file_get_contents(path, &dat, &len, NULL) && wren_ubo_add_list(g.ubo, *l, (const uint8_t *)dat, len))
+                g_ptr_array_add(now, g_strdup(*l));
+            else
+                g_warning("wren-ubo: list %s not loaded (%s)", *l, path);
+            g_free(dat);
+            g_free(path);
+            g_free(file);
+        } else {
+            g_ptr_array_add(now, g_strdup(*l));
+        }
+    }
+    g_ptr_array_add(now, NULL);
+    g_strfreev(loaded);
+    loaded = (char **)g_ptr_array_free(now, FALSE);
+}
+
+/* on, allowed hosts and (when given) the extra lists. */
+static void set_state(gboolean on, GVariant *allowed, GVariant *lists)
+{
     g_strfreev(g.allowed);
-    g.allowed = (char **)g_ptr_array_free(hosts, FALSE);
+    g.allowed = strv_of(allowed);
     g.on = on;
+    if (lists) {
+        g_strfreev(g.lists);
+        g.lists = strv_of(lists);
+        if (g.ubo)
+            apply_lists();
+    }
 }
 
 static gboolean on_user_message(WebKitWebProcessExtension *extension, WebKitUserMessage *message, gpointer data unused)
@@ -282,16 +335,27 @@ static gboolean on_user_message(WebKitWebProcessExtension *extension, WebKitUser
     if (g_strcmp0(webkit_user_message_get_name(message), "wren-ubo:state") != 0)
         return FALSE;
     GVariant *p = webkit_user_message_get_parameters(message);
-    if (p && g_variant_is_of_type(p, G_VARIANT_TYPE("(bas)")))
-        set_state(p);
-    g_message("wren-ubo: %s, %u site(s) allowed (so far: %" G_GUINT64_FORMAT " blocked, %" G_GUINT64_FORMAT
-        " redirected, %" G_GUINT64_FORMAT " rewritten)", g.on ? "on" : "off", g.allowed ? g_strv_length(g.allowed) : 0,
-        g.blocked, g.redirected, g.rewritten);
+    if (p && (g_variant_is_of_type(p, G_VARIANT_TYPE("(basas)")) || g_variant_is_of_type(p, G_VARIANT_TYPE("(bas)")))) {
+        gboolean on = TRUE;
+        g_variant_get_child(p, 0, "b", &on);
+        GVariant *allowed = g_variant_get_child_value(p, 1);
+        GVariant *lists = g_variant_n_children(p) > 2 ? g_variant_get_child_value(p, 2) : NULL;
+        set_state(on, allowed, lists);
+        g_variant_unref(allowed);
+        if (lists)
+            g_variant_unref(lists);
+    }
+    g_message("wren-ubo: %s, %u site(s) allowed, %u extra list(s) (so far: %" G_GUINT64_FORMAT " blocked, %"
+        G_GUINT64_FORMAT " redirected, %" G_GUINT64_FORMAT " rewritten)", g.on ? "on" : "off",
+        g.allowed ? g_strv_length(g.allowed) : 0, g.lists ? g_strv_length(g.lists) : 0, g.blocked, g.redirected,
+        g.rewritten);
     return TRUE;
 }
 
 static void on_page_created(WebKitWebProcessExtension *extension, WebKitWebPage *page, gpointer data unused)
 {
+    if (g.log_all)
+        g_message("wren-ubo: page %" G_GUINT64_FORMAT " created", webkit_web_page_get_id(page));
     g_signal_connect(page, "send-request", G_CALLBACK(on_send_request), NULL);
 }
 
@@ -299,22 +363,25 @@ G_MODULE_EXPORT void webkit_web_process_extension_initialize_with_user_data(WebK
     GVariant *user_data)
 {
     const char *dir = NULL;
-    GVariantIter *ignored = NULL;
     gboolean on = TRUE;
-    if (!user_data || !g_variant_is_of_type(user_data, G_VARIANT_TYPE("(sbas)"))) {
+    if (!user_data || !(g_variant_is_of_type(user_data, G_VARIANT_TYPE("(sbasas)"))
+                        || g_variant_is_of_type(user_data, G_VARIANT_TYPE("(sbas)")))) {
         g_warning("wren-ubo: no initialization data, not loaded");
         return;
     }
-    g_variant_get(user_data, "(&sbas)", &dir, &on, &ignored);
-    if (ignored)
-        g_variant_iter_free(ignored);
+    g_variant_get_child(user_data, 0, "&s", &dir);
+    g_variant_get_child(user_data, 1, "b", &on);
+    g.dir = g_strdup(dir);
     GVariant *allowed = g_variant_get_child_value(user_data, 2);
-    GVariant *state = g_variant_ref_sink(g_variant_new("(b@as)", on, allowed));
-    set_state(state);
-    g_variant_unref(state);
+    GVariant *lists = g_variant_n_children(user_data) > 3 ? g_variant_get_child_value(user_data, 3) : NULL;
+    set_state(on, allowed, lists); /* lists load below, once the core has */
     g_variant_unref(allowed);
-    g.log_all = g_strcmp0(g_getenv("WREN_UBO_LOG"), "2") == 0;
-    g.log = g.log_all || g_strcmp0(g_getenv("WREN_UBO_LOG"), "1") == 0;
+    if (lists)
+        g_variant_unref(lists);
+    /* WPE_BROWSER_DEBUG_UBO_LOG: the same, under a name Wren's launch parameter {"wpebEnv": ...} passes on. */
+    const char *log = g_getenv("WREN_UBO_LOG") ? g_getenv("WREN_UBO_LOG") : g_getenv("WPE_BROWSER_DEBUG_UBO_LOG");
+    g.log_all = g_strcmp0(log, "2") == 0;
+    g.log = g.log_all || g_strcmp0(log, "1") == 0;
 
     const gint64 started = g_get_monotonic_time();
     char *dat_path = g_build_filename(dir, "engine.dat", NULL);
@@ -342,11 +409,13 @@ G_MODULE_EXPORT void webkit_web_process_extension_initialize_with_user_data(WebK
     g_free(js_path);
     if (!g.ubo)
         return;
+    apply_lists();
 
     g.world = webkit_script_world_new_with_name("wren-ubo");
     g_signal_connect(webkit_script_world_get_default(), "window-object-cleared", G_CALLBACK(on_window_object_cleared), NULL);
     g_signal_connect(extension, "page-created", G_CALLBACK(on_page_created), NULL);
     g_signal_connect(extension, "user-message-received", G_CALLBACK(on_user_message), NULL);
-    g_message("wren-ubo: loaded in %.0f ms (%s, %u site(s) allowed)", (g_get_monotonic_time() - started) / 1e3,
-        g.on ? "on" : "off", g_strv_length(g.allowed));
+    g_message("wren-ubo: loaded in %.0f ms (%s, %u site(s) allowed, %u extra list(s))",
+        (g_get_monotonic_time() - started) / 1e3, g.on ? "on" : "off", g_strv_length(g.allowed),
+        g.lists ? g_strv_length(g.lists) : 0);
 }
