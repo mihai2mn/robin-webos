@@ -106,11 +106,9 @@ bool prepare_private_loader(const std::string &engine_exe, const std::string &en
         return true;
     }
     choice.linked = true;
-    if (dir != runtime_dir) {
-        error = "the engine expects its loader in " + dir + " but the app's runtime folder is " +
-                (runtime_dir.empty() ? std::string("unavailable") : runtime_dir);
-        return false;
-    }
+    // The engine's folder is not the one the app got (it is another user's, or the kit refused it): usable only if
+    // the loader link already in it is the right one, since this process cannot (and must not) change that folder.
+    const bool foreign_dir = dir != runtime_dir;
     const std::string name = want.substr(dir.size() + 1);  // "ld-linux.so.3"
     choice.hard_float = name.find("armhf") != std::string::npos;
     // The bundled glibc: engine/lib/glibc/ (softfp, optional) or engine/lib/ (hard-float).
@@ -150,7 +148,13 @@ bool prepare_private_loader(const std::string &engine_exe, const std::string &en
 
     char cur[4096];
     const ssize_t n = ::readlink(want.c_str(), cur, sizeof cur - 1);
-    if (n > 0 && std::string(cur, static_cast<size_t>(n)) == choice.target) return true;
+    if (n > 0 && std::string(cur, static_cast<size_t>(n)) == choice.target && ::access(want.c_str(), R_OK | X_OK) == 0) return true;
+    if (foreign_dir) {
+        error = "the engine expects its loader in " + dir + " but the app's runtime folder is " +
+                (runtime_dir.empty() ? std::string("unavailable") : runtime_dir) + ", and " + want +
+                (n > 0 ? " does not point at " + choice.target : std::string(" is missing"));
+        return false;
+    }
 
     // runtime_dir is owned by this uid (the kit checks it), so the link can't be swapped by another user.
     const std::string tmp = want + ".new" + std::to_string(::getpid());

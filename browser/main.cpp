@@ -1018,7 +1018,7 @@ class App : public wnk::app::Delegate {
             return;
         }
         browser::LogExportRequest req;
-        req.runtime_dir = ctx_->runtime_dir().empty() ? "/tmp" : ctx_->runtime_dir();
+        req.runtime_dir = runtime_dir(*ctx_);
         const auto &d = ctx_->device();
         req.header.push_back(std::string("Wren ") + kVersion + ", WPE WebKit " +
                              (engine_version_.empty() ? std::string("(not running)") : engine_version_));
@@ -1325,12 +1325,29 @@ class App : public wnk::app::Delegate {
         return cb;
     }
 
+    // The folder for the engine log, the media socket and the like. The kit makes /tmp/<app id> and refuses it when
+    // another user (a root shell that once ran the app) owns it; then it gives none, and everything used to land in /tmp
+    // itself with no events.log. Take this app's own <folder>-<uid> instead, and log there as the kit would have.
+    std::string runtime_dir(wnk::app::Context &ctx) {
+        if (!ctx.runtime_dir().empty()) return ctx.runtime_dir();
+        if (!fallback_runtime_.empty()) return fallback_runtime_;
+        std::string why;
+        const std::string dir = browser::own_usable_dir("/tmp/" + ctx.launch().app_id, &why);
+        fallback_runtime_ = dir.empty() ? std::string("/tmp") : dir;
+        WNK_LOGE(kCat, "no runtime folder from the kit (%s); using %s", why.empty() ? "unusable" : why.c_str(), fallback_runtime_.c_str());
+        if (!dir.empty()) {
+            const int fd = wnk::log::open_log_file(dir + "/events.log", wnk::log::OpenMode::Truncate);
+            if (fd >= 0 && wnk::log::default_logger()) wnk::log::default_logger()->add_sink(std::make_unique<wnk::log::FileSink>(fd));
+        }
+        return fallback_runtime_;
+    }
+
     void start_engine() {
         auto &ctx = *ctx_;
         browser::EngineLaunch l;
         const char *override_dir = std::getenv("WPE_BROWSER_ENGINE_DIR");
         l.engine_dir = override_dir && *override_dir ? override_dir : ctx.launch().app_dir + "/engine";
-        l.runtime_dir = ctx.runtime_dir().empty() ? "/tmp" : ctx.runtime_dir();
+        l.runtime_dir = runtime_dir(ctx);
         // On the TV pages are drawn by the GPU straight to the screen by default (direct presentation, tested
         // 2026-11-11; a failure falls back to SHM frames by itself). Launch parameters {"wpebRenderer":"software"|"gpu",
         // "wpebPresent":"shm"|"direct"} or WPE_BROWSER_RENDERER / WPE_BROWSER_PRESENT choose otherwise (a parameter
@@ -1444,7 +1461,7 @@ class App : public wnk::app::Delegate {
             if (!why.empty()) WNK_LOGW(kCat, "profile folder %s", why.c_str());
             if (!dir.empty()) return dir;
         }
-        const std::string fallback = (ctx.runtime_dir().empty() ? std::string("/tmp") : ctx.runtime_dir()) + own;
+        const std::string fallback = runtime_dir(ctx) + own;
         std::string why;
         const std::string dir = browser::own_usable_dir(fallback, &why);
         WNK_LOGE(kCat, "no persistent profile folder; using %s%s%s", dir.empty() ? fallback.c_str() : dir.c_str(),
@@ -1474,6 +1491,7 @@ class App : public wnk::app::Delegate {
     TabId active_ = 0;
     TabId next_id_ = 1;
     std::string engine_version_;
+    std::string fallback_runtime_;
     bool saving_logs_ = false;  // Save logs to USB is running
     bool pointer_in_page_ = false;
     bool focused_once_ = false;

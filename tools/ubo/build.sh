@@ -34,6 +34,8 @@ for l in json.load(open('$UBO/lists/lists.json')):
         --target-dir "$OUT/cargo-host" --bin wren-ubo-compile -- \
         "$OUT/data" "$UBO/ubo/web_accessible_resources" "$UBO/ubo/js/redirect-resources.js" "$OUT/scriptlets.json" $LISTS "$UBO/wren-filters.txt:trusted"
     cp "$SRC/engine/ubo/cosmetic.js" "$SRC/engine/ubo/compat.js" "$OUT/data/"
+    # The windows' own filters ($popup, $popunder): adblock-rust leaves them out, the engine matches them (engine/src/popup_filter.h).
+    sh "$UBO/popups.sh" "$OUT/data/popups.txt" "$UBO"/lists/*.txt "$UBO/wren-filters.txt"
     # Extra lists: one engine each, with uBO's Unbreak and Quick fixes so their exceptions apply inside it, and
     # lists/catalog.ini for the engine's settings page (title, what it does, on by default, size).
     python3 -c "

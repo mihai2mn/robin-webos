@@ -18,6 +18,7 @@
 #include "../../common/wpe_ipc.h"
 #include "direct.h"
 #include "platform.h"
+#include "popup_filter.h"
 
 #include <wpe/webkit.h>
 
@@ -67,6 +68,11 @@ struct Tab {
     direct::View *direct = nullptr;           // direct mode (owned by the web view's backend)
     WebKitInputMethodContext *ime = nullptr;  // direct mode (owned by the web view)
     bool resize_pending = false;              // direct mode: resized while hidden, applied when shown
+    // A window a page opened (window.open, target=_blank): who opened it, when, and whether it is the kind that can be a pop-under
+    // (opened by a script, for another site): closed again if the opener moves on within a few seconds (popup_opener_moves).
+    uint32_t opener = 0;
+    int64_t born_us = 0;
+    bool pop_under_candidate = false;
 };
 
 struct Engine {
@@ -754,12 +760,20 @@ gboolean load_later(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+bool popup_navigation_blocked(WebKitWebView *view, const char *uri);
+void popup_opener_moves(WebKitWebView *view, const char *uri);
+
 gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer)
 {
     if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION)
         return FALSE;
     WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(WEBKIT_NAVIGATION_POLICY_DECISION(decision));
     const char *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
+    if (popup_navigation_blocked(view, uri)) {
+        webkit_policy_decision_ignore(decision);
+        return TRUE;
+    }
+    popup_opener_moves(view, uri);
     const std::string tv = youtube_tv_url(uri);
     if (tv.empty())
         return FALSE;
@@ -1198,15 +1212,28 @@ gboolean on_permission_request(WebKitWebView *view, WebKitPermissionRequest *req
 
 // window.open and target=_blank: a real new window, as a new tab. Sign-in popups (Google, Apple, ...) need it: they
 // talk to window.opener and close themselves. WebKit loads the request into the view returned here.
-WebKitWebView *on_create(WebKitWebView *view, WebKitNavigationAction *, gpointer)
+bool popup_create_blocked(WebKitWebView *view, WebKitNavigationAction *action, std::string *why);
+bool ubo_popup_third_party(WebKitWebView *opener, const char *target);
+
+WebKitWebView *on_create(WebKitWebView *view, WebKitNavigationAction *action, gpointer)
 {
     static uint32_t next = WPE_ENGINE_TAB_ID_BASE;
     const uint32_t opener = tab_of_web_view(view);
+    std::string why;
+    if (popup_create_blocked(view, action, &why)) {
+        const char *target = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
+        log_msg("tab %u: window blocked (%s): %.200s", opener, why.c_str(), target && *target ? target : "about:blank");
+        return nullptr;  // window.open gives the page null, as for any blocked pop-up
+    }
     const uint32_t id = next++;
     tab_open(id, {}, view);
     Tab *tab = tab_by_id(id);
     if (!tab)
         return nullptr;
+    tab->opener = opener;
+    tab->born_us = g_get_monotonic_time();
+    tab->pop_under_candidate = webkit_navigation_action_get_navigation_type(action) != WEBKIT_NAVIGATION_TYPE_LINK_CLICKED
+        && ubo_popup_third_party(view, webkit_uri_request_get_uri(webkit_navigation_action_get_request(action)));
     WpeTabCreated c { opener };
     send_msg(WPE_ENGINE_TAB_CREATED, id, &c, sizeof(c));
     log_msg("tab %u opened by tab %u (window.open)", id, opener);
@@ -1486,10 +1513,24 @@ struct Ubo {
     bool on = true;
     std::vector<std::string> allowed, lists;
     std::string my_filters;       // the user's own rules, filter text
+    popup::Rules popups;          // $popup / $popunder rules: ubo/popups.txt and the user's own (popup_filter.h)
 };
 
 constexpr size_t UBO_MY_FILTERS_MAX = 256 * 1024;
 Ubo ubo;
+
+// The pop-up rules: the lists' (ubo/popups.txt) and the user's own lines of the same kind.
+void ubo_reload_popups()
+{
+    ubo.popups = popup::Rules();
+    gchar *text = nullptr;
+    gsize len = 0;
+    if (!ubo.dir.empty() && g_file_get_contents((ubo.dir + "/popups.txt").c_str(), &text, &len, nullptr))
+        ubo.popups.add_text(std::string(text, len));
+    g_free(text);
+    ubo.popups.add_text(ubo.my_filters);
+    log_msg("ad blocker: %zu pop-up rule(s)", ubo.popups.size());
+}
 
 std::vector<std::string> ubo_split(const gchar *const *v)
 {
@@ -1755,6 +1796,7 @@ void on_adblock_message(WebKitUserContentManager *, JSCValue *value, gpointer vi
         ubo.my_filters.assign(text + 5, std::min(strlen(text + 5), UBO_MY_FILTERS_MAX));
         g_free(text);
         ubo_save_my_filters();
+        ubo_reload_popups();
         ubo_broadcast();
         return;
     }
@@ -1791,6 +1833,102 @@ void ubo_attach(WebKitUserContentManager *ucm, WebKitWebView *view)
         g_signal_connect(ucm, "script-message-received::wrenAdblock", G_CALLBACK(on_adblock_message), view);
 }
 
+// ---- pop-ups and pop-unders -------------------------------------------------------------------------------
+// uBO blocks the windows its filters name ($popup) and the ones a page opens without being asked. Here a new window
+// (window.open, target=_blank) is refused when
+//  - no user gesture started it,
+//  - a $popup rule matches its address (the opener page is the context of $domain= and $3p), also later, when the
+//    window moves on to another address,
+//  - it is a second window within two seconds of the opener's last one (one click, one window), or
+//  - it is a pop-under: a script opened it for another site and the opener page then navigates within three seconds:
+//    the window is closed again (popup_opener_moves).
+// A window the user asked for (a link with target=_blank, a sign-in window opened by a click) passes all four. Not for
+// sites on the ad blocker's allowed list, nor when the blocker is off.
+bool popups_guarded(const std::string &opener_uri)
+{
+    if (ubo.dir.empty() || !ubo.on)
+        return false;
+    const std::string host = popup::Rules::host_of(popup::Rules::lower(opener_uri));
+    for (const std::string &a : ubo.allowed)
+        if (!host.empty() && popup::Rules::host_in(host, popup::Rules::lower(a)))
+            return false;
+    return true;
+}
+
+bool ubo_popup_third_party(WebKitWebView *opener, const char *target)
+{
+    const char *o = webkit_web_view_get_uri(opener);
+    const std::string oh = popup::Rules::host_of(popup::Rules::lower(o ? o : "")), th = popup::Rules::host_of(popup::Rules::lower(target ? target : ""));
+    return !oh.empty() && !th.empty() && popup::Rules::site_of(oh) != popup::Rules::site_of(th);
+}
+
+bool popup_create_blocked(WebKitWebView *view, WebKitNavigationAction *action, std::string *why)
+{
+    const char *o = webkit_web_view_get_uri(view);
+    const std::string opener_uri = o ? o : "";
+    if (!popups_guarded(opener_uri))
+        return false;
+    if (!webkit_navigation_action_is_user_gesture(action)) {
+        *why = "no user gesture";
+        return true;
+    }
+    const char *t = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
+    const char *which = nullptr;
+    if (ubo.popups.blocks(t ? t : "", opener_uri, &which)) {
+        *why = std::string("pop-up rule ") + (which ? which : "");
+        return true;
+    }
+    static std::map<uint32_t, int64_t> last;  // opener tab -> when it last got a window
+    const uint32_t opener = tab_of_web_view(view);
+    const int64_t now = g_get_monotonic_time();
+    auto it = last.find(opener);
+    if (it != last.end() && now - it->second < 2000000) {
+        *why = "a second window within 2 s";
+        return true;
+    }
+    last[opener] = now;
+    return false;
+}
+
+// A window that is going somewhere (an address change or a redirect): the rules apply to where it ends up.
+bool popup_navigation_blocked(WebKitWebView *view, const char *uri)
+{
+    Tab *tab = tab_by_id(tab_of_web_view(view));
+    if (!tab || !tab->opener || !uri || g_get_monotonic_time() - tab->born_us > 20000000)
+        return false;
+    Tab *from = tab_by_id(tab->opener);
+    const char *o = from ? webkit_web_view_get_uri(from->web_view) : nullptr;
+    const std::string opener_uri = o ? o : "";
+    if (!popups_guarded(opener_uri))
+        return false;
+    const char *which = nullptr;
+    if (!ubo.popups.blocks(uri, opener_uri, &which))
+        return false;
+    log_msg("tab %u: window closed (pop-up rule %s): %.200s", tab->id, which ? which : "", uri);
+    send_msg(WPE_ENGINE_TAB_CLOSE, tab->id, nullptr, 0);
+    return true;
+}
+
+// The opener navigates (to `uri`) soon after it opened a window by script for another site: that window was a pop-under.
+void popup_opener_moves(WebKitWebView *view, const char *uri)
+{
+    const uint32_t id = tab_of_web_view(view);
+    if (!id || !uri || !*uri || ubo.dir.empty() || !ubo.on)
+        return;
+    const char *cur = webkit_web_view_get_uri(view);
+    if (cur && g_strcmp0(cur, uri) == 0)
+        return;
+    const int64_t now = g_get_monotonic_time();
+    std::vector<uint32_t> under;
+    for (auto &[tid, tab] : g.tabs)
+        if (tab.opener == id && tab.pop_under_candidate && now - tab.born_us < 3000000 && popups_guarded(cur ? cur : ""))
+            under.push_back(tid);
+    for (uint32_t tid : under) {
+        log_msg("tab %u: window closed (a pop-under: tab %u moved on to %.120s right after opening it)", tid, id, uri);
+        send_msg(WPE_ENGINE_TAB_CLOSE, tid, nullptr, 0);
+    }
+}
+
 void setup_ubo(const std::string &data_dir)
 {
     WebKitWebContext *context = g.context;
@@ -1818,6 +1956,7 @@ void setup_ubo(const std::string &data_dir)
     ubo.settings_path = data_dir + "/ubo-settings.ini";
     ubo.my_filters_path = data_dir + "/ubo-my-filters.txt";
     ubo_load_settings();
+    ubo_reload_popups();
     webkit_web_context_set_web_process_extensions_directory(context, ext.c_str());
     webkit_web_context_add_path_to_sandbox(context, dir.c_str(), TRUE);
     g_signal_connect(context, "initialize-web-process-extensions", G_CALLBACK(on_initialize_web_process_extensions), nullptr);

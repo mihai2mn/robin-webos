@@ -5,6 +5,8 @@ project(wpebrowser LANGUAGES C CXX)
 # The app id: override for a development copy (e.g. -DWPEB_APPID=org.sostk.wpebrowser.dev) so it can be
 # installed and launched beside the real app. Everything that names the id at run time uses this same value.
 set(WPEB_APPID "org.sostk.wpebrowser" CACHE STRING "webOS application id")
+# The title in the launcher: a development copy gets its own, so the two can be told apart on the TV.
+set(WPEB_TITLE "Wren" CACHE STRING "launcher title")
 
 # The kit: -DWNK_KIT_DIR=..., else $WNK_KIT_DIR, else where it was when tools/new-app.py made this.
 # A relative path is taken from this folder (a git submodule at kit/ would be "kit").
@@ -56,7 +58,7 @@ add_custom_command(TARGET wpebrowser POST_BUILD
 wnk_add_webos_package(
         TARGET wpebrowser
         APPID ${WPEB_APPID}
-        TITLE "Wren"
+        TITLE "${WPEB_TITLE}"
         VERSION 0.3.3
         VENDOR "sostk"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"

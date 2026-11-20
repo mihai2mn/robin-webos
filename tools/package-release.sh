@@ -39,6 +39,7 @@ PATCHELF=${PATCHELF:-$BR/br-out-aarch64/host/bin/patchelf}
 src=$WORK/src
 export TMPDIR=${PKG_TMP:-$WORK/tmp}; mkdir -p "$TMPDIR"
 appid() { case "$1" in dev) echo org.sostk.wpebrowser.dev ;; release) echo org.sostk.wpebrowser ;; *) echo "bad id $1" >&2; exit 2 ;; esac; }
+title_of() { case "$1" in dev) echo "Wren Test" ;; *) echo "Wren" ;; esac; }
 mb() { awk -v x="$1" 'BEGIN{printf "%.1f", x/1048576}'; }
 say() { echo "== $(date +%T) $*"; }
 phase=${1:-all}
@@ -228,7 +229,7 @@ do_ui() {
             -e WEBOS_NDK="$NDK" -w /src/browser webos-browser-build:1 sh -c "
             set -e
             cmake -S . -B build/webos-$id -G 'Unix Makefiles' -DCMAKE_TOOLCHAIN_FILE=\"\$WEBOS_NDK/share/buildroot/toolchainfile.cmake\" \
-                -DCMAKE_BUILD_TYPE=Release -DWPEB_APPID=$app -DWPEB_ENGINE_STAGE=/build/${WORK#$BR/}/stage-$id/engine > /tmp/cfg.log 2>&1 || { tail -25 /tmp/cfg.log; exit 1; }
+                -DCMAKE_BUILD_TYPE=Release -DWPEB_APPID=$app -DWPEB_TITLE=\"$(title_of $id)\" -DWPEB_ENGINE_STAGE=/build/${WORK#$BR/}/stage-$id/engine > /tmp/cfg.log 2>&1 || { tail -25 /tmp/cfg.log; exit 1; }
             cmake --build build/webos-$id -j\$(nproc) > /tmp/build.log 2>&1 || { grep -E 'error|Error' /tmp/build.log | head -20; exit 1; }
             cmake --build build/webos-$id --target wnk-ipks > /tmp/ipk.log 2>&1 || { tail -30 /tmp/ipk.log; exit 1; }
             ls -l build/webos-$id/dist/" 2>&1 | tail -6 | sed 's/^/   /'
