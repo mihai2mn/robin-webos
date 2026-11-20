@@ -32,8 +32,9 @@ public:
     // The playback's audio, when it goes to the same pipeline: LG then syncs the video to it. AAC frames carry ADTS
     // headers; Opus (experimental) comes as packets, with its OpusHead declared at Load (opusInfo).
     struct Audio {
-        enum class Codec { Aac, Opus } codec = Codec::Aac;
+        enum class Codec { Aac, Opus, Pcm } codec = Codec::Aac;  // Pcm: S16LE interleaved stereo the web process decoded
         int rate = 0, channels = 0;
+        int pcm_lead_ms = 0;  // Pcm: the audio is stamped this much later (LG's PCM path plays it earlier than its video; see the kit's pcm_lead_ms_for)
         std::vector<uint8_t> header;
     };
     bool load(const std::string &app_id, const std::string &window_id, Codec codec, int width, int height, double fps,
@@ -64,6 +65,7 @@ private:
     std::atomic<bool> load_completed_{false};
     bool playing_ = false, paused_ = false, seek_pending_ = true;
     bool has_audio_ = false;
+    int64_t audio_lead_us_ = 0;  // added to the pts of PCM audio (Audio::pcm_lead_ms)
     int64_t fed_ = 0, full_ = 0, last_pts_us_ = 0, audio_fed_ = 0;
     std::atomic<int64_t> frames_{0};  // from the pipeline's thread
     int64_t stats_at_ms_ = 0;

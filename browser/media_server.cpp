@@ -515,7 +515,14 @@ void MediaServer::serve(int fd, uint64_t id) {
                                            : l.codec == WPEB_MEDIA_VP9  ? LgMediaPlayer::Codec::Vp9
                                                                         : LgMediaPlayer::Codec::Av1;
             LgMediaPlayer::Audio a;
-            a.codec = audio_format.codec == WPEB_MEDIA_OPUS ? LgMediaPlayer::Audio::Codec::Opus : LgMediaPlayer::Audio::Codec::Aac;
+            a.codec = audio_format.codec == WPEB_MEDIA_OPUS  ? LgMediaPlayer::Audio::Codec::Opus
+                      : audio_format.codec == WPEB_MEDIA_PCM ? LgMediaPlayer::Audio::Codec::Pcm
+                                                             : LgMediaPlayer::Audio::Codec::Aac;
+            if (a.codec == LgMediaPlayer::Audio::Codec::Pcm) {
+                // As the Starfish backend does for PCM (kit: pcm_lead_ms_for): LG's PCM mixer channel plays ahead of its video.
+                a.pcm_lead_ms = wnk::media::StarfishBackend::pcm_lead_ms_for(wnk::media::StarfishBackend::detect_audio_stack(), "");
+                WNK_LOGI(kCat, "pcm: audio stamped +%d ms", a.pcm_lead_ms);
+            }
             a.rate = static_cast<int>(audio_format.rate);
             a.channels = static_cast<int>(audio_format.channels);
             a.header = audio_header;
@@ -533,7 +540,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         if (use_lg_ || ndl_loaded_)
             WNK_LOGI(kCat, "stream %llu: %s for %s %ux%u @ %.2f fps%s%s%s", static_cast<unsigned long long>(id),
                      use_lg_ ? "LG media pipeline" : "NDL", codec_label(l.codec), l.width, l.height, l.fps_milli / 1000.0,
-                     !(use_lg_ && with_audio) ? "" : audio_format.codec == WPEB_MEDIA_OPUS ? " with its Opus audio" : " with its AAC audio", l.window_id[0] ? ", window " : "", l.window_id);
+                     !(use_lg_ && with_audio) ? "" : audio_format.codec == WPEB_MEDIA_OPUS ? " with its Opus audio" : audio_format.codec == WPEB_MEDIA_PCM ? " with its PCM audio" : " with its AAC audio", l.window_id[0] ? ", window " : "", l.window_id);
         else
             WNK_LOGW(kCat, "stream %llu: decoder load failed: %s", static_cast<unsigned long long>(id), error.c_str());
     };

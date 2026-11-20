@@ -179,6 +179,8 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
     // audio (audioSync), with a larger audio buffer and without low-delay mode.
     const bool with_audio = audio != nullptr;
     const bool opus = with_audio && audio->codec == Audio::Codec::Opus;
+    const bool pcm = with_audio && audio->codec == Audio::Codec::Pcm;
+    audio_lead_us_ = pcm ? static_cast<int64_t>(audio->pcm_lead_ms) * 1000 : 0;
     // Opus as Chromium on webOS declares it (opusInfo: channels, sampleRate, streamHeader); the encoding of the
     // header is not known (WPEB_HW_OPUS_HEADER=base64 tries the other one).
     std::string audio_info;
@@ -188,6 +190,16 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
         audio_info = ",\"opusInfo\":{\"channels\":" + std::to_string(audio->channels) +
                      ",\"sampleRate\":" + std::to_string(audio->rate) + ",\"streamHeader\":\"" +
                      (b64 ? base64(audio->header) : hex(audio->header)) + "\"}";
+    }
+    if (pcm) {
+        // Decoded PCM as the kit declares it (verified on this TV there): codec "PCM" plus pcmInfo; LG takes the channel count from
+        // channelMode alone (mono/stereo) and the rate in kHz.
+        char info[192];
+        std::snprintf(info, sizeof info,
+                      ",\"pcmInfo\":{\"format\":\"S16LE\",\"channelMode\":\"%s\",\"layout\":\"interleaved\",\"sampleRate\":%g,"
+                      "\"bitsPerSample\":16}",
+                      audio->channels == 1 ? "mono" : "stereo", audio->rate / 1000.0);
+        audio_info = info;
     }
     char payload[4096];
     std::snprintf(payload, sizeof payload,
@@ -201,7 +213,7 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
                   "\"lowDelayMode\":%s,\"transmission\":{\"contentsType\":\"LIVE\"},\"adaptiveStreaming\":{\"audioOnly\":false,"
                   "\"adaptiveResolution\":true,\"maxWidth\":%d,\"maxHeight\":%d,\"maxFrameRate\":%d}}}]}",
                   app_id.c_str(), window_id.c_str(), codec_name(codec),
-                  !with_audio ? "" : opus ? ",\"audio\":\"OPUS\"" : ",\"audio\":\"AAC\"", audio_info.c_str(),
+                  !with_audio ? "" : opus ? ",\"audio\":\"OPUS\"" : pcm ? ",\"audio\":\"PCM\"" : ",\"audio\":\"AAC\"", audio_info.c_str(),
                   with_audio ? "true" : "false", with_audio ? 1048576 : 32768, with_audio ? "true" : "false",
                   with_audio ? "false" : "true", max_w, max_h, max_fps);
     api_ = new_api();
@@ -223,7 +235,7 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
         return false;
     }
     WNK_LOGI(kCat, "Load %s %dx%d @ %.2f (envelope %dx%d@%d)%s, window %s, media id %s", codec_name(codec), width, height,
-             fps, max_w, max_h, max_fps, !with_audio ? "" : opus ? " + Opus" : " + AAC", window_id.c_str(),
+             fps, max_w, max_h, max_fps, !with_audio ? "" : opus ? " + Opus" : pcm ? " + PCM" : " + AAC", window_id.c_str(),
              api_->getMediaID() ? api_->getMediaID() : "?");
     if (opus) WNK_LOGI(kCat, "opusInfo%s", audio_info.c_str() + std::strlen(",\"opusInfo\""));
     return true;
@@ -253,6 +265,7 @@ LgMediaPlayer::Feed LgMediaPlayer::feed(bool audio, const uint8_t *data, size_t 
         WNK_LOGI(kCat, "Play -> %d", ok ? 1 : 0);
     }
     char json[160];
+    if (audio) pts_us += audio_lead_us_;
     std::snprintf(json, sizeof json, "{\"bufferAddr\":\"%p\",\"bufferSize\":%u,\"pts\":%lld,\"esData\":%d}",
                   static_cast<const void *>(data), static_cast<unsigned>(size), static_cast<long long>(pts_us) * 1000,
                   audio ? 2 : 1);

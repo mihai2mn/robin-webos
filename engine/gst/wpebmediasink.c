@@ -1258,14 +1258,18 @@ static WpebVideoSink *hardware_partner(WpebAudioSink *self)
     WpebVideoSink *video = find_video_sink(GST_ELEMENT(self));
     if (!video)
         return NULL;
-    gint64 deadline = g_get_monotonic_time() + 400 * G_TIME_SPAN_MILLISECOND;
+    /* The direct path opens the page's video window (up to a second) between setting the codec and sending the LOAD: wait for the
+     * LOAD (load_time) as well, or this decision came before it and read the previous (zero) load time as "too late" -> software
+     * audio, silent on webOS 5 (TV, 2026-11-20: Opus in WebM played silently, or with the audio declared wrongly, about one run in four). */
+    gint64 deadline = g_get_monotonic_time() + 2000 * G_TIME_SPAN_MILLISECOND;
     gboolean ok = FALSE;
     g_mutex_lock(&g_caps_lock);
     for (;;) {
         g_mutex_lock(&video->lock);
         /* have_window: the direct path (LG's pipeline on the page's video window). WPEB_MEDIA_HW_AUDIO (set by the UI when its
          * Starfish backend runs, which takes the audio through the media socket too): SHM mode, no page window. */
-        gboolean ready = video->codec != 0 && video->fd >= 0 && (video->have_window || g_getenv("WPEB_MEDIA_HW_AUDIO"));
+        gboolean ready = video->codec != 0 && video->fd >= 0 && video->load_time != 0 &&
+            (video->have_window || g_getenv("WPEB_MEDIA_HW_AUDIO"));
         g_mutex_unlock(&video->lock);
         if (ready) {
             ok = g_get_monotonic_time() - video->load_time < 800 * G_TIME_SPAN_MILLISECOND;
