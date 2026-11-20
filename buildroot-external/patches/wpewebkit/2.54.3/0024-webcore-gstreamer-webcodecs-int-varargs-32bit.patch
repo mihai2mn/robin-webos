@@ -1,0 +1,64 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] WebCore GStreamer: do not pass uint64_t to G_TYPE_INT varargs (32-bit crash in WebCodecs)
+
+VideoDecoder::Config and AudioDecoder::Config hold width/height/sampleRate/numberOfChannels as uint64_t. The decoders
+pass them straight to gst_caps_set_simple()/gst_caps_new_simple() after a G_TYPE_INT tag. On a 32-bit target a G_TYPE_INT
+vararg is read as one 32-bit word but the uint64_t occupies two, so every following vararg is shifted: the next field
+name reads as garbage, GLib prints "type id '0' is invalid" and gst_caps_set_simple_valist() segfaults. Reproduced on the
+TV by a streaming site calling VideoDecoder.isConfigSupported() (WebCodecs): web process SIGSEGV in
+GStreamerInternalVideoDecoder::GStreamerInternalVideoDecoder. Cast to int at the 11 call sites in
+VideoDecoderGStreamer.cpp and AudioDecoderGStreamer.cpp (no change on 64-bit, where the register is wide enough).
+---
+diff --git a/Source/WebCore/platform/graphics/gstreamer/VideoDecoderGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/VideoDecoderGStreamer.cpp
+--- a/Source/WebCore/platform/graphics/gstreamer/VideoDecoderGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/VideoDecoderGStreamer.cpp
+@@ -229,7 +229,7 @@
+     }
+ 
+     if (config.width && config.height)
+-        gst_caps_set_simple(m_inputCaps.get(), "width", G_TYPE_INT, config.width, "height", G_TYPE_INT, config.height, nullptr);
++        gst_caps_set_simple(m_inputCaps.get(), "width", G_TYPE_INT, static_cast<int>(config.width), "height", G_TYPE_INT, static_cast<int>(config.height), nullptr);
+ 
+     GRefPtr<GstElement> harnessedElement;
+     if (!parser.isEmpty()) {
+diff --git a/Source/WebCore/platform/audio/gstreamer/AudioDecoderGStreamer.cpp b/Source/WebCore/platform/audio/gstreamer/AudioDecoderGStreamer.cpp
+--- a/Source/WebCore/platform/audio/gstreamer/AudioDecoderGStreamer.cpp
++++ b/Source/WebCore/platform/audio/gstreamer/AudioDecoderGStreamer.cpp
+@@ -155,14 +155,14 @@
+ 
+     ASCIILiteral parser;
+     if (codecName.startsWith("mp4a"_s)) {
+-        m_inputCaps = adoptGRef(gst_caps_new_simple("audio/mpeg", "mpegversion", G_TYPE_INT, 4, "channels", G_TYPE_INT, config.numberOfChannels, nullptr));
++        m_inputCaps = adoptGRef(gst_caps_new_simple("audio/mpeg", "mpegversion", G_TYPE_INT, 4, "channels", G_TYPE_INT, static_cast<int>(config.numberOfChannels), nullptr));
+         auto codecData = wrapSpanData(config.description);
+         if (codecData)
+             gst_caps_set_simple(m_inputCaps.get(), "codec_data", GST_TYPE_BUFFER, codecData.get(), "stream-format", G_TYPE_STRING, "raw", nullptr);
+         else
+             gst_caps_set_simple(m_inputCaps.get(), "stream-format", G_TYPE_STRING, "adts", nullptr);
+     } else if (codecName == "mp3"_s) {
+-        m_inputCaps = adoptGRef(gst_caps_new_simple("audio/mpeg", "mpegversion", G_TYPE_INT, 1, "layer", G_TYPE_INT, 3, "rate", G_TYPE_INT, config.sampleRate, "channels", G_TYPE_INT, config.numberOfChannels, "parsed", G_TYPE_BOOLEAN, TRUE, nullptr));
++        m_inputCaps = adoptGRef(gst_caps_new_simple("audio/mpeg", "mpegversion", G_TYPE_INT, 1, "layer", G_TYPE_INT, 3, "rate", G_TYPE_INT, static_cast<int>(config.sampleRate), "channels", G_TYPE_INT, static_cast<int>(config.numberOfChannels), "parsed", G_TYPE_BOOLEAN, TRUE, nullptr));
+     } else if (codecName == "opus"_s) {
+         int channelMappingFamily = config.numberOfChannels <= 2 ? 0 : 1;
+         m_inputCaps = adoptGRef(gst_caps_new_simple("audio/x-opus", "channel-mapping-family", G_TYPE_INT, channelMappingFamily, nullptr));
+@@ -170,9 +170,9 @@
+         if (m_header)
+             parser = "opusparse"_s;
+     } else if (codecName == "alaw"_s)
+-        m_inputCaps = adoptGRef(gst_caps_new_simple("audio/x-alaw", "rate", G_TYPE_INT, config.sampleRate, "channels", G_TYPE_INT, config.numberOfChannels, nullptr));
++        m_inputCaps = adoptGRef(gst_caps_new_simple("audio/x-alaw", "rate", G_TYPE_INT, static_cast<int>(config.sampleRate), "channels", G_TYPE_INT, static_cast<int>(config.numberOfChannels), nullptr));
+     else if (codecName == "ulaw"_s)
+-        m_inputCaps = adoptGRef(gst_caps_new_simple("audio/x-mulaw", "rate", G_TYPE_INT, config.sampleRate, "channels", G_TYPE_INT, config.numberOfChannels, nullptr));
++        m_inputCaps = adoptGRef(gst_caps_new_simple("audio/x-mulaw", "rate", G_TYPE_INT, static_cast<int>(config.sampleRate), "channels", G_TYPE_INT, static_cast<int>(config.numberOfChannels), nullptr));
+     else if (codecName == "flac"_s) {
+         m_header = wrapSpanData(config.description);
+         if (!m_header) {
+@@ -208,7 +208,7 @@
+             return;
+         }
+         m_inputCaps = adoptGRef(gst_caps_new_simple("audio/x-raw", "format", G_TYPE_STRING, gst_audio_format_to_string(gstPcmFormat),
+-            "rate", G_TYPE_INT, config.sampleRate, "channels", G_TYPE_INT, config.numberOfChannels,
++            "rate", G_TYPE_INT, static_cast<int>(config.sampleRate), "channels", G_TYPE_INT, static_cast<int>(config.numberOfChannels),
+             "layout", G_TYPE_STRING, "interleaved", nullptr));
+     } else
+         return;

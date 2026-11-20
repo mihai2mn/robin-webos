@@ -21,3 +21,5 @@ Rebased from the 2.50.5 set and regenerated exactly against 2.54.3 (no fuzz). Dr
 - 0021 initialises the metadata-table value profiles to the empty JSValue on 32-bit (zeroed buckets decoded as the
   double 0.0, so the DFG mispredicted every unsampled site; this made Map.prototype.forEach loop forever once
   DFG-compiled at low thresholds).
+- 0023 keeps the RegExp (YARR) JIT off on ARMv7 (useRegExpJIT default back to 64-bit only): with it on, a framework docs
+  site's web process exited ~2 s after load (6/6); Baseline JIT and DFG stay on.
