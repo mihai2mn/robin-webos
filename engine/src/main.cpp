@@ -2075,12 +2075,47 @@ int main(int, char **)
     const std::string cache_dir = env_or("WPE_BROWSER_CACHE_DIR", "/tmp/wpe-browser/cache");
     g_mkdir_with_parents(data_dir.c_str(), 0700);
     g_mkdir_with_parents(cache_dir.c_str(), 0700);
+    // Memory-pressure limits for the network process (webkit_network_session_set_memory_pressure_settings covers only
+    // that process; the web processes would need a WebKitWebContext built with "memory-pressure-settings"). The TV has
+    // 2.6 GB of which ~700 MB are available while LG's own apps run, and a 32-bit web process starts to hurt at ~480 MB
+    // on heavy pages. Without settings WebKit sizes its limit from the physical RAM (it sees all 2.6 GB), so pressure
+    // handling only starts when memchute is already killing apps. Must be set before the session exists.
+    // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=0: WebKit's own.
+    // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=<n>: the process limit; the thresholds below are fractions of it (conservative / strict) and
+    // the kill threshold stays off (a killed tab is worse than a slow one).
+    {
+        const long limit_mb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "420").c_str());
+        if (limit_mb > 0) {
+            WebKitMemoryPressureSettings *mp = webkit_memory_pressure_settings_new();
+            webkit_memory_pressure_settings_set_memory_limit(mp, static_cast<guint>(limit_mb));
+            webkit_memory_pressure_settings_set_conservative_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.5").c_str()));
+            webkit_memory_pressure_settings_set_strict_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.75").c_str()));
+            webkit_memory_pressure_settings_set_kill_threshold(mp, 0);
+            webkit_memory_pressure_settings_set_poll_interval(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_POLL_S", "5").c_str()));
+            webkit_network_session_set_memory_pressure_settings(mp);
+            webkit_memory_pressure_settings_free(mp);
+            log_msg("memory pressure: limit %ld MB, conservative %s, strict %s", limit_mb,
+                env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.5").c_str(), env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.75").c_str());
+        }
+    }
     g.session = webkit_network_session_new(data_dir.c_str(), cache_dir.c_str());
     webkit_cookie_manager_set_persistent_storage(webkit_network_session_get_cookie_manager(g.session),
         (data_dir + "/cookies.sqlite").c_str(), WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
 
+    // WPE_BROWSER_DEBUG_CACHE_MODEL: web (WebKit's default for browsers), doc (document viewer: no memory cache between pages),
+    // primary (a few resources). Measured on the TV: see build/jit254/REPORT.md (round 20).
+    {
+        const std::string cm = env_or("WPE_BROWSER_DEBUG_CACHE_MODEL", "web");
+        if (cm == "doc") webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
+        else if (cm == "primary") webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER);
+        else webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_WEB_BROWSER);
+        log_msg("cache model %s, page cache %s", cm.c_str(), env_or("WPE_BROWSER_DEBUG_PAGE_CACHE", "0") == "1" ? "on" : "off");
+    }
     g.settings = webkit_settings_new();
     webkit_settings_set_enable_spatial_navigation(g.settings, TRUE);
+    // The back/forward page cache keeps whole documents (DOM, layers, JS heaps) of the pages left behind: tens of MB
+    // each on a 2.6 GB TV that LG's apps share. Off by default; WPE_BROWSER_DEBUG_PAGE_CACHE=1 restores it.
+    webkit_settings_set_enable_page_cache(g.settings, env_or("WPE_BROWSER_DEBUG_PAGE_CACHE", "0") == "1");
     // No "webOS" in the user agent: sites' mobile checks list it (Palm's phones), e.g. webtv.nettv.com.np's
     // /iPhone|...|webOS|.../i showed its mobile page (2026-11-11). The rest is WPE's desktop Linux agent.
     webkit_settings_set_user_agent_with_application_details(g.settings, "WPEBrowser", "0.2");
@@ -2127,9 +2162,19 @@ int main(int, char **)
         WebKitFeatureList *features = webkit_settings_get_all_features();
         for (gsize i = 0; i < webkit_feature_list_get_length(features); ++i) {
             WebKitFeature *f = webkit_feature_list_get(features, i);
-            if (g_strcmp0(webkit_feature_get_identifier(f), "CrossOriginOpenerPolicy") == 0) {
+            const char *id = webkit_feature_get_identifier(f);
+            if (g_strcmp0(id, "CrossOriginOpenerPolicy") == 0) {
                 webkit_settings_set_feature_enabled(g.settings, f, FALSE);
                 log_msg("COOP off (direct presentation keeps pages in their web process)");
+            }
+            // WebKit 2.54 composites only the damaged rectangles and expects the previous frame's pixels to stay in the
+            // target. A libwpe backend window (libWPEBackend-webos, Mali EGL) does not keep them: the page showed black
+            // except where it animated (TV, 2026-11-20). Full repaints in direct mode; SHM mode keeps damage.
+            // WPE_BROWSER_DEBUG_DAMAGE=1 leaves damage tracking on (tests).
+            if (!getenv("WPE_BROWSER_DEBUG_DAMAGE") && (g_strcmp0(id, "PropagateDamagingInformation") == 0
+                    || g_strcmp0(id, "UseDamagingInformationForCompositing") == 0 || g_strcmp0(id, "UnifyDamagedRegions") == 0)) {
+                webkit_settings_set_feature_enabled(g.settings, f, FALSE);
+                log_msg("direct presentation: %s off", id);
             }
         }
         webkit_feature_list_unref(features);
