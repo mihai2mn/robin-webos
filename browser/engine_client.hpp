@@ -41,6 +41,7 @@ struct EngineCallbacks {
     std::function<void(TabId, WpeNoticeKind)> notice;  // something about the page to tell the user (WPE_ENGINE_NOTICE)
     std::function<void(TabId, bool on)> fullscreen;  // the page entered / left fullscreen
     std::function<void(TabId, const WpePresent &)> present;  // how the page reaches the screen (direct mode)
+    std::function<void()> discard_request;                       // the engine is short of memory: discard a background tab
     std::function<void(TabId, TabId opener)> tab_created;      // a page opened a window (the engine's tab id)
     std::function<void(TabId)> tab_close;                       // a page called window.close()
     std::function<void(const std::string &why)> exited;  // the engine process went away

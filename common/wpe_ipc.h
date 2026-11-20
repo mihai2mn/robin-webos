@@ -87,6 +87,8 @@ typedef enum {
     WPE_ENGINE_ICON,          /* WpeText: the page's best icon URL (apple-touch-icon, else a PNG/SVG/WebP icon link;
                                  empty if it declares none). The UI downloads it itself (WPE has no favicon API). */
     WPE_ENGINE_NOTICE,        /* WpeFlag: value = WpeNoticeKind, something about the page the UI tells the user */
+    WPE_ENGINE_DISCARD_REQUEST, /* no payload: memory is nearly gone (all pages share one web process): the UI should close its least
+                                 recently shown background tab (it keeps URL and title and reloads it when shown) */
 } WpeMsgType;
 
 typedef enum {

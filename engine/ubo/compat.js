@@ -263,6 +263,83 @@
         report(v, why ? 'hardware:' + why : 'software');
     };
     window.__wrenVideoPolicy.decide = decide;
+    // Fullscreen for a video on the hardware plane. WebKit's real fullscreen leaves the page black and the plane where it was: once an
+    // element is fullscreen, the video layer is no longer painted as a hole at all (no rectangle reaches the sink again), so the plane
+    // stays at its old place under a black page (TV, 2026-11-20, a plain MP4 page and a player page alike). The same effect without the
+    // engine's fullscreen: the element is stretched over the whole page with fixed positioning, the document answers as in fullscreen
+    // (fullscreenElement, fullscreenchange), and the video's layer keeps painting its hole where the element now is. Only for an element
+    // that is, or contains, a video on the hardware plane; everything else (and software videos) keeps WebKit's own fullscreen.
+    {
+        const emu = { el: null, style: null };
+        const hardwareVideoIn = el => {
+            if (!policy.on || !el) return false;
+            const vs = el instanceof HTMLVideoElement ? [el] : (el.querySelectorAll ? [...el.querySelectorAll('video')] : []);
+            return vs.some(v => v.isConnected && !v.hasAttribute('wren-software') && v.getAttribute('wren-policy') !== null && v.__wrenPolicy === 'hw');
+        };
+        const fire = el => {
+            for (const name of ['fullscreenchange', 'webkitfullscreenchange']) {
+                try { el.dispatchEvent(new Event(name, { bubbles: true })); } catch (e) {}
+                try { document.dispatchEvent(new Event(name, { bubbles: true })); } catch (e) {}
+            }
+        };
+        const enter = el => {
+            if (emu.el) leave();
+            emu.el = el;
+            emu.style = el.getAttribute('style');
+            el.style.setProperty('position', 'fixed', 'important');
+            for (const side of ['top', 'left']) el.style.setProperty(side, '0', 'important');
+            el.style.setProperty('width', '100vw', 'important');
+            el.style.setProperty('height', '100vh', 'important');
+            el.style.setProperty('max-width', 'none', 'important');
+            el.style.setProperty('max-height', 'none', 'important');
+            el.style.setProperty('margin', '0', 'important');
+            el.style.setProperty('z-index', '2147483647', 'important');
+            el.style.setProperty('background-color', 'rgba(0,0,0,0)', 'important');  // the hole must show the plane: nothing opaque behind the video
+            document.documentElement.setAttribute('wren-emulated-fullscreen', '');
+            log({ fullscreen: 'emulated enter', tag: el.tagName });
+            fire(el);
+        };
+        function leave() {
+            const el = emu.el;
+            if (!el) return;
+            emu.el = null;
+            if (emu.style === null) el.removeAttribute('style'); else el.setAttribute('style', emu.style);
+            document.documentElement.removeAttribute('wren-emulated-fullscreen');
+            log({ fullscreen: 'emulated leave', tag: el.tagName });
+            fire(el);
+        }
+        for (const [name, value] of [['fullscreenElement', () => emu.el || null], ['webkitFullscreenElement', () => emu.el || null],
+                                     ['webkitCurrentFullScreenElement', () => emu.el || null], ['fullscreen', () => !!emu.el], ['webkitIsFullScreen', () => !!emu.el]]) {
+            try {
+                const original = Object.getOwnPropertyDescriptor(Document.prototype, name);
+                Object.defineProperty(document, name, { configurable: true, get() { return emu.el ? value() : (original && original.get ? original.get.call(document) : null); } });
+            } catch (e) {}
+        }
+        for (const name of ['requestFullscreen', 'webkitRequestFullscreen', 'webkitRequestFullScreen']) {
+            const original = Element.prototype[name];
+            if (!original) continue;
+            Element.prototype[name] = function () {
+                if (hardwareVideoIn(this)) { enter(this); return Promise.resolve(); }
+                return original.apply(this, arguments);
+            };
+        }
+        for (const name of ['exitFullscreen', 'webkitExitFullscreen', 'webkitCancelFullScreen']) {
+            const original = Document.prototype[name];
+            if (!original) continue;
+            Document.prototype[name] = function () {
+                if (emu.el) { leave(); return Promise.resolve(); }
+                return original.apply(this, arguments);
+            };
+        }
+        // The remote's Back/Escape ends it, as it ends the real one.
+        addEventListener('keydown', e => {
+            if (emu.el && (e.key === 'Escape' || e.keyCode === 27 || e.keyCode === 461 || e.key === 'GoBack' || e.key === 'BrowserBack')) {
+                leave();
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        }, true);
+    }
     // A page that marks a video itself wins and is never re-decided. A wren-software this build wrote is NOT the page's:
     // the floor's preview marking (__wrenPreview) is an input to the policy, not an answer, and the floor writes it
     // immediately before the decision runs -- so this must ignore it, or every preview would read as page intent.

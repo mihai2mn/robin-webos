@@ -205,7 +205,7 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
     if (l.hw_audio) set_env(env, "WPEB_MEDIA_HW_AUDIO", "aac,pcm");  // the UI's decoder takes the page's AAC, and decoded audio as PCM (media socket)
     for (const auto &[name, value] : l.extra_env) {
         if (name.rfind("WEBKIT_", 0) == 0 || name.rfind("JSC_", 0) == 0 || name.rfind("WPE_BROWSER_DEBUG", 0) == 0 ||
-            name.rfind("GST_DEBUG", 0) == 0) {
+            name.rfind("GST_DEBUG", 0) == 0 || name.rfind("G_TLS_", 0) == 0) {  // G_TLS_GNUTLS_PRIORITY: TLS cipher order (network speed tests)
             set_env(env, name, value);
             WNK_LOGI(kCat, "engine env %s=%s (launch parameter)", name.c_str(), value.c_str());
         }
@@ -469,6 +469,9 @@ void EngineClient::handle(const uint8_t *buf, size_t n, int fd) {
             std::memcpy(&c, p, sizeof(c));
             cb_.tab_created(h.tab, c.opener);
         }
+        break;
+    case WPE_ENGINE_DISCARD_REQUEST:
+        if (cb_.discard_request) cb_.discard_request();
         break;
     case WPE_ENGINE_TAB_CLOSE:
         if (cb_.tab_close) cb_.tab_close(h.tab);

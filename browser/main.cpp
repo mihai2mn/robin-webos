@@ -96,7 +96,7 @@ constexpr int kMaxRestarts = 3;
 constexpr double kHoldOkMs = 550;  // OK held this long opens quick actions
 // Background tabs beyond this many keep only their URL and title (Chromium's tab discarding); they reload
 // when shown again. Each live tab costs WebKit memory, and a TV has little to spare.
-constexpr size_t kMaxLiveTabs = 4;
+constexpr size_t kMaxLiveTabs = 3;  // pages share one web process: its memory is the sum of the tabs' (2026-11-20: 4-5 tabs froze the TV)
 constexpr size_t kMaxTabs = 12;
 
 const std::vector<browser::wren::HomeData::Item> kShortcuts = {
@@ -290,6 +290,9 @@ class App : public wnk::app::Delegate {
         Tab *t = tab(id);
         if (t == nullptr) return;
         const bool changed = id != active_;
+        // The tab that held the hardware video is no longer shown (switched to, or opened by the page itself): its plane and
+        // decoder go with it. Without this the video window of the old page kept playing over the new tab.
+        if (changed && video_tab_ != 0 && video_tab_ != id) release_video_of(video_tab_, "its tab is not shown");
         active_ = id;
         t->last_shown_ms = ctx_->ui().now_ms();
         if (!t->url.empty() && !t->live) open_in_engine(*t, t->url);
@@ -1122,23 +1125,26 @@ class App : public wnk::app::Delegate {
         profile_.set_session(std::move(s), active);
     }
 
+    // Closes the least recently shown background tab's page (it keeps URL and title; shown again, it reloads). False if there is none.
+    bool discard_background_tab(TabId except, const char *why) {
+        Tab *victim = nullptr;
+        for (Tab &x : tabs_) {
+            if (x.live && x.id != except && x.id != active_ && (victim == nullptr || x.last_shown_ms < victim->last_shown_ms))
+                victim = &x;
+        }
+        if (victim == nullptr) return false;
+        WNK_LOGI(kCat, "discarding background tab %u (%s): %s", victim->id, victim->url.c_str(), why);
+        release_video_of(victim->id, "tab discarded");
+        engine_.tab_close(victim->id);
+        victim->live = false;
+        victim->loading = false;
+        return true;
+    }
+
     void open_in_engine(Tab &t, const std::string &url) {
         // Discard the least recently shown background tabs first (they keep URL and title).
         size_t live = static_cast<size_t>(std::count_if(tabs_.begin(), tabs_.end(), [](const Tab &x) { return x.live; }));
-        while (live >= kMaxLiveTabs) {
-            Tab *victim = nullptr;
-            for (Tab &x : tabs_) {
-                if (x.live && x.id != t.id && x.id != active_ &&
-                    (victim == nullptr || x.last_shown_ms < victim->last_shown_ms))
-                    victim = &x;
-            }
-            if (victim == nullptr) break;
-            WNK_LOGI(kCat, "discarding background tab %u (%s)", victim->id, victim->url.c_str());
-            engine_.tab_close(victim->id);
-            victim->live = false;
-            victim->loading = false;
-            --live;
-        }
+        while (live >= kMaxLiveTabs && discard_background_tab(t.id, "too many open pages")) --live;
         engine_.tab_open(t.id, url);
         t.live = true;
         t.url = url;
@@ -1225,6 +1231,7 @@ class App : public wnk::app::Delegate {
         };
         cb.tab_created = [this](TabId id, TabId opener) { add_page_tab(id, opener); };
         cb.tab_close = [this](TabId id) { close_page_tab(id); };
+        cb.discard_request = [this] { discard_background_tab(0, "the TV is short of memory"); refresh_chrome(); };
         cb.fullscreen = [this](TabId id, bool on) {
             Tab *t = tab(id);
             if (t == nullptr) return;
@@ -1274,9 +1281,11 @@ class App : public wnk::app::Delegate {
             const bool looping = now - t->crashed_ms < kCrashLoopMs;
             t->crashed_ms = now;
             t->crashed = !looping;
+            const bool memory = code == 1;  // WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT: the engine's memory guard or WebKit's kill threshold
             if (looping) {
                 if (id == active_) ctx_->ui().toast("This page stopped again (" + msg + "). Press Green to reload.", 6000);
             } else if (id == active_) {
+                if (memory) ctx_->ui().toast("This page used too much memory and was reloaded.", 6000);
                 reload_crashed(*t);
             }
         };

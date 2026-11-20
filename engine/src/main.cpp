@@ -73,6 +73,7 @@ struct Tab {
     uint32_t opener = 0;
     int64_t born_us = 0;
     bool pop_under_candidate = false;
+    bool memory_kill = false;                 // the memory guard is ending this tab's web process (reported as "used too much memory")
 };
 
 struct Engine {
@@ -524,6 +525,10 @@ gboolean on_tls_error(WebKitWebView *view, gchar *uri, GTlsCertificate *, GTlsCe
 
 void on_web_process_terminated(WebKitWebView *view, WebKitWebProcessTerminationReason reason, gpointer)
 {
+    if (Tab *killed = tab_by_id(tab_of_web_view(view)); killed && killed->memory_kill) {
+        killed->memory_kill = false;
+        reason = WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT;
+    }
     const char *why = reason == WEBKIT_WEB_PROCESS_CRASHED ? "crashed"
         : reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "used too much memory" : "was terminated";
     // With the time and page, so a crash can be matched to what was on screen (no core dumps: see main()).
@@ -840,10 +845,12 @@ std::string media_limit_script()
 {
     // uint64_t, not unsigned long: 32-bit on the softfp engine, 64-bit on the aarch64 one, and the same "PIXELS@FPS"
     // values must parse to the same numbers in both.
-    uint64_t pixels = 1280 * 720, fps = 30;
+    uint64_t pixels = 1280 * 720, fps = 30;  // software decoding
     bool vp9 = false;
     // LG's decoder (hardware video, WPEB_MEDIA_SOCKET) plays 4K60 H.264/HEVC/VP9.
     if (getenv("WPEB_MEDIA_SOCKET")) {
+        // The TV's decoder plays 4096x2304@60; the limit is the decoder's, not the page's. (A lower limit is only an emergency
+        // measure: WPE_BROWSER_DEBUG_MEDIA="PIXELS@FPS+vp9".)
         pixels = 3840 * 2160;
         fps = 60;
         vp9 = true;
@@ -1018,6 +1025,29 @@ std::string hybrid_video_script()
     return script;
 }
 
+// WPE_BROWSER_DEBUG_SCRIPT=<file>: a script of the tester's (a path the engine can read) run in every top frame at document end, e.g. to
+// click a page's play button or read a player's state while the page's console goes to the log (WPE_BROWSER_DEBUG_CONSOLE=1). Not a feature
+// for users: there is no way to set it but the launch parameter wpebEnv of a developer's launch.
+void add_debug_script(WebKitWebView *web_view)
+{
+    static const std::string source = [] {
+        std::string text;
+        if (const char *path = getenv("WPE_BROWSER_DEBUG_SCRIPT")) {
+            gchar *data = nullptr;
+            if (g_file_get_contents(path, &data, nullptr, nullptr)) { text = data; g_free(data); log_msg("debug script %s: %zu bytes", path, text.size()); }
+            else log_msg("debug script %s: unreadable", path);
+        }
+        return text;
+    }();
+    WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(web_view);
+    if (!ucm || source.empty())
+        return;
+    WebKitUserScript *script = webkit_user_script_new(source.c_str(), WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+        WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, nullptr, nullptr);
+    webkit_user_content_manager_add_script(ucm, script);
+    webkit_user_script_unref(script);
+}
+
 void add_hybrid_video(WebKitWebView *web_view, uint32_t id)
 {
     static const std::string source = hybrid_video_script();
@@ -1078,6 +1108,7 @@ void add_scroll_reporter(WebKitWebView *web_view, uint32_t id)
     add_site_quirks(web_view);
     add_media_limits(web_view);
     add_hybrid_video(web_view, id);
+    add_debug_script(web_view);
     add_console_reporter(web_view, id); // after the limits, so it wraps them and logs what pages are told
     WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(web_view);
     if (!ucm || !webkit_user_content_manager_register_script_message_handler(ucm, "wpebScroll", kScrollWorld))
@@ -1246,6 +1277,73 @@ void send_present(uint32_t tab, int32_t status, uint32_t width, uint32_t height)
 {
     WpePresent p { g.direct ? WPE_PRESENT_DIRECT : WPE_PRESENT_SHM, status, width, height };
     send_msg(WPE_ENGINE_PRESENT, tab, &p, sizeof(p));
+}
+
+// ---- memory guard ----------------------------------------------------------------------------------------------
+// WebKit's pressure handling works per process on its own limit; what freezes this TV is the sum: all web processes, LG's apps and
+// the swap together (2026-11-20: swap 599/599 MB, 56 MB free, load 15, several tabs open). So the engine watches the system: when
+// available memory AND free swap are both nearly gone, the web processes of tabs that are not shown are ended first (their page is
+// reloaded when the tab is shown again: the UI treats it like a crash), then, if it goes on, the shown tab's, which the UI reloads
+// once (a second time soon after it tells the user). WPE_BROWSER_DEBUG_MEM_GUARD=0 turns it off; _AVAIL_MB / _SWAP_PCT set the lines.
+std::string env_or(const char *name, const char *fallback);
+
+struct MemInfo { long avail_kb = -1, swap_total_kb = 0, swap_free_kb = 0; };
+
+bool read_meminfo(MemInfo &m)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f)
+        return false;
+    char line[128];
+    while (fgets(line, sizeof line, f)) {
+        long v;
+        if (sscanf(line, "MemAvailable: %ld", &v) == 1) m.avail_kb = v;
+        else if (sscanf(line, "SwapTotal: %ld", &v) == 1) m.swap_total_kb = v;
+        else if (sscanf(line, "SwapFree: %ld", &v) == 1) m.swap_free_kb = v;
+    }
+    fclose(f);
+    return m.avail_kb >= 0;
+}
+
+gboolean memory_guard_tick(gpointer)
+{
+    static const long avail_floor_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_AVAIL_MB", "350").c_str()) * 1024;
+    static const long swap_pct = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_SWAP_PCT", "12").c_str());
+    static gint64 last_kill_us = 0;
+    MemInfo m;
+    if (!read_meminfo(m))
+        return G_SOURCE_CONTINUE;
+    const bool swap_gone = m.swap_total_kb <= 0 || m.swap_free_kb * 100 < m.swap_total_kb * swap_pct;
+    if (m.avail_kb >= avail_floor_kb || !swap_gone)
+        return G_SOURCE_CONTINUE;
+    const gint64 now = g_get_monotonic_time();
+    if (now - last_kill_us < 6 * G_USEC_PER_SEC)  // give the last kill time to free its memory
+        return G_SOURCE_CONTINUE;
+    // The pages of all tabs live in ONE web process (no process swap, no COOP): ending it ends every tab, so while there are background
+    // tabs the UI is asked to close the least recently shown one (WPE_ENGINE_DISCARD_REQUEST); only with none left is the shown
+    // tab's process ended (the UI reloads it).
+    last_kill_us = now;
+    if (g.tabs.size() > 1) {
+        log_msg("memory guard: %ld MB available, swap %ld of %ld MB free: asking the UI to discard a background tab", m.avail_kb / 1024,
+            m.swap_free_kb / 1024, m.swap_total_kb / 1024);
+        send_msg(WPE_ENGINE_DISCARD_REQUEST, 0, nullptr, 0);
+        return G_SOURCE_CONTINUE;
+    }
+    Tab *victim = active_tab();
+    if (!victim || !victim->web_view)
+        return G_SOURCE_CONTINUE;
+    victim->memory_kill = true;
+    log_msg("memory guard: %ld MB available, swap %ld of %ld MB free: ending tab %u's web process (the only tab)", m.avail_kb / 1024,
+        m.swap_free_kb / 1024, m.swap_total_kb / 1024, victim->id);
+    webkit_web_view_terminate_web_process(victim->web_view);
+    return G_SOURCE_CONTINUE;
+}
+
+void start_memory_guard()
+{
+    if (!strcmp(env_or("WPE_BROWSER_DEBUG_MEM_GUARD", "1").c_str(), "0"))
+        return;
+    g_timeout_add_seconds(3, memory_guard_tick, nullptr);
 }
 
 void show_pending_tab();
@@ -1434,6 +1532,10 @@ void tab_activate(uint32_t id)
             awaited = old->id;
         set_focused(*old, false);
         set_visible(*old, false);
+        // A hidden page's video must not go on: the hardware plane and decoder are the shown tab's (the UI releases them), and a
+        // page that plays on behind another tab only costs memory and bandwidth. The page's own pause handlers see a normal pause.
+        static const char kPause[] = "document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})";
+        webkit_web_view_evaluate_javascript(old->web_view, kPause, sizeof(kPause) - 1, nullptr, nullptr, nullptr, nullptr, nullptr);
     }
     g.active = id;
     Tab *tab = active_tab();
@@ -2211,6 +2313,14 @@ int main(int, char **)
         }
     }
 
+#if defined(__arm__) && !defined(__aarch64__)
+    // TLS speed of the 32-bit network process: GnuTLS/nettle here have no AES-GCM acceleration for 32-bit ARM (the 64-bit code uses the CPU's
+    // crypto extensions, 32-bit code cannot), so with the default order (AES-GCM first) one core decrypts only ~50 Mbit/s: a 4K stream from
+    // a CDN (40-60 Mbit/s) rebuffered every ~2 s while plain HTTP on the same Wi-Fi ran at 215 Mbit/s (TV, 2026-11-20). ChaCha20-Poly1305
+    // runs at ~220 Mbit/s on the same core, so it goes first; the others stay as fallbacks for servers without it. Read by glib-networking
+    // when a connection is made; a value set by the user (the launch parameter wpebEnv G_TLS_GNUTLS_PRIORITY) is kept.
+    g_setenv("G_TLS_GNUTLS_PRIORITY", "NORMAL:-CIPHER-ALL:+CHACHA20-POLY1305:+AES-128-GCM:+AES-256-GCM:+AES-128-CBC:+AES-256-CBC", FALSE);
+#endif
     const std::string data_dir = env_or("WPE_BROWSER_DATA_DIR", "/tmp/wpe-browser/data");
     const std::string cache_dir = env_or("WPE_BROWSER_CACHE_DIR", "/tmp/wpe-browser/cache");
     g_mkdir_with_parents(data_dir.c_str(), 0700);
@@ -2231,7 +2341,10 @@ int main(int, char **)
             // strict first: the setter asserts conservative < strict, and the default strict is below 0.5
             webkit_memory_pressure_settings_set_strict_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.75").c_str()));
             webkit_memory_pressure_settings_set_conservative_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.5").c_str()));
-            webkit_memory_pressure_settings_set_kill_threshold(mp, 0);
+            // The kill threshold (a multiple of the limit, WebKit measures resident + swapped): a web process that goes on growing past
+            // its limit while the TV is already swapping (2026-11-20: 585 MB at a 420 MB limit, swap full, the whole TV frozen) is
+            // ended, and the UI reloads the tab (browser/main.cpp: crashed tabs). 0 = never.
+            webkit_memory_pressure_settings_set_kill_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_KILL", "1.3").c_str()));
             webkit_memory_pressure_settings_set_poll_interval(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_POLL_S", "5").c_str()));
             webkit_network_session_set_memory_pressure_settings(mp);  // the network process
             g.context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", mp, nullptr));  // the web processes
@@ -2335,6 +2448,7 @@ int main(int, char **)
     log_msg("ready: WPE WebKit %u.%u.%u, page %ux%u", ready.webkit_major, ready.webkit_minor, ready.webkit_micro,
         g.width, g.height);
 
+    start_memory_guard();
     g_main_loop_run(g.loop);
 
     for (uint32_t i = 0; i < WPE_IPC_FRAME_SLOTS; ++i) {
