@@ -132,7 +132,9 @@ static const char *const kOwned[] = {
     "GIO_EXTRA_MODULES", "GST_PLUGIN_PATH", "GST_PLUGIN_PATH_1_0", "GST_PLUGIN_SYSTEM_PATH", "GST_PLUGIN_SYSTEM_PATH_1_0",
     "GST_PLUGIN_SCANNER", "GST_PLUGIN_SCANNER_1_0", "FONTCONFIG_FILE", "XDG_DATA_DIRS", "PULSE_CLIENTCONFIG",
     "GALLIUM_DRIVER", "WEBKIT_SKIA_ENABLE_CPU_RENDERING", "WEBKIT_DISABLE_DEFAULT_EGL_DISPLAY",
-    "WEBKIT_SKIA_CPU_PAINTING_THREADS", "WPE_BROWSER_PRESENT", "WPE_BROWSER_RENDERER", NULL
+    "WEBKIT_SKIA_CPU_PAINTING_THREADS", "WPE_BROWSER_PRESENT", "WPE_BROWSER_RENDERER",
+    /* caches whose files are not arch-safe: see engine64_environ() */
+    "XDG_CACHE_HOME", "GST_REGISTRY", "GST_REGISTRY_1_0", "WPE_BROWSER_CACHE_DIR", "MESA_SHADER_CACHE_DIR", NULL
 };
 
 static char *kv(const char *k, const char *a, const char *b)
@@ -150,6 +152,24 @@ static char **engine64_environ(const char *base, const char *libs)
     while (environ && environ[count]) ++count;
     char **env = calloc(count + 32, sizeof *env);
     if (!env) return NULL;
+    /* Cache folders must not be shared with the 32-bit engine: the UI's GST_REGISTRY (<cache>/gstreamer-registry.bin) is not
+     * arch-tagged, so the 64-bit GStreamer rewrote it with aarch64 plugin paths and the 32-bit engine's web process then
+     * aborted on every media page ("GLib-ERROR overflow allocating 1090531961*4", TV 2026-11-20). Everything under
+     * XDG_CACHE_HOME (GStreamer registry, Mesa shader cache, fontconfig is arch-tagged but moves too, any WebKit/Skia/JSC
+     * cache file) and the HTTP cache (WPE_BROWSER_CACHE_DIR) move to an "aarch64" subfolder. Persistent site data
+     * (WPE_BROWSER_DATA_DIR: cookies, localStorage, IndexedDB: sqlite files and SSV blobs with explicit widths, the same
+     * WebKit version) stays shared on purpose, so logins survive switching engines. */
+    char xdg_cache[PATHBUF] = "", http_cache[PATHBUF] = "", gst_reg[PATHBUF] = "";
+    const char *xc = getenv("XDG_CACHE_HOME"), *hc = getenv("WPE_BROWSER_CACHE_DIR");
+    if (xc && xc[0] == '/' && join(xdg_cache, sizeof xdg_cache, xc, "/aarch64") == 0) {
+        mkdir(xdg_cache, 0700);
+        join(gst_reg, sizeof gst_reg, xdg_cache, "/gstreamer-registry.bin");
+    } else
+        xdg_cache[0] = '\0';
+    if (hc && hc[0] == '/' && join(http_cache, sizeof http_cache, hc, "/aarch64") == 0)
+        mkdir(http_cache, 0700);
+    else
+        http_cache[0] = '\0';
     size_t keep = 0;
     for (size_t i = 0; i < count; ++i) {
         const char *e = environ[i];
@@ -189,6 +209,13 @@ static char **engine64_environ(const char *base, const char *libs)
     env[keep++] = kv("GALLIUM_DRIVER", "llvmpipe", "");
     env[keep++] = kv("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1", "");
     env[keep++] = kv("WEBKIT_SKIA_CPU_PAINTING_THREADS", "4", "");
+    if (xdg_cache[0]) {
+        env[keep++] = kv("XDG_CACHE_HOME", xdg_cache, "");
+        env[keep++] = kv("GST_REGISTRY", gst_reg, "");
+        env[keep++] = kv("GST_REGISTRY_1_0", gst_reg, "");
+        env[keep++] = kv("MESA_SHADER_CACHE_DIR", xdg_cache, "/mesa");
+    }
+    if (http_cache[0]) env[keep++] = kv("WPE_BROWSER_CACHE_DIR", http_cache, "");
     env[keep] = NULL;
     return env;
 }
