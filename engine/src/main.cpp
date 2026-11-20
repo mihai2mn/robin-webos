@@ -75,6 +75,7 @@ struct Engine {
     WPEDisplay *display = nullptr;  // SHM mode only
     bool direct = false;            // WPE_BROWSER_PRESENT=direct and the backend loaded (direct.cpp)
     WebKitNetworkSession *session = nullptr;
+    WebKitWebContext *context = nullptr;  // our own (memory-pressure-settings is construct-only); never g.context
     WebKitSettings *settings = nullptr;
     std::map<uint32_t, Tab> tabs;
     uint32_t active = 0;
@@ -1286,7 +1287,7 @@ void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener)
             web_view = related
                 ? WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "related-view", related,
                     "settings", g.settings, "user-content-manager", ucm, "website-policies", policies, nullptr))
-                : WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "network-session", g.session,
+                : WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "web-context", g.context, "network-session", g.session,
                     "settings", g.settings, "user-content-manager", ucm, "website-policies", policies, nullptr));
             tab.ime = direct::create_ime(id, on_direct_ime);
             webkit_web_view_set_input_method_context(web_view, tab.ime);
@@ -1298,7 +1299,7 @@ void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener)
             // wpe_display_get_default(), which creates a display of another platform instead of ours.
             ? WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "related-view", related, "display", g.display,
                 "settings", g.settings, "user-content-manager", ucm, "website-policies", policies, nullptr))
-            : WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", g.display, "network-session", g.session,
+            : WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", g.display, "web-context", g.context, "network-session", g.session,
                 "settings", g.settings, "user-content-manager", ucm, "website-policies", policies, nullptr));
         tab.view = webkit_web_view_get_wpe_view(web_view);
     }
@@ -1607,7 +1608,7 @@ void on_initialize_web_process_extensions(WebKitWebContext *context, gpointer)
 
 void ubo_broadcast()
 {
-    webkit_web_context_send_message_to_all_extensions(webkit_web_context_get_default(),
+    webkit_web_context_send_message_to_all_extensions(g.context,
         webkit_user_message_new("wren-ubo:state", g_variant_new("(b@as@ass)", ubo.on, ubo_strv(ubo.allowed), ubo_strv(ubo.lists),
             ubo.my_filters.c_str())));
     log_msg("ad blocker: %s, %zu extra list(s), %zu site(s) allowed", ubo.on ? "on" : "off", ubo.lists.size(), ubo.allowed.size());
@@ -1792,7 +1793,7 @@ void ubo_attach(WebKitUserContentManager *ucm, WebKitWebView *view)
 
 void setup_ubo(const std::string &data_dir)
 {
-    WebKitWebContext *context = webkit_web_context_get_default();
+    WebKitWebContext *context = g.context;
     webkit_web_context_register_uri_scheme(context, "wren", on_wren_scheme, nullptr, nullptr);
     // Pages from the web can't load or frame it; it counts as a secure context of its own.
     WebKitSecurityManager *security = webkit_web_context_get_security_manager(context);
@@ -2088,16 +2089,19 @@ int main(int, char **)
         if (limit_mb > 0) {
             WebKitMemoryPressureSettings *mp = webkit_memory_pressure_settings_new();
             webkit_memory_pressure_settings_set_memory_limit(mp, static_cast<guint>(limit_mb));
-            webkit_memory_pressure_settings_set_conservative_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.5").c_str()));
+            // strict first: the setter asserts conservative < strict, and the default strict is below 0.5
             webkit_memory_pressure_settings_set_strict_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.75").c_str()));
+            webkit_memory_pressure_settings_set_conservative_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.5").c_str()));
             webkit_memory_pressure_settings_set_kill_threshold(mp, 0);
             webkit_memory_pressure_settings_set_poll_interval(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_POLL_S", "5").c_str()));
-            webkit_network_session_set_memory_pressure_settings(mp);
+            webkit_network_session_set_memory_pressure_settings(mp);  // the network process
+            g.context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", mp, nullptr));  // the web processes
             webkit_memory_pressure_settings_free(mp);
             log_msg("memory pressure: limit %ld MB, conservative %s, strict %s", limit_mb,
                 env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.5").c_str(), env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.75").c_str());
         }
     }
+    if (!g.context) g.context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, nullptr));
     g.session = webkit_network_session_new(data_dir.c_str(), cache_dir.c_str());
     webkit_cookie_manager_set_persistent_storage(webkit_network_session_get_cookie_manager(g.session),
         (data_dir + "/cookies.sqlite").c_str(), WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
@@ -2106,9 +2110,9 @@ int main(int, char **)
     // primary (a few resources). Measured on the TV: see build/jit254/REPORT.md (round 20).
     {
         const std::string cm = env_or("WPE_BROWSER_DEBUG_CACHE_MODEL", "web");
-        if (cm == "doc") webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
-        else if (cm == "primary") webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER);
-        else webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_WEB_BROWSER);
+        if (cm == "doc") webkit_web_context_set_cache_model(g.context, WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
+        else if (cm == "primary") webkit_web_context_set_cache_model(g.context, WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER);
+        else webkit_web_context_set_cache_model(g.context, WEBKIT_CACHE_MODEL_WEB_BROWSER);
         log_msg("cache model %s, page cache %s", cm.c_str(), env_or("WPE_BROWSER_DEBUG_PAGE_CACHE", "0") == "1" ? "on" : "off");
     }
     g.settings = webkit_settings_new();
