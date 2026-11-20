@@ -176,6 +176,20 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
     // the TV on 2026-11-11; open upstream: webkit.org/b/295780, b/275099). The only reported mitigation is the
     // iterative JSON parser (b/275099 comment 3); it costs nothing measurable.
     set_env(env, "JSC_useRecursiveJSONParse", "false");
+    // Video goes to LG's decoder on the video plane under our window, from the media server in this process
+    // (engine/gst/wpebmediasink.c). WebKit's generic "rialto" quirks find our sinks by name and punch a hole
+    // in the page where the video is. This is independent of the presentation mode: an SHM child needs the
+    // socket just as much as a direct one. The quirks are only exported when a socket genuinely exists --
+    // setting them without one makes WebKit select our sinks and fail every <video>.
+    if (!l.media_socket.empty()) {
+        set_env(env, "WPEB_MEDIA_SOCKET", l.media_socket);
+        set_env(env, "WEBKIT_GST_QUIRKS", "rialto");
+        set_env(env, "WEBKIT_GST_HOLE_PUNCH_QUIRK", "rialto");
+        set_env(env, "WEBKIT_GST_USE_PLAYBIN3", "1");
+        // SHM with hardware video ({"wpebShmVideo":"1"}, main.cpp): the engine draws the page on a transparent
+        // background so the hole WebKit punches carries alpha 0 in the SHM frame.
+        if (l.surface_group.empty()) set_env(env, "WPEB_TRANSPARENT_PAGE", "1");
+    }
     if (gpu && !l.surface_group.empty()) {
         set_env(env, "WPE_BROWSER_PRESENT", "direct");
         set_env(env, "WPEB_SURFACE_GROUP", l.surface_group);
@@ -185,16 +199,6 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
         if (!l.wayland_socket.empty()) set_env(env, "WPEB_WAYLAND_SOCKET", l.wayland_socket);
         if (l.screen_width > 0 && l.screen_height > 0)
             set_env(env, "WPEB_SCREEN_SIZE", std::to_string(l.screen_width) + "x" + std::to_string(l.screen_height));
-        if (!l.media_socket.empty()) {
-            // Video goes to LG's decoder on the video plane under the page (engine/gst/wpebmediasink.c): WebKit's
-            // generic "rialto" quirks find our sinks by name and punch a hole in the page where the video is.
-            // Needs playbin3 (WebKit only punches holes there) and direct presentation (a page surface with alpha
-            // above the video plane).
-            set_env(env, "WPEB_MEDIA_SOCKET", l.media_socket);
-            set_env(env, "WEBKIT_GST_QUIRKS", "rialto");
-            set_env(env, "WEBKIT_GST_HOLE_PUNCH_QUIRK", "rialto");
-            set_env(env, "WEBKIT_GST_USE_PLAYBIN3", "1");
-        }
     } else {
         set_env(env, "WPE_BROWSER_PRESENT", "shm");
     }

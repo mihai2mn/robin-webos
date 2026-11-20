@@ -1295,6 +1295,17 @@ void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener)
     }
     tab.web_view = web_view;
     g.tabs[id] = tab;
+    if (getenv("WPEB_TRANSPARENT_PAGE")) {
+        // Only for SHM hardware video (the UI sets WPEB_TRANSPARENT_PAGE): a transparent default background also
+        // makes every page without a background of its own transparent, which would show black or see-through
+        // until the UI composites the page over white outside the video rectangle.
+        // Transparent page background: WebKit punches a transparent hole where a hardware video plays
+        // (engine/gst/wpebmediasink.c), and the UI lets the TV's video plane show through it. With the default
+        // opaque background the hole would be white. A non-opaque colour also clears the opaque rectangles
+        // (wpe_view_set_opaque_rectangles), which is what makes WebKit clear the frame to transparent.
+        WebKitColor transparent = { 0, 0, 0, 0 };
+        webkit_web_view_set_background_color(web_view, &transparent);
+    }
     ubo_attach(webkit_web_view_get_user_content_manager(web_view), web_view);
 
     g_signal_connect(web_view, "notify::uri", G_CALLBACK(on_uri), nullptr);

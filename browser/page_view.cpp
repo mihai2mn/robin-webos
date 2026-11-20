@@ -36,9 +36,16 @@ bool PageView::build() {
     const char *vs =
         "attribute vec2 p; attribute vec2 t; varying vec2 vt;"
         "void main() { vt = t; gl_Position = vec4(p, 0.0, 1.0); }";
+    // The page frame carries WebKit's own alpha: where a hardware video plays, WebKit leaves the page
+    // transparent so the video plane under the UI shows through. WebKit's SHM bitmap is premultiplied but the
+    // kit blends straight alpha (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA), so un-premultiply here; the guard
+    // keeps fully transparent holes black instead of dividing by zero.
     const char *fs =
         "precision mediump float; varying vec2 vt; uniform sampler2D tex;"
-        "void main() { gl_FragColor = vec4(texture2D(tex, vt).bgr, 1.0); }";
+        "void main() {"
+        "  vec4 c = texture2D(tex, vt).bgra;"
+        "  gl_FragColor = vec4(c.a > 0.0 ? c.rgb / c.a : vec3(0.0), c.a);"
+        "}";
     program_ = glCreateProgram();
     const GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
     glAttachShader(program_, v);
@@ -119,7 +126,10 @@ void PageView::render_gl(const wnk::render::CustomTarget &, double) {
         if (f->tab == tab_) upload(*f);
         engine_.frame_done();
     }
-    glClearColor(1, 1, 1, 1);
+    // Clear transparent while a video plane is showing through this view: an opaque clear here would wipe
+    // the coverage the kit accumulated for the hole before the page quad is drawn.
+    if (clear_transparent_) glClearColor(0, 0, 0, 0);
+    else glClearColor(1, 1, 1, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     if (tex_w_ == 0) return;
 

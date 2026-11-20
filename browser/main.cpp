@@ -581,6 +581,14 @@ class App : public wnk::app::Delegate {
             close_tab(id);
         }
         direct_.dispatch();
+        // Hardware video: let the video plane under the UI show through the hole WebKit punches in the page.
+        // While video is active the frame clear becomes transparent (the kit accumulates destination alpha for
+        // exactly this) and the page view stops clearing opaquely, so the transparent hole stays transparent.
+        if (const bool video = media_.video_active(); video != video_clear_) {
+            video_clear_ = video;
+            ctx.ui().set_clear_color(video ? std::optional<wnk::render::Color>(wnk::render::Color{0, 0, 0, 0}) : std::nullopt);
+            screen_->page_->set_clear_transparent(video);
+        }
         // Experimental ({"wpebRaisePage":"1"}): the page above the UI while hardware video plays shows the page's
         // video controls, but the compositor then gives the page surface keyboard focus (remote keys lost).
         if (direct_.active() && raise_page_)
@@ -608,6 +616,10 @@ class App : public wnk::app::Delegate {
             if (w != screen_->page_->page_width() || h != screen_->page_->page_height()) {
                 screen_->page_->set_page_size(w, h);
                 engine_.resize(w, h);
+                // The video plane is placed in drawable pixels but WebKit reports the area in page pixels.
+                media_.set_page_mapping(static_cast<float>(r.x), static_cast<float>(r.y),
+                                        static_cast<float>(r.w) / static_cast<float>(w),
+                                        static_cast<float>(r.h) / static_cast<float>(h));
             }
         }
         if (Tab *t = tab(active_)) {
@@ -1270,15 +1282,25 @@ class App : public wnk::app::Delegate {
                 l.surface_group = direct_.group();
                 l.surface_layer = direct_.layer();
                 l.wayland_socket = direct_.socket();
-                // {"wpebVideo":"software"} keeps video on the CPU (GStreamer's own decoders, drawn into the page).
-                std::string why;
-                if (launch_param(params, "wpebVideo") == "software")
-                    WNK_LOGI(kCat, "hardware video off (launch parameter)");
-                else if (media_.running() || media_.start(l.runtime_dir + "/media.sock", direct_.has_video_window(), &why))
-                    l.media_socket = media_.path();
-                else
-                    WNK_LOGW(kCat, "hardware video unavailable: %s; software video", why.c_str());
             }
+        }
+        // Hardware video does not need direct presentation: the media server decodes in this (UI) process and
+        // shows video on the TV's video plane under our window (NDL). It used to start only in the direct
+        // branch, so an SHM session never got a media socket and WebKit always picked its software decoders.
+        // have_window is false in SHM, which selects NDL instead of LG's Starfish pipeline.
+        // In SHM mode this is experimental and OFF unless {"wpebShmVideo":"1"}: the page must then be transparent
+        // where the video is (the engine is told to use a transparent background, engine_client.cpp), and pages
+        // without a background of their own would show through too until the UI composites them over white
+        // outside the video rectangle. Without the switch an SHM session keeps software video, as before.
+        if (direct_.active() || launch_param(params, "wpebShmVideo") == "1") {
+            std::string why;
+            if (launch_param(params, "wpebVideo") == "software")
+                WNK_LOGI(kCat, "hardware video off (launch parameter)");
+            else if (media_.running() || media_.start(l.runtime_dir + "/media.sock",
+                         /*video_window=*/direct_.active() && direct_.has_video_window(), &why))
+                l.media_socket = media_.path();
+            else
+                WNK_LOGW(kCat, "hardware video unavailable: %s; software video", why.c_str());
         }
         if (!params.empty()) {
             const auto j = nlohmann::json::parse(params, nullptr, false);
@@ -1294,6 +1316,12 @@ class App : public wnk::app::Delegate {
         l.width = static_cast<uint32_t>((r.w > 0 ? r.w : 1920) * kRenderScale);
         l.height = static_cast<uint32_t>((r.h > 0 ? r.h : 880) * kRenderScale);
         screen_->page_->set_page_size(l.width, l.height);
+        {
+            const wnk::Rect pr = screen_->page_->screen_rect();
+            media_.set_page_mapping(static_cast<float>(pr.x), static_cast<float>(pr.y),
+                                    l.width ? static_cast<float>(pr.w) / static_cast<float>(l.width) : 1,
+                                    l.height ? static_cast<float>(pr.h) / static_cast<float>(l.height) : 1);
+        }
         const wnk::Rect sr = screen_->screen_rect();
         l.screen_width = static_cast<uint32_t>(sr.w > 0 ? sr.w : 1920);
         l.screen_height = static_cast<uint32_t>(sr.h > 0 ? sr.h : 1080);
@@ -1366,8 +1394,10 @@ class App : public wnk::app::Delegate {
     float dock_inset_ = -1;          // the page's top inset below the docked toolbar (logical px)
     browser::DirectOwner direct_;
     browser::MediaServer media_;
+    // True while the frame clear is overridden to transparent for a hardware video plane.
+    bool video_clear_ = false;
     bool raise_page_ = false;
-    std::vector<std::pair<TabId, double>> pending_closes_;  // window.close(): destroyed a little later  // hardware video for pages (direct presentation only)
+    std::vector<std::pair<TabId, double>> pending_closes_;  // window.close(): destroyed a little later
     bool direct_failed_ = false;           // stays in SHM mode for the rest of this run
     bool ok_down_ = false, ok_long_ = false;  // OK held back by on_key (Hold OK)
     std::string pending_show_;  // launch parameter wpebShow

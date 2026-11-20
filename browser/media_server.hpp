@@ -34,6 +34,10 @@ public:
     bool video_active() const { return owner_.load() != 0; }
     // App lifecycle: LG's decoder must know when the app leaves the foreground.
     static void set_foreground(bool foreground);
+    // Page -> screen mapping for the video area: WebKit reports the video rectangle in page-surface pixels
+    // (see engine/gst/wpebmediasink.c, the sink's "rectangle" property), while the decoder wants drawable
+    // pixels and our window scrolls the page inside the view. Called on the main thread on every resize.
+    void set_page_mapping(float x, float y, float scale_x, float scale_y);
 
 private:
     void accept_loop();
@@ -50,6 +54,8 @@ private:
     LgMediaPlayer lg_;
     bool use_lg_ = false;  // the owner's stream is on lg_ (else on NDL)
     bool ndl_loaded_ = false;
+    // Page -> screen transform for WPEB_MEDIA_AREA (guarded by mutex_).
+    float page_x_ = 0, page_y_ = 0, page_scale_x_ = 1, page_scale_y_ = 1;
     std::atomic<uint64_t> owner_{0};  // the connection whose stream is loaded (latest LOAD wins)
     std::atomic<uint64_t> next_id_{1};
     std::atomic<int> connections_{0};

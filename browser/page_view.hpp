@@ -17,6 +17,10 @@ class PageView : public wnk::ui::GlView {
     ~PageView() override;
 
     // Page size in CSS px the engine renders at (the texture is scaled to the view).
+    // True while a hardware video plane is under the UI: the page is drawn with its own alpha and this view
+    // must not clear opaquely, so the video shows through the hole WebKit punches.
+    void set_clear_transparent(bool on) { clear_transparent_ = on; }
+
     void set_page_size(uint32_t w, uint32_t h) { page_w_ = w, page_h_ = h; }
     uint32_t page_width() const { return page_w_; }
     uint32_t page_height() const { return page_h_; }
@@ -60,6 +64,7 @@ class PageView : public wnk::ui::GlView {
 
     EngineClient &engine_;
     uint32_t page_w_ = 1280, page_h_ = 720;
+    bool clear_transparent_ = false;
     GLuint program_ = 0, tex_ = 0;
     GLint u_tex_ = -1;
     uint32_t tex_w_ = 0, tex_h_ = 0;

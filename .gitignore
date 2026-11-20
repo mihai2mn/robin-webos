@@ -16,3 +16,4 @@ __pycache__/
 /tools/media-tests/generated/
 !docs/screenshots/*.png
 !browser/branding/*.png
+!browser/icons/*.png

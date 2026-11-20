@@ -54,6 +54,14 @@ MediaServer::~MediaServer() { stop(); }
 
 void MediaServer::set_foreground(bool foreground) { wnk::media::NdlBackend::set_app_foreground(foreground); }
 
+void MediaServer::set_page_mapping(float x, float y, float scale_x, float scale_y) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    page_x_ = x;
+    page_y_ = y;
+    page_scale_x_ = scale_x > 0 ? scale_x : 1;
+    page_scale_y_ = scale_y > 0 ? scale_y : 1;
+}
+
 bool MediaServer::start(const std::string &path, bool video_window, std::string *why) {
     if (running()) return true;
     // LG's media pipeline (StarfishMediaAPIs) is the main path; NDL's v2 API (webOS 5+) only a fallback. webOS 3.x
@@ -420,9 +428,15 @@ void MediaServer::serve(int fd, uint64_t id) {
             WpebMediaArea a;
             std::memcpy(&a, payload.data(), sizeof(a));
             std::lock_guard<std::mutex> lock(mutex_);
+            // WebKit reports the video area in page-surface pixels; map it to drawable pixels with the page
+            // rectangle the UI keeps up to date (set_page_mapping), so the plane follows scrolling and the
+            // render scale instead of sitting at a fixed page-pixel offset.
+            const auto sx = page_x_ + static_cast<float>(a.x) * page_scale_x_;
+            const auto sy = page_y_ + static_cast<float>(a.y) * page_scale_y_;
+            const auto sw = static_cast<float>(a.width) * page_scale_x_;
+            const auto sh = static_cast<float>(a.height) * page_scale_y_;
             if (backend_ && a.width > 0 && a.height > 0 && (owner_.load() == id || owner_.load() == 0) && !use_lg_)
-                backend_->set_area(wnk::Rect{static_cast<float>(a.x), static_cast<float>(a.y), static_cast<float>(a.width),
-                                             static_cast<float>(a.height)});
+                backend_->set_area(wnk::Rect{sx, sy, sw, sh});
             break;
         }
         case WPEB_MEDIA_PAUSE: {
