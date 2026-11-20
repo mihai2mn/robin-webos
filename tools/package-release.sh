@@ -28,7 +28,9 @@ WORK=${WORK:-$BR/release-work}
 IDS=${IDS:-"dev release"}
 VERSION=${VERSION:-0.3.3}
 STAGE_BASE=${STAGE_BASE:-$HOME/wren/build/engine-stage-jit/engine}
-WK254=${WK254:-$BR/br-out/build/wpewebkit-2.54.3}
+WK_SHARED=${WK_SHARED:-$BR/br-out/build/wpewebkit-2.54.3}
+WK_TREE=${WK_TREE:-$WORK/wk-tree}
+WK254=$WK_TREE   # what stage takes the engine libraries from
 STAGE64=${STAGE64:-$repo/build/engine-stage-aarch64/engine}
 UBO_IPK=${UBO_IPK:-$repo/dist/org.sostk.wpebrowser_0.3.3-ubo3_arm.ipk}
 NDK=${WEBOS_NDK:-$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}
@@ -60,7 +62,8 @@ do_clone() {
 }
 
 # ---- overlay: uncommitted packaging/launcher files of the working tree (empty once they are committed) -------------
-OVERLAY=${OVERLAY-"engine/launcher tools"}
+# Opt-in (testing only): copy working-tree paths over the clean clone. A release builds the commit as is.
+OVERLAY=${OVERLAY-}
 do_overlay() {
     for p in $OVERLAY; do say "overlay from the working tree: $p"; mkdir -p "$src/$(dirname "$p")"; cp -a "$repo/$p" "$src/$(dirname "$p")/"; done
     # some scripts are stored with CRLF in git (tools/build-webos-backend.sh): bash chokes on pipefail followed by CR
@@ -98,6 +101,46 @@ do_backend() {
     say "libWPEBackend-webos.so + libwpeb-owner.so"
     ( cd "$src" && rm -rf build/webos-backend && WEBOS_NDK="$NDK" bash tools/build-webos-backend.sh ) > "$WORK/backend.log" 2>&1 || { tail "$WORK/backend.log"; exit 1; }
     ls -l "$src/build/webos-backend/libWPEBackend-webos.so" "$src/build/webos-backend/libwpeb-owner.so" | sed "s/^/   /"
+}
+
+
+# ---- webkit32: libWPEWebKit = pristine 2.54.3 + patches/wpewebkit/2.54.3/0001..N, built in a PRIVATE COPY of the build tree -------
+# The shared in-tree build (WK_SHARED, used by every agent via build/jit254/wk254.sh) is not trusted to match the series: files get
+# patched temporarily there. So: (1) a pristine source tree from the Buildroot download plus the repo's series in order; (2) a copy
+# of the shared tree (cp -a keeps mtimes, so ninja stays incremental; bind-mounted at the SAME path in the container, so the absolute
+# paths in build.ninja stay valid and the shared tree is never touched); (3) every source file that differs from the pristine tree is
+# overwritten in the copy; (4) ninja in the copy (ccache is in the container's environment as in wk254.sh); (5) the copy must then differ
+# from the pristine tree in 0 files, or this phase fails. Stage takes libWPEWebKit, the helpers and the injected bundle from the copy.
+# Disk: the copy is ~6 GB (removed with `webkit32 clean`).
+do_webkit32() {
+    local tb=$BR/dl/wpewebkit/wpewebkit-2.54.3.tar.xz pr=$WORK/wk-pristine
+    [ "${1:-}" = clean ] && { rm -rf "$WK_TREE" "$pr"; return; }
+    [ -f "$tb" ] || { echo "no $tb" >&2; exit 1; }
+    say "pristine 2.54.3 + patches -> $pr"
+    rm -rf "$pr"; mkdir -p "$pr"; tar xf "$tb" -C "$pr" --strip-components=1
+    local n=0 p
+    for p in "$src"/buildroot-external/patches/wpewebkit/2.54.3/*.patch; do
+        patch -p1 -s --no-backup-if-mismatch -d "$pr" < "$p" || { echo "patch $p failed" >&2; exit 1; }
+        n=$((n+1))
+    done
+    echo "   applied $n patches (last: $(basename "$p"))"
+    if [ ! -d "$WK_TREE" ] || [ "${REFRESH_WK:-0}" = 1 ]; then
+        say "copying the build tree $WK_SHARED -> $WK_TREE ($(du -sm "$WK_SHARED" | cut -f1) MB)"
+        rm -rf "$WK_TREE"; mkdir -p "$(dirname "$WK_TREE")"
+        ( exec 9>"$BR/.wk254.lock"; flock 9; cp -a "$WK_SHARED" "$WK_TREE" )
+    fi
+    say "comparing the copy with the pristine sources"
+    ( cd "$pr" && diff -rq . "$WK_TREE" 2>/dev/null | grep -E '^Files .* differ$' | sed -E 's/^Files \.\/(.*) and .* differ$/\1/' ) > "$WORK/wk-differing.txt" || true
+    echo "   $(wc -l < "$WORK/wk-differing.txt") differing source files"; sed 's/^/     /' "$WORK/wk-differing.txt" | head -20
+    while read -r f; do cp "$pr/$f" "$WK_TREE/$f"; done < "$WORK/wk-differing.txt"
+    say "ninja in the private copy${FULL:+ (FULL=1: clean first, hours)}"
+    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/build -v "$BR:/build" -v "$WK_TREE:/build/br-out/build/wpewebkit-2.54.3" -w /build \
+        --cpu-shares 256 webos-browser-build:1 nice -n 10 \
+        bash -c 'cd /build/br-out/build/wpewebkit-2.54.3 && export PATH=/build/br-out/host/bin:$PATH && if [ -n "$FULL" ]; then ninja -t clean >/dev/null; fi && ninja -j12' > "$WORK/webkit32-ninja.log" 2>&1 \
+        || { tail -25 "$WORK/webkit32-ninja.log"; exit 1; }
+    tail -1 "$WORK/webkit32-ninja.log" | cut -c1-120
+    ( cd "$pr" && diff -rq . "$WK_TREE" 2>/dev/null | grep -cE '^Files .* differ$' || true ) | sed 's/^/   differing files after the sync: /'
+    rm -rf "$pr"
 }
 
 # ---- stage: <WORK>/stage-<id>/engine = base + WebKit 2.54.3 + launcher in front + uBO ---------------------------
@@ -224,10 +267,11 @@ case "$phase" in
     launcher) do_launcher ;;
     engine32) do_engine32 ;;
     backend) do_backend ;;
+    webkit32) do_webkit32 "${2:-}" ;;
     stage) do_stage ;;
     ui) do_ui ;;
     add64) do_add64 ;;
     sums) do_sums ;;
-    all) do_clone; do_overlay; do_launcher; do_engine32; do_backend; do_stage; do_ui; do_add64; do_sums ;;
+    all) do_clone; do_overlay; do_launcher; do_webkit32; do_engine32; do_backend; do_stage; do_ui; do_add64; do_sums ;;
     *) echo "usage: $0 all|clone|launcher|engine32|backend|stage|ui|add64|sums" >&2; exit 2 ;;
 esac
