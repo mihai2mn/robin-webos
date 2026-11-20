@@ -1,0 +1,84 @@
+--- a/media/src/starfish_backend.cpp
++++ b/media/src/starfish_backend.cpp
+@@ -76,6 +76,7 @@
+     // SDL-webOS exported window (already loaded with the app's SDL); optional, webOS 5+ only works.
+     const char *(*create_window)(int type) = nullptr;
+     int (*set_window)(const char *id, void *src, void *dst) = nullptr;  // SDL_bool, SDL_Rect*
++    int (*set_crop)(const char *id, void *org, void *src, void *dst) = nullptr;  // SDL_webOSExportedSetCropRegion (optional)
+     void (*destroy_window)(const char *id) = nullptr;
+     std::string why;
+     bool tried = false;
+@@ -137,6 +138,7 @@
+     g_api.set_hdr_info = reinterpret_cast<decltype(g_api.set_hdr_info)>(dlsym(h, "_ZN17StarfishMediaAPIs10setHdrInfoEPKc"));
+     g_api.create_window = reinterpret_cast<decltype(g_api.create_window)>(dlsym(RTLD_DEFAULT, "SDL_webOSCreateExportedWindow"));
+     g_api.set_window = reinterpret_cast<decltype(g_api.set_window)>(dlsym(RTLD_DEFAULT, "SDL_webOSSetExportedWindow"));
++    g_api.set_crop = reinterpret_cast<decltype(g_api.set_crop)>(dlsym(RTLD_DEFAULT, "SDL_webOSExportedSetCropRegion"));
+     g_api.destroy_window = reinterpret_cast<decltype(g_api.destroy_window)>(dlsym(RTLD_DEFAULT, "SDL_webOSDestroyExportedWindow"));
+     if (g_api.create_window == nullptr || g_api.set_window == nullptr || g_api.destroy_window == nullptr) {
+         g_api.create_window = nullptr;
+@@ -1084,6 +1086,18 @@
+ void StarfishBackend::set_area(const Rect &pixels) {
+     std::lock_guard<std::mutex> lock(mutex_);
+     area_ = pixels;
++    crop_[0] = crop_[1] = 0;
++    crop_[2] = crop_[3] = 1;
++    place_locked();
++}
++
++void StarfishBackend::set_area_cropped(const Rect &pixels, float fx, float fy, float fw, float fh) {
++    std::lock_guard<std::mutex> lock(mutex_);
++    area_ = pixels;
++    crop_[0] = fx;
++    crop_[1] = fy;
++    crop_[2] = fw;
++    crop_[3] = fh;
+     place_locked();
+ }
+ 
+@@ -1094,10 +1108,22 @@
+     }
+     if (window_id_.empty() || !usable()) return;
+     // Source: the coded picture (or the area until the stream is known); destination: the area.
+-    SdlRect src{0, 0, format_.video ? format_.video->width : static_cast<int>(area_.w),
+-                format_.video ? format_.video->height : static_cast<int>(area_.h)};
++    const int pw = format_.video ? format_.video->width : static_cast<int>(area_.w);
++    const int ph = format_.video ? format_.video->height : static_cast<int>(area_.h);
++    SdlRect src{static_cast<int>(crop_[0] * pw + 0.5f), static_cast<int>(crop_[1] * ph + 0.5f),
++                std::max(2, static_cast<int>(crop_[2] * pw + 0.5f)), std::max(2, static_cast<int>(crop_[3] * ph + 0.5f))};
+     SdlRect dst{static_cast<int>(area_.x), static_cast<int>(area_.y), static_cast<int>(area_.w), static_cast<int>(area_.h)};
+-    const int rc = api().set_window(window_id_.c_str(), &src, &dst);
++    const bool cropped = crop_[0] != 0 || crop_[1] != 0 || crop_[2] != 1 || crop_[3] != 1;
++    int rc;
++    if (cropped && api().set_crop != nullptr) {
++        SdlRect org{0, 0, pw, ph};  // the whole picture; src is the part of it that is shown
++        rc = api().set_crop(window_id_.c_str(), &org, &src, &dst);
++    } else {
++        if (cropped) {  // no crop call: scale the whole picture into the visible part
++            src = SdlRect{0, 0, pw, ph};
++        }
++        rc = api().set_window(window_id_.c_str(), &src, &dst);
++    }
+     WNK_LOGI(kCat, "place %dx%d -> %d,%d %dx%d rv=%d", src.w, src.h, dst.x, dst.y, dst.w, dst.h, rc);
+ }
+ 
+--- a/media/include/wnk/media/starfish_backend.hpp
++++ b/media/include/wnk/media/starfish_backend.hpp
+@@ -130,6 +130,10 @@
+     bool flush(std::string *error) override;
+     void unload() override;
+     void set_area(const Rect &pixels) override;  // main thread
++    // Like set_area, with a source crop: pixels is where the visible part of the picture goes and (fx, fy, fw, fh) is that
++    // part as fractions of the whole picture (0..1). A video that is partly off the screen is cut by the compositor
++    // instead of squashed into the visible part. Main thread.
++    void set_area_cropped(const Rect &pixels, float fx, float fy, float fw, float fh);
+     int64_t position_us() const override;
+     bool pause(bool paused) override;
+     bool splice_settled() const override;
+@@ -188,6 +192,7 @@
+     mutable std::mutex mutex_;  // format_, area_, object_
+     StreamFormat format_;
+     Rect area_{0, 0, 1920, 1080};
++    float crop_[4] = {0, 0, 1, 1};  // the source rectangle as fractions of the picture (mutex_)
+     void *object_ = nullptr;     // the current Load's object (never freed)
+     unsigned epoch_ = 0;
+     bool loaded_ = false;

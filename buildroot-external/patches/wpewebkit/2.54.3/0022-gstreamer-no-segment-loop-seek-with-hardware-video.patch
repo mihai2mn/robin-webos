@@ -1,0 +1,31 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] gstreamer: no SEGMENT (seamless) loop seek with the hardware video sink
+
+A looping <video> makes MediaPlayerPrivateGStreamer::play() schedule an "initial SEGMENT seek" (doSeek(..., isAsync, isSegment)),
+a non-flushing seek sent through gst_element_call_async(). In basesrc that seek first has to stop webkitwebsrc's streaming task,
+which is blocked pushing into the full multiqueue (the video sink consumes in real time), so it only completes once the source
+has delivered the whole file. Meanwhile the main thread's state change for the page being hidden (gst_element_set_state ->
+the pipeline's recursive state lock, owned by the seek's pool thread) blocks: a tab opened while a looping video plays stalled
+6-10 s (TV: 6.3 s with a 400 KB clip, 10.5 s when opened earlier). When the seek finally completes it also rewinds playback
+to 0, a visible jump back some seconds into the video.
+
+With the hardware video sink (WPEB_MEDIA_SOCKET names its decoder service) there is no frame to keep on screen across the
+loop, so seamless looping buys nothing: loop with the normal flushing seek at EOS. TV: tab-2 "load started" 6.3-10.5 s -> 0.11-0.15 s,
+loop restarts every 19 s as the clip is long, no early rewind.
+---
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -4114,6 +4114,13 @@
+         return false;
+     }
+ 
++    // With the hardware video sink (WPEB_MEDIA_SOCKET names its decoder service) there is no frame to keep on screen across
++    // the loop, and the initial SEGMENT seek is a non-flushing seek that cannot complete until the source's streaming
++    // thread has pushed the whole file into the full multiqueue; the main thread's pause/hide state change waits for the
++    // pipeline's state lock behind it (a stall of seconds, until the source reaches EOS). Loop with a flushing seek at EOS.
++    if (g_getenv("WPEB_MEDIA_SOCKET"))
++        return false;
++
+     return player->isLooping() && m_isSegmentSeekAllowed;
+ }
+ 

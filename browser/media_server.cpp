@@ -80,7 +80,7 @@ void MediaServer::set_page_mapping(float x, float y, float scale_x, float scale_
     page_scale_y_.store(scale_y > 0 ? scale_y : 1);
 }
 
-bool MediaServer::start(const std::string &path, bool video_window, std::string *why) {
+bool MediaServer::start(const std::string &path, bool video_window, std::string *why, const std::string &backend) {
     if (running()) return true;
     // LG's media pipeline (StarfishMediaAPIs) is the main path; NDL's v2 API (webOS 5+) only a fallback. webOS 3.x
     // and 4.x have the pipeline but an older NDL without NDL_DirectMediaLoad. The pipeline shows video in a video
@@ -115,14 +115,15 @@ bool MediaServer::start(const std::string &path, bool video_window, std::string 
     }
     path_ = path;
     listen_fd_ = fd;
-    // WPEB_STARFISH=1 (or the file /tmp/wpeb-starfish): LG's buffer-feed pipeline with its own exported video window
-    // (the kit's StarfishBackend) instead of NDL, whose decoder is low-delay and shows B-frames out of order.
-    // The exported window is created here, on the main thread.
-    const bool want_starfish = std::getenv("WPEB_STARFISH") != nullptr ? std::strcmp(std::getenv("WPEB_STARFISH"), "0") != 0
-                                                                       : ::access("/tmp/wpeb-starfish", F_OK) == 0;
+    // Starfish (LG's buffer-feed pipeline, its own exported video window, a reordering decoder) unless asked for NDL: NDL's
+    // decoder is low-delay and shows B-frames out of order. The exported window is created here, on the main thread.
+    bool want_starfish = backend != "ndl";
+    if (const char *e = std::getenv("WPEB_STARFISH")) want_starfish = std::strcmp(e, "0") != 0;
+    else if (::access("/tmp/wpeb-starfish", F_OK) == 0) want_starfish = true;
     std::string sf_why;
     if (want_starfish && wnk::media::StarfishBackend::available(&sf_why)) {
         auto sf = std::make_unique<wnk::media::StarfishBackend>();
+        starfish_ = sf.get();
         WNK_LOGI(kCat, "video through the Starfish pipeline (video plane: %s)",
                  sf->plane() == wnk::media::VideoPlane::ExportedWindow ? "exported window"
                  : sf->plane() == wnk::media::VideoPlane::Acb          ? "ACB"
@@ -182,7 +183,16 @@ void MediaServer::commit_area(bool frame_ready) {
                 a.x, a.y, a.width, a.height, page_x_.load(), page_y_.load(), scx, scy, sx, sy, sw, sh);
     // Only the owner's stream drives the plane and the hole: another tab's sink must not repaint them.
     const bool from_owner = owner_.load() == p.id || owner_.load() == 0;
-    if (backend_ && a.width > 0 && a.height > 0 && from_owner && !use_lg_) backend_->set_area(plane_rect(sx, sy, sw, sh));
+    if (backend_ && a.width > 0 && a.height > 0 && from_owner && !use_lg_) {
+        const wnk::Rect vis = plane_rect(sx, sy, sw, sh);
+        // Starfish's exported window takes a source rectangle: a video partly off the screen is cut by the compositor,
+        // not squashed into the visible part (NDL has no such call). A parked (not visible) video keeps the whole picture.
+        const bool parked = vis.w <= 16 && vis.h <= 9 && vis.x == 0 && vis.y == 0 && (sx > 16 || sy > 9 || sw > 16 || sh > 9);
+        if (starfish_ && !parked && sw > 0 && sh > 0)
+            starfish_->set_area_cropped(vis, (vis.x - sx) / sw, (vis.y - sy) / sh, vis.w / sw, vis.h / sh);
+        else
+            backend_->set_area(vis);
+    }
     if (from_owner) {
         // The same rectangle in PAGE pixels: page_view composites opacity outside it and transparency inside it.
         hole_x_.store(static_cast<float>(a.x));
@@ -267,6 +277,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     uint64_t generation = 0;     // qm; a flush or load drops what was queued before it
     bool stop = false;
     bool ready = false;          // qm; the decoder is loaded (units wait until then)
+    std::atomic<bool> eos_pushed{false};  // the decoder was told the stream ended (cleared by a flush or load)
     std::thread feeder([&] {
         Clock::time_point blocked_until[2] = {};
         bool ended[2] = {};          // feeder thread; the streams whose end was reached, in eos_generation
@@ -301,6 +312,13 @@ void MediaServer::serve(int fd, uint64_t id) {
                     if (owner_.load() == id && use_lg_ && !pushed_eos && ended[0] && (ended[1] || !lg_.has_audio())) {
                         lg_.end_of_stream();
                         pushed_eos = true;
+                        eos_pushed = true;
+                    }
+                    // The Starfish backend's decoder (it reorders) keeps the last pictures until it is told the stream ended.
+                    else if (owner_.load() == id && !use_lg_ && ndl_loaded_ && backend_ && !pushed_eos && ended[0]) {
+                        backend_->end_of_stream();
+                        pushed_eos = true;
+                        eos_pushed = true;
                     }
                 }
                 ql.lock();
@@ -335,6 +353,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         queues[0].clear();
         queues[1].clear();
         ++generation;
+        eos_pushed = false;
         qcv.notify_all();
     };
     const auto set_ready = [&](bool r) {
@@ -544,6 +563,10 @@ void MediaServer::serve(int fd, uint64_t id) {
             if (h.size < sizeof(uint32_t)) break;
             uint32_t paused;
             std::memcpy(&paused, payload.data(), sizeof(paused));
+            // The page's element "ended" as soon as the sink had handed over the last unit, which is up to seconds before the
+            // decoder has shown its buffered pictures: pausing then cut the end of the video off (TV: the last 2 s of a clip
+            // never appeared). A decoder that was told the stream ended is left to drain.
+            if (paused != 0 && eos_pushed.load()) break;
             std::lock_guard<std::mutex> lock(mutex_);
             if (owner_.load() == id) {
                 if (use_lg_) lg_.pause(paused != 0);

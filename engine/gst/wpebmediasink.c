@@ -942,6 +942,12 @@ static void wpeb_video_sink_finalize(GObject *object)
 static void wpeb_video_sink_init(WpebVideoSink *self)
 {
     g_mutex_init(&self->io_lock);
+    /* Buffers before the segment start are the frames a seek only needs to decode from the previous keyframe up to its
+     * target (qtdemux, accurate seeks). GstBaseSink drops them by default ("dropping buffer, out of clipping segment"), so
+     * the hardware decoder was fed from a P-frame: after a seek to a non-keyframe position the picture showed the next
+     * keyframe and froze (TV, 2026-11-20: seeks to 16.5 s and 18.5 s of a clip with a keyframe every 2 s). The decoder
+     * drops what it decodes before the seek target itself. */
+    gst_base_sink_set_drop_out_of_segment(GST_BASE_SINK(self), FALSE);
     g_mutex_init(&self->lock);
     g_atomic_int_set(&self->fd, -1);
     self->parameter_sets = g_byte_array_new();

@@ -1378,7 +1378,8 @@ class App : public wnk::app::Delegate {
             if (launch_param(params, "wpebVideo") == "software")
                 WNK_LOGI(kCat, "hardware video off (launch parameter)");
             else if (media_.running() || media_.start(l.runtime_dir + "/media.sock",
-                         /*video_window=*/direct_.active() && direct_.has_video_window(), &why))
+                         /*video_window=*/direct_.active() && direct_.has_video_window(), &why,
+                         launch_param(params, "wpebVideoBackend")))
                 l.media_socket = media_.path();
             else
                 WNK_LOGW(kCat, "hardware video unavailable: %s; software video", why.c_str());

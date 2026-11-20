@@ -16,7 +16,7 @@
 #include "wpe_media_ipc.h"
 #include <chrono>
 
-namespace wnk::media { class MediaBackend; class NdlBackend; }
+namespace wnk::media { class MediaBackend; class NdlBackend; class StarfishBackend; }
 
 namespace browser {
 
@@ -29,7 +29,10 @@ public:
 
     // Listens on `path` if LG's decoder library is there; false with *why otherwise.
     // video_window: the compositor offers video windows, without which LG's media pipeline cannot show video.
-    bool start(const std::string &path, bool video_window, std::string *why);
+    // backend: "starfish" (default: LG's buffer-feed pipeline with its own exported video window, which reorders B-frames),
+    // "ndl" (NDL direct media: low-delay decoder, B-frames out of order), or "" for the default. Starfish falls back to NDL
+    // when it is not available. WPEB_STARFISH=0|1 (debug) overrides.
+    bool start(const std::string &path, bool video_window, std::string *why, const std::string &backend = "");
     void stop();
     bool running() const { return listen_fd_ >= 0; }
     const std::string &path() const { return path_; }
@@ -75,6 +78,7 @@ private:
     // As Chromium on webOS: a stream with a video window on the page surface plays through LG's media pipeline
     // bound to it (LgMediaPlayer); without one, through NDL (whose video sits below the UI window).
     std::unique_ptr<wnk::media::MediaBackend> backend_;
+    wnk::media::StarfishBackend *starfish_ = nullptr;  // backend_ when it is the Starfish one
     LgMediaPlayer lg_;
     bool use_lg_ = false;  // the owner's stream is on lg_ (else on NDL)
     bool ndl_loaded_ = false;
