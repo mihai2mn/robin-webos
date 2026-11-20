@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# tvdrive: drive the dev copy of Wren on the LG TV like a person with the remote, with screenshots.
+# Works from Windows Git Bash and WSL (needs bash, ssh, scp, base64; ffmpeg optional, for small screenshots).
+# See README.md. Env: TVDRIVE_HOST (ssh host, default lgtv), TVDRIVE_OUT (output dir, default ./tvdrive-out),
+# TVDRIVE_APP (app id, default org.sostk.wpebrowser.dev).
+set -u
+HOST=${TVDRIVE_HOST:-lgtv}
+APP=${TVDRIVE_APP:-org.sostk.wpebrowser.dev}
+OUT=${TVDRIVE_OUT:-$PWD/tvdrive-out}
+DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+RUN=/tmp/$APP
+LOCKDIR=/tmp/wren-devapp.lock
+REMOTE_PATH='export PATH=/opt/bin:/opt/sbin:$PATH;'
+
+if [ "$APP" = "org.sostk.wpebrowser" ]; then echo "tvdrive: refusing to touch the real app $APP" >&2; exit 2; fi
+
+tvssh() { timeout "${TVDRIVE_TIMEOUT:-120}" ssh -o BatchMode=yes -o ConnectTimeout=100 "$HOST" "$@"; }
+tvsh()  { tvssh "$REMOTE_PATH $1"; }
+# run the TV-side input helper: ti CMD ARGS...
+ti() { local a="" x; for x in "$@"; do a="$a $(printf '%q' "$x")"; done
+       tvssh "/opt/bin/python3 - $a" < "$DIR/tvinput.py"; }
+die() { echo "tvdrive: $*" >&2; exit 1; }
+num() { case "$1" in ''|*[!0-9-]*) die "not a number: '$1'";; esac; }
+now() { date +%H%M%S; }
+ffm() { command -v ffmpeg 2>/dev/null || command -v ffmpeg.exe 2>/dev/null; }
+
+usage() { cat <<'EOF'
+tvdrive <command> [args]   (screen is 1920x1080; x y are screenshot pixels)
+  shot [file]            screenshot -> file (default $TVDRIVE_OUT/shot-HHMMSS.png) + file-small.jpg (640 px wide)
+  open <url> [--fresh] [--wait S]   open a URL in the dev app (--fresh closes the app first); waits S s (default 8)
+  click x y              move the pointer to x,y and click
+  move x y               move the pointer to x,y (absolute)
+  nudge dx dy            move the pointer relative to where it is (units; ~3.1 px each)
+  scroll dy [x y]        wheel: dy>0 = down, <0 = up (one unit ~ 60 screen px), pointer first goes to x y (default 960 600)
+  drag x1 y1 x2 y2       move to x1,y1, move to x2,y2 with the button flag set (the TV's input socket delivers no
+                         button press to the app, so this does NOT select text or drag sliders; it only moves)
+  key <name>...          remote keys: up down left right ok back home red green yellow blue ch+ ch- play pause
+                         stop rew ff info 0-9 ... (or any raw network-input name, e.g. LIST); "ok" = ENTER
+  type "text"            text into the focused page field by clicking LG's on-screen keyboard (opens when a field is
+                         focused: click the field first). Letters, digits, space . , @ ? ; \n = Enter, \b = backspace
+  log [n]                last n (default 40) lines of events.log + engine.log; "log --follow" streams events.log
+  state                  foreground app, memory, swap, web process RSS, app pids
+  lock <owner> | unlock <owner>   the shared dev-app lock (/tmp/wren-devapp.lock); hold it <= 25 min
+  close                  close the dev app
+EOF
+}
+
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case "$cmd" in
+  ''|help|-h|--help) usage ;;
+
+  shot)
+    mkdir -p "$OUT"
+    f=${1:-$OUT/shot-$(now).png}; mkdir -p "$(dirname "$f")"
+    tvsh "tv shot /tmp/tvdrive-shot.png >/dev/null" || die "shot failed"
+    scp -q -o BatchMode=yes "$HOST:/tmp/tvdrive-shot.png" "$f" || die "scp failed"
+    echo "$f"
+    ff=$(ffm)
+    if [ -n "$ff" ]; then
+      s="${f%.*}-small.jpg"
+      "$ff" -y -loglevel error -i "$f" -vf scale=640:-1 -q:v 4 "$s" 2>/dev/null && echo "$s"
+    fi ;;
+
+  open)
+    url=${1:-}; [ -n "$url" ] || die "open <url> [--fresh]"; shift
+    fresh=0; wait=8
+    while [ $# -gt 0 ]; do case "$1" in --fresh) fresh=1;; --wait) wait=$2; shift;; esac; shift; done
+    esc=${url//\\/\\\\}; esc=${esc//\"/\\\"}
+    if [ $fresh = 1 ]; then tvsh "tv close $APP >/dev/null 2>&1; sleep 2"; fi
+    tvsh "tv launch $APP '{\"target\":\"$esc\"}'" || die "launch failed"
+    sleep "$wait" ;;
+
+  close) tvsh "tv close $APP" ;;
+
+  move)   num "${1:-}"; num "${2:-}"; ti abs "$1" "$2" ;;
+  nudge)  num "${1:-}"; num "${2:-}"; ti move "$1" "$2" ;;
+  click)  num "${1:-}"; num "${2:-}"; ti click "$1" "$2" ;;
+  scroll) num "${1:-}"; x=${2:-960}; y=${3:-600}; ti scroll "$1" "$x" "$y" ;;
+  drag)   for i in 1 2 3 4; do num "${!i:-}"; done; ti drag "$1" "$2" "$3" "$4" ;;
+
+  key)
+    [ $# -gt 0 ] || die "key <name>..."
+    names=()
+    for k in "$@"; do
+      case "$(echo "$k" | tr 'A-Z' 'a-z')" in
+        ok|enter|select) n=ENTER;; up) n=UP;; down) n=DOWN;; left) n=LEFT;; right) n=RIGHT;;
+        back|return) n=BACK;; home) n=HOME;; exit) n=EXIT;; red) n=RED;; green) n=GREEN;; yellow) n=YELLOW;; blue) n=BLUE;;
+        ch+|chup|channelup) n=CHANNELUP;; ch-|chdown|channeldown) n=CHANNELDOWN;;
+        play) n=PLAY;; pause) n=PAUSE;; stop) n=STOP;; rew|rewind) n=REWIND;; ff|fastforward) n=FASTFORWARD;;
+        info) n=INFO;; menu) n=MENU;; list) n=LIST;; mute) n=MUTE;; vol+) n=VOLUMEUP;; vol-) n=VOLUMEDOWN;;
+        *) n=$k;;
+      esac
+      names+=("$n")
+    done
+    ti key "${names[@]}" ;;
+
+  type)
+    [ $# -gt 0 ] || die 'type "text"'
+    txt=$(printf '%b' "$1")
+    b=$(printf '%s' "$txt" | base64 | tr -d '\n')
+    ti type "$b" ;;
+
+  log)
+    if [ "${1:-}" = "--follow" ] || [ "${1:-}" = "-f" ]; then
+      tvssh "tail -n 20 -f $RUN/events.log"
+    else
+      n=${1:-40}; num "$n"
+      echo "== events.log (last $n)"; tvssh "tail -n $n $RUN/events.log"
+      echo "== engine.log (last $n)"; tvssh "tail -n $n $RUN/engine.log"
+    fi ;;
+
+  state)
+    tvsh "
+echo \"foreground: \$(tv 2>/dev/null | grep -m1 'On screen')\"
+grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo | tr -s ' ' | tr '\n' ';'; echo
+for p in \$(ps | grep -E 'wpebrowser|wpe-engine|WPEWebProc|WPENetworkProc' | grep -v grep | awk '{print \$1}'); do
+  echo \"pid \$p \$(cat /proc/\$p/comm) rss_kb=\$(awk '/VmRSS/{print \$2}' /proc/\$p/status)\"
+done
+echo \"events.log tail:\"; tail -n 2 $RUN/events.log | cut -c1-170
+echo \"lock: \$(head -n1 $LOCKDIR/owner 2>/dev/null || echo free)\"" ;;
+
+  lock)
+    owner=${1:-}; [ -n "$owner" ] || die "lock <owner-name>"
+    if tvsh "mkdir $LOCKDIR 2>/dev/null && echo '$owner' > $LOCKDIR/owner && date +%s >> $LOCKDIR/owner"; then echo "lock taken by $owner (hold <= 25 min)"
+    else echo "lock held by: $(tvssh "head -n1 $LOCKDIR/owner" 2>/dev/null)"; exit 1; fi ;;
+  unlock)
+    owner=${1:-}; [ -n "$owner" ] || die "unlock <owner-name>"
+    cur=$(tvssh "head -n1 $LOCKDIR/owner 2>/dev/null")
+    if [ "$cur" = "$owner" ]; then tvssh "rm -rf $LOCKDIR" && echo "lock released"
+    else echo "not released: lock owner is '${cur:-nobody}', not '$owner'"; exit 1; fi ;;
+
+  *) usage; exit 2 ;;
+esac

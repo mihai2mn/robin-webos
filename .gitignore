@@ -17,3 +17,5 @@ __pycache__/
 !docs/screenshots/*.png
 !browser/branding/*.png
 !browser/icons/*.png
+/tools/tvdrive/tvdrive-out/
+/tools/tvdrive/proof/
