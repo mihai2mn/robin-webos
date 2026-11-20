@@ -67,6 +67,27 @@ constexpr const char *kVersion = "0.3.3";
 // Pages are rendered at this fraction of the view's size in 1920x1080 logical units and scaled up by the
 // GPU: CPU rendering at about 1280 px wide keeps scrolling usable, and CSS px at that size read well from a sofa.
 constexpr float kRenderScale = 2.0f / 3.0f;
+
+// How a WebKit video rectangle is converted to screen pixels. WebKit's video sink reports the rectangle in the pixels
+// of the buffer the engine paints, which is the view's size x kRenderScale x the engine's device scale (set_scale:
+// 1.5 with sharp text or direct presentation, else 1.0), so a rectangle scales by 1 / (kRenderScale * device scale):
+// identity when the engine renders at screen resolution (the default), 1.5 when it renders at kRenderScale only.
+// Measured on the TV 2026-11-20 (device scale 1.5): a video at CSS (137,211) 640x360 reports (205,404) 960x540 in
+// buffer pixels, i.e. already screen pixels. Only the view origin is added.
+struct PageToScreen {
+    float x = 1, y = 1;
+    const char *which = "page-px";
+};
+PageToScreen page_to_screen_scale(float engine_scale) {
+    // WPE_BROWSER_PAGE_RECT=page forces the old 1/kRenderScale conversion (debugging).
+    static const bool page_px = [] {
+        const char *v = std::getenv("WPE_BROWSER_PAGE_RECT");
+        return v && std::strcmp(v, "page") == 0;
+    }();
+    if (page_px) return PageToScreen{1.0f / kRenderScale, 1.0f / kRenderScale, "page-px(1/kRenderScale)"};
+    const float k = 1.0f / (kRenderScale * (engine_scale > 0 ? engine_scale : 1.0f));
+    return PageToScreen{k, k, engine_scale > 1.0f ? "buffer-px(device scale 1.5: identity)" : "buffer-px(1/kRenderScale)"};
+}
 constexpr double kChromeSlideMs = 160;     // toolbar slide in/out
 constexpr double kChromeDwellMs = 350;  // the pointer rests this long at the top edge before the toolbar comes
 constexpr float kChromeLeaveMargin = 24.0f;  // logical px below the toolbar that send it away again
@@ -245,6 +266,7 @@ class App : public wnk::app::Delegate {
             activate(next);
         }
         if (live) engine_.tab_close(id);
+        if (hole_tab_ == id) hole_tab_ = 0;
         tabs_.erase(find(id));
         if (tabs_.empty()) {
             active_ = 0;
@@ -559,6 +581,9 @@ class App : public wnk::app::Delegate {
             pending_show_ = show;
             pending_show_at_ms_ = ctx_->ui().now_ms() + 4000;
         }
+        // EXPERIMENT: {"wpebVtTexture":"<media url>"} enables the libvt texture probe (PageView).
+        if (const std::string vt = launch_param(params_json, "wpebVtTexture"); !vt.empty())
+            browser::set_vt_texture_url_from_launch(vt);
         std::string url = launch_param(params_json, "target");
         if (url.empty()) url = launch_param(params_json, "url");
         if (url.empty()) return;
@@ -584,8 +609,32 @@ class App : public wnk::app::Delegate {
         // Hardware video: let the video plane under the UI show through the hole WebKit punches in the page.
         // While video is active the frame clear becomes transparent (the kit accumulates destination alpha for
         // exactly this) and the page view stops clearing opaquely, so the transparent hole stays transparent.
+        // The video rectangle WebKit reports (page pixels) is the "hole" the page is composited through: the
+        // shader draws it transparent so the hardware plane shows, and opaque-over-white everywhere else, so a
+        // page without a background of its own stays white whether or not {"wpebShmVideo":"1"} is set.
+        {
+            // Only while THIS tab's video is on the plane: otherwise a stale rectangle from a previous stream
+            // (or another tab) would keep the page transparent where nothing is playing.
+            // The rectangle belongs to the tab that was showing when it last changed (the media stream has no tab id):
+            // another tab must not get a transparent hole at that place, and switching back restores it.
+            if (const uint64_t serial = media_.hole_serial(); serial != hole_serial_seen_) {
+                hole_serial_seen_ = serial;
+                hole_tab_ = active_;
+            }
+            const bool live = media_.video_active() && tab(active_) != nullptr && hole_tab_ == active_ && media_.hole().width > 0;
+            if (live) {
+                const auto hole = media_.hole();
+                screen_->page_->set_hole(hole.x, hole.y, hole.width, hole.height);
+            } else {
+                screen_->page_->set_hole(0, 0, 0, 0);
+            }
+        }
         if (const bool video = media_.video_active(); video != video_clear_) {
             video_clear_ = video;
+            // While video plays, the frame under the page must be transparent so the plane is visible through
+            // the hole; otherwise the theme background is restored. Outside the hole the page quad is opaque, so
+            // a transparent frame clear never lets the theme show through a page that has content there.
+
             ctx.ui().set_clear_color(video ? std::optional<wnk::render::Color>(wnk::render::Color{0, 0, 0, 0}) : std::nullopt);
             screen_->page_->set_clear_transparent(video);
         }
@@ -616,10 +665,19 @@ class App : public wnk::app::Delegate {
             if (w != screen_->page_->page_width() || h != screen_->page_->page_height()) {
                 screen_->page_->set_page_size(w, h);
                 engine_.resize(w, h);
-                // The video plane is placed in drawable pixels but WebKit reports the area in page pixels.
-                media_.set_page_mapping(static_cast<float>(r.x), static_cast<float>(r.y),
-                                        static_cast<float>(r.w) / static_cast<float>(w),
-                                        static_cast<float>(r.h) / static_cast<float>(h));
+            }
+            // Where WebKit's video rectangle is measured, and the single conversion to screen pixels: the rectangle is
+            // in engine-buffer pixels (view x kRenderScale x device scale), so it scales by 1/(kRenderScale x device
+            // scale) and the view origin is added once (see page_to_screen_scale). Redone on a real layout or scale
+            // change only: this used to run every frame from the render thread.
+            const PageToScreen m = page_to_screen_scale(engine_scale_);
+            if (mapping_dirty_ || r.x != map_x_ || r.y != map_y_ || r.w != map_w_ || r.h != map_h_) {
+                mapping_dirty_ = false;
+                map_x_ = r.x, map_y_ = r.y, map_w_ = r.w, map_h_ = r.h;
+                media_.set_page_mapping(static_cast<float>(r.x), static_cast<float>(r.y), m.x, m.y);
+                WNK_LOGI(kCat, "video area mapping: view=(%d,%d %dx%d) page=%ux%u rect_in=%s scale=(%.4f,%.4f)",
+                         static_cast<int>(r.x), static_cast<int>(r.y), static_cast<int>(r.w), static_cast<int>(r.h), w, h,
+                         m.which, static_cast<double>(m.x), static_cast<double>(m.y));
             }
         }
         if (Tab *t = tab(active_)) {
@@ -992,6 +1050,12 @@ class App : public wnk::app::Delegate {
         // Direct presentation always does: the page surface is shown 1:1, not scaled to the page area.
         const bool full = profile_.settings.sharp_text || screen_->page_->direct();
         engine_.set_scale(full ? static_cast<uint32_t>(1000.0f / kRenderScale + 0.5f) : 1000u);
+        const float scale = full ? 1.0f / kRenderScale : 1.0f;
+        if (scale != engine_scale_) {
+            engine_scale_ = scale;
+            // The mapping is recomputed at the next layout; force it (the guard there compares the view rectangle).
+            mapping_dirty_ = true;
+        }
     }
 
     void refresh_bookmarks() {}  // bookmarks show in the side panel, filled when it opens
@@ -1317,10 +1381,22 @@ class App : public wnk::app::Delegate {
         l.height = static_cast<uint32_t>((r.h > 0 ? r.h : 880) * kRenderScale);
         screen_->page_->set_page_size(l.width, l.height);
         {
-            const wnk::Rect pr = screen_->page_->screen_rect();
-            media_.set_page_mapping(static_cast<float>(pr.x), static_cast<float>(pr.y),
-                                    l.width ? static_cast<float>(pr.w) / static_cast<float>(l.width) : 1,
-                                    l.height ? static_cast<float>(pr.h) / static_cast<float>(l.height) : 1);
+            // Runs at engine start, before the first layout: guard on a usable rect/size, and log around the
+            // call so a fault here is localised instead of surfacing as a bare SIGSEGV in the crash handler.
+            // The page view has NOT been laid out yet: View::screen_rect() is to_screen(frame_) and frame_ has
+            // no initialiser (ui/include/wnk/ui/view.hpp:213), so reading it here returns uninitialised memory
+            // (measured: prx=1149698048, prw/ prh identical garbage). Feeding that to the plane corrupts NDL.
+            // Use the full view as the page rect until the first real layout: the per-frame block below
+            // replaces this mapping as soon as the layout exists, so nothing depends on it staying.
+            const wnk::Rect cr = screen_->screen_rect();
+            if (cr.w > 0 && cr.h > 0 && l.width && l.height) {
+                media_.set_page_mapping(0.0f, 0.0f, page_to_screen_scale(engine_scale_).x, page_to_screen_scale(engine_scale_).y);
+                WNK_LOGI(kCat, "mapping(start) view=(%d,%d %dx%d) page=%ux%u (page rect not laid out yet)",
+                         static_cast<int>(cr.x), static_cast<int>(cr.y), static_cast<int>(cr.w), static_cast<int>(cr.h),
+                         l.width, l.height);
+            } else {
+                WNK_LOGW(kCat, "mapping(start) skipped: screen not valid yet");
+            }
         }
         const wnk::Rect sr = screen_->screen_rect();
         l.screen_width = static_cast<uint32_t>(sr.w > 0 ? sr.w : 1920);
@@ -1405,6 +1481,12 @@ class App : public wnk::app::Delegate {
     double ok_down_ms_ = 0;
     wnk::input::KeyEvent ok_key_{};
     bool direct_fallback_pending_ = false;
+    // Device scale the engine renders at (see apply_settings) and the page rectangle the video mapping was last made for.
+    float engine_scale_ = 1.0f / kRenderScale;
+    bool mapping_dirty_ = true;
+    float map_x_ = -1, map_y_ = -1, map_w_ = -1, map_h_ = -1;
+    uint64_t hole_serial_seen_ = 0;  // MediaServer::hole_serial() last looked at, and the tab showing then
+    TabId hole_tab_ = 0;
 };
 
 BrowserScreen::BrowserScreen(App &app, browser::EngineClient &engine) : Screen("browser"), app_(app) {
@@ -1536,7 +1618,7 @@ bool BrowserScreen::on_back(wnk::ui::Ui &ui) {
 
 int main(int argc, char **argv) {
     wnk::app::AppConfig config;
-    config.fallback_app_id = "org.sostk.wpebrowser";
+    config.fallback_app_id = WPEB_APP_ID_STRING;
     config.title = "Wren";
     config.font_regular = "fonts/Manrope-Regular.ttf";
     config.font_bold = "fonts/Manrope-SemiBold.ttf";

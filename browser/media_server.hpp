@@ -38,6 +38,18 @@ public:
     // (see engine/gst/wpebmediasink.c, the sink's "rectangle" property), while the decoder wants drawable
     // pixels and our window scrolls the page inside the view. Called on the main thread on every resize.
     void set_page_mapping(float x, float y, float scale_x, float scale_y);
+    // Clears the video rectangle (owner released, or another stream took over).
+    void clear_hole();
+    // The video rectangle in PAGE pixels (x, y, width, height), all zero when no video area is known. This is
+    // the "hole" WebKit punched in the page: the UI composites opacity outside it and transparency inside it.
+    struct Hole {
+        float x = 0, y = 0, width = 0, height = 0;
+        bool empty() const { return width <= 0 || height <= 0; }
+    };
+    // Bumped on every change of the rectangle (store or clear): lets the UI notice that a new rectangle arrived.
+    uint64_t hole_serial() const { return hole_serial_.load(); }
+    Hole hole() const { return Hole{hole_x_.load(), hole_y_.load(), hole_w_.load(), hole_h_.load()}; }
+
 
 private:
     void accept_loop();
@@ -55,7 +67,12 @@ private:
     bool use_lg_ = false;  // the owner's stream is on lg_ (else on NDL)
     bool ndl_loaded_ = false;
     // Page -> screen transform for WPEB_MEDIA_AREA (guarded by mutex_).
-    float page_x_ = 0, page_y_ = 0, page_scale_x_ = 1, page_scale_y_ = 1;
+    // Read by the media thread from the WPEB_MEDIA_AREA handler, written by the render thread each
+    // layout: four floats, so plain atomics -- a mutex here was taken every frame from the render thread.
+    std::atomic<float> page_x_{0}, page_y_{0}, page_scale_x_{1}, page_scale_y_{1};
+    std::atomic<uint64_t> hole_serial_{0}, hole_id_{0};  // hole_id_: the stream that sent the stored rectangle
+    std::atomic<float> hole_x_{0}, hole_y_{0}, hole_w_{0}, hole_h_{0};  // page px; read by the render thread
+
     std::atomic<uint64_t> owner_{0};  // the connection whose stream is loaded (latest LOAD wins)
     std::atomic<uint64_t> next_id_{1};
     std::atomic<int> connections_{0};

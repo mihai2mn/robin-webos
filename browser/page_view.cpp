@@ -5,11 +5,21 @@
 #include "wnk/ui/ui.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace browser {
 namespace {
 
 constexpr const char *kCat = "page";
+
+// The libvt experiment switch, resolved ONCE per process: this sits in the render loop, so a per-frame
+// std::getenv is exactly what the reviewer flagged. Empty or "0" = the experiment is off.
+const char *vt_texture_switch() {
+    static const char *const value = std::getenv("WPE_BROWSER_DEBUG_VT_TEXTURE");
+    return value;
+}
 
 GLuint compile(GLenum type, const char *src) {
     const GLuint s = glCreateShader(type);
@@ -26,6 +36,8 @@ PageView::PageView(EngineClient &engine) : engine_(engine) {
 }
 
 PageView::~PageView() {
+    if (const GLuint vt_tex = vt_ ? vt_->texture() : 0; vt_tex != 0) glDeleteTextures(1, &vt_tex);
+    vt_.reset();
     if (tex_ != 0) glDeleteTextures(1, &tex_);
     if (program_ != 0) glDeleteProgram(program_);
 }
@@ -36,15 +48,26 @@ bool PageView::build() {
     const char *vs =
         "attribute vec2 p; attribute vec2 t; varying vec2 vt;"
         "void main() { vt = t; gl_Position = vec4(p, 0.0, 1.0); }";
-    // The page frame carries WebKit's own alpha: where a hardware video plays, WebKit leaves the page
-    // transparent so the video plane under the UI shows through. WebKit's SHM bitmap is premultiplied but the
-    // kit blends straight alpha (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA), so un-premultiply here; the guard
-    // keeps fully transparent holes black instead of dividing by zero.
+    // Compositing, correct by default with no launch parameter:
+    //   * inside the video "hole"  -> straight alpha, so the hardware video plane under the UI shows through;
+    //   * outside the hole         -> the page premultiplied over white at alpha 1, so a page with no background
+    //                                of its own stays white instead of turning black or see-through.
+    // WebKit's SHM bitmap is premultiplied (AcceleratedSurface) while the kit blends straight alpha
+    // (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA), hence the un-premultiply inside the hole. `hole` is in texture
+    // (uv) coordinates; a zero-size hole means there is no video area and the whole page takes the outside path.
     const char *fs =
         "precision mediump float; varying vec2 vt; uniform sampler2D tex;"
+        "uniform vec4 hole; uniform float has_hole;"
         "void main() {"
-        "  vec4 c = texture2D(tex, vt).bgra;"
-        "  gl_FragColor = vec4(c.a > 0.0 ? c.rgb / c.a : vec3(0.0), c.a);"
+        "  vec4 c = texture2D(tex, vt).bgra;"          // premultiplied: c.rgb <= c.a
+        "  float inside = has_hole"
+        "    * step(hole.x, vt.x) * step(vt.x, hole.x + hole.z)"
+        "    * step(hole.y, vt.y) * step(vt.y, hole.y + hole.w);"
+        "  vec3 straight = c.a > 0.0 ? c.rgb / c.a : vec3(0.0);"
+        "  vec4 hole_out = vec4(straight, c.a);"                       // let the plane show through
+        "  vec4 opaque_out = vec4(c.rgb + (1.0 - c.a) * vec3(1.0), 1.0);"  // over white, opaque
+        "  gl_FragColor = mix(opaque_out, hole_out, inside);"
+
         "}";
     program_ = glCreateProgram();
     const GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
@@ -64,6 +87,8 @@ bool PageView::build() {
         return false;
     }
     u_tex_ = glGetUniformLocation(program_, "tex");
+    u_hole_ = glGetUniformLocation(program_, "hole");
+    u_has_hole_ = glGetUniformLocation(program_, "has_hole");
     glGenTextures(1, &tex_);
     glBindTexture(GL_TEXTURE_2D, tex_);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -113,7 +138,7 @@ void PageView::upload(const EngineFrame &f) {
     }
 }
 
-void PageView::render_gl(const wnk::render::CustomTarget &, double) {
+void PageView::render_gl(const wnk::render::CustomTarget &, double now_ms) {
     if (direct_) {
         // Alpha 0 lets the page surface below the window show; the draw call's scissor limits it to this view.
         const bool hole = tab_ != 0 && direct_tab_ == tab_;
@@ -122,6 +147,24 @@ void PageView::render_gl(const wnk::render::CustomTarget &, double) {
         return;
     }
     if (program_ == 0 && !build()) return;
+    // EXPERIMENT: WPE_BROWSER_DEBUG_VT_TEXTURE=<media url> draws libvt's texture instead of the engine's frames,
+    // to answer whether the app that owns the video gets frames as a GL texture (vt_texture_probe.cpp).
+    {
+        // The probe logs through the app's logger; raw stderr does not reach events.log on this platform.
+        static const bool sink_installed = [] {
+            set_vt_log_fn([](const char *line) { WNK_LOGI("page", "vt-probe: %s", line); });
+            return true;
+        }();
+        (void)sink_installed;
+        // The switch comes from the environment (once, see vt_texture_switch) or the launch parameter.
+        // (not cached: the launch parameter may be set after the first frame; an empty std::string copy allocates nothing)
+        const char *const vt_env = vt_texture_switch();
+        const std::string vturl = (vt_env && *vt_env) ? std::string(vt_env) : vt_texture_url();
+        if (!vturl.empty() && vturl != "0") {
+            if (!vt_failed_) render_vt(vturl.c_str(), now_ms);
+            return;
+        }
+    }
     if (const EngineFrame *f = engine_.frame()) {
         if (f->tab == tab_) upload(*f);
         engine_.frame_done();
@@ -144,6 +187,74 @@ void PageView::render_gl(const wnk::render::CustomTarget &, double) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_);
     glUniform1i(u_tex_, 0);
+    // The hole arrives in the pixels of the buffer WebKit painted (the same pixels the texture holds), but `vt` is a
+    // texture coordinate, so divide by the TEXTURE size. It must not be scaled by texture/page size: that factor is
+    // the engine's device scale (1.5), and applying it to a rectangle already in device pixels put the hole at 2.25x the
+    // CSS position instead of 1.5x (TV, 2026-11-20: video at CSS (137,211) showed through from (308,563), not (205,404)).
+    const bool has_hole = hole_w_ > 0 && hole_h_ > 0 && tex_w_ > 0 && tex_h_ > 0;
+    if (has_hole) {
+        const auto tw = static_cast<float>(tex_w_), th = static_cast<float>(tex_h_);
+        glUniform4f(u_hole_, hole_x_ / tw, hole_y_ / th, hole_w_ / tw, hole_h_ / th);
+        glUniform1f(u_has_hole_, 1.0f);
+    } else {
+        glUniform4f(u_hole_, 0.0f, 0.0f, 0.0f, 0.0f);
+        glUniform1f(u_has_hole_, 0.0f);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), quad);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), quad + 2);
+    glDisable(GL_BLEND);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+}
+
+// EXPERIMENT (WPE_BROWSER_DEBUG_VT_TEXTURE=<url>): show libvt's texture, and after ~6 s dump one frame plus a
+// report (frames, VT return codes, fps, CPU) to /media/developer/temp/video/.
+void PageView::render_vt(const char *url, double now_ms) {
+    if (vt_started_ms_ == 0) {
+        vt_started_ms_ = now_ms;
+        fprintf(stderr, "[vt-probe] render_vt entered, url=%s\n", url);
+        fflush(stderr);
+    }
+    if (!vt_) {
+        vt_ = std::make_unique<VtTextureProbe>();
+        std::string why;
+        const bool ok = vt_->start(url, &why);
+        fprintf(stderr, "[vt-probe] start() -> %s%s%s\n", ok ? "OK" : "FAILED", ok ? "" : ": ", ok ? "" : why.c_str());
+        fflush(stderr);
+        if (!ok) {
+            vt_.reset();
+            vt_failed_ = true;
+            return;
+        }
+    }
+    int w = 0, h = 0;
+    if (vt_->update(&w, &h)) {
+        if (vt_w_ == 0) {
+            fprintf(stderr, "[vt-probe] first frame %dx%d\n", w, h);
+            fflush(stderr);
+        }
+        vt_w_ = w, vt_h_ = h;
+    }
+    if (!vt_dumped_ && now_ms - vt_started_ms_ > 6000) {
+        vt_dumped_ = true;
+        vt_->dump_png("/media/developer/temp/video/vt-texture.png", vt_w_, vt_h_);
+        fprintf(stderr, "[vt-probe] RESULT frames=%d events=%d fps=%.2f tex_w=%d tex_h=%d\n",
+                vt_->frames(), vt_->events_available(), vt_->fps(), vt_w_, vt_h_);
+        fflush(stderr);
+    }
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (vt_->texture() == 0) return;
+    static const GLfloat quad[] = {-1, -1, 0, 1, 1, -1, 1, 1, -1, 1, 0, 0, 1, 1, 1, 0};
+    glUseProgram(program_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, vt_->texture());
+    glUniform1i(u_tex_, 0);
+    glUniform1f(u_has_hole_, 0.0f);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), quad);

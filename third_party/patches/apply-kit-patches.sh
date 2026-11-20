@@ -36,7 +36,9 @@ for p in "$here"/webos-native-app-kit/*.patch; do
     elif git -C "$kit" apply --check "$p" >/dev/null 2>&1; then
         echo "applying: $base"
         git -C "$kit" apply "$p"
-    elif content_0002_0005_present; then
+    elif case "$base" in 0002-*|0005-*) true ;; *) false ;; esac && content_0002_0005_present; then
+        # Only 0002/0005 were integrated-and-extended upstream; any other patch that neither applies nor
+        # reverse-applies is a real problem, not "already upstream".
         echo "already upstream (integrated + extended): $base"
     else
         echo "ERROR: $base neither applies nor is present; the submodule moved" >&2

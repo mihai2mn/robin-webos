@@ -424,7 +424,7 @@ void LgMediaPlayer::on_event(int type, int64_t num, const char *str) {
     case PF_EVENT_TYPE_DROPPED_FRAME:
         return;  // frequent
     default:
-        WNK_LOGI(kCat, "event 0x%x %lld %.160s", type, static_cast<long long>(num), str ? str : "");
+        WNK_LOGI(kCat, "event 0x%x %lld %.160s", static_cast<unsigned>(type), static_cast<long long>(num), str ? str : "");
     }
 #else
     (void)type, (void)num, (void)str;

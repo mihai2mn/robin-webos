@@ -193,7 +193,7 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
     if (gpu && !l.surface_group.empty()) {
         set_env(env, "WPE_BROWSER_PRESENT", "direct");
         set_env(env, "WPEB_SURFACE_GROUP", l.surface_group);
-        set_env(env, "WPEB_APP_ID", "org.sostk.wpebrowser");  // the page surfaces' webOS window role
+        set_env(env, "WPEB_APP_ID", WPEB_APP_ID_STRING);  // the page surfaces' webOS window role
         set_env(env, "WPEB_SURFACE_LAYER", l.surface_layer.empty() ? "page" : l.surface_layer);
         // The full socket path, so the web processes need not share our XDG_RUNTIME_DIR / WAYLAND_DISPLAY.
         if (!l.wayland_socket.empty()) set_env(env, "WPEB_WAYLAND_SOCKET", l.wayland_socket);

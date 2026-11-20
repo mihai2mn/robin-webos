@@ -5,9 +5,12 @@
 #pragma once
 
 #include "engine_client.hpp"
+#include "vt_texture_probe.hpp"
 #include "wnk/ui/widgets.hpp"
 
 #include <GLES2/gl2.h>
+
+#include <memory>
 
 namespace browser {
 
@@ -20,6 +23,16 @@ class PageView : public wnk::ui::GlView {
     // True while a hardware video plane is under the UI: the page is drawn with its own alpha and this view
     // must not clear opaquely, so the video shows through the hole WebKit punches.
     void set_clear_transparent(bool on) { clear_transparent_ = on; }
+
+    // The video "hole" in page pixels (x, y, w, h); empty when there is no hardware video area. The page is
+    // drawn transparent there (so the plane under the UI shows) and opaque-over-white everywhere else, which
+    // keeps a page without a background of its own white -- correct by default, no launch parameter needed.
+    void set_hole(float x, float y, float w, float h) {
+        if (x == hole_x_ && y == hole_y_ && w == hole_w_ && h == hole_h_) return;
+        hole_x_ = x, hole_y_ = y, hole_w_ = w, hole_h_ = h;
+        invalidate_content();
+    }
+
 
     void set_page_size(uint32_t w, uint32_t h) { page_w_ = w, page_h_ = h; }
     uint32_t page_width() const { return page_w_; }
@@ -60,13 +73,21 @@ class PageView : public wnk::ui::GlView {
 
  private:
     bool build();
+    void render_vt(const char *url, double now_ms);
     void upload(const EngineFrame &f);
 
     EngineClient &engine_;
     uint32_t page_w_ = 1280, page_h_ = 720;
     bool clear_transparent_ = false;
     GLuint program_ = 0, tex_ = 0;
-    GLint u_tex_ = -1;
+    // EXPERIMENT (WPE_BROWSER_DEBUG_VT_TEXTURE=<url>): libvt's texture instead of the engine's frame.
+    std::unique_ptr<VtTextureProbe> vt_;
+    bool vt_failed_ = false, vt_dumped_ = false;
+    int vt_w_ = 0, vt_h_ = 0;
+    double vt_started_ms_ = 0;
+    GLint u_tex_ = -1, u_hole_ = -1, u_has_hole_ = -1;
+    // The hole in page pixels (empty when no video area is known).
+    float hole_x_ = 0, hole_y_ = 0, hole_w_ = 0, hole_h_ = 0;
     uint32_t tex_w_ = 0, tex_h_ = 0;
     bool editing_ = false;
     TabId tab_ = 0;

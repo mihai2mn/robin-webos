@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <vector>
@@ -54,12 +55,25 @@ MediaServer::~MediaServer() { stop(); }
 
 void MediaServer::set_foreground(bool foreground) { wnk::media::NdlBackend::set_app_foreground(foreground); }
 
+// Drop the video rectangle. Called whenever the stream that owned it goes away or another takes over, so a
+// stale hole cannot keep the page transparent where no video is any more.
+void MediaServer::clear_hole() {
+    hole_x_.store(0);
+    hole_y_.store(0);
+    hole_w_.store(0);
+    hole_h_.store(0);
+    hole_id_.store(0);
+    ++hole_serial_;
+}
+
+
 void MediaServer::set_page_mapping(float x, float y, float scale_x, float scale_y) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    page_x_ = x;
-    page_y_ = y;
-    page_scale_x_ = scale_x > 0 ? scale_x : 1;
-    page_scale_y_ = scale_y > 0 ? scale_y : 1;
+    // Called from the render thread on every layout: no mutex (the media thread reads these in the AREA
+    // handler, and four float stores need no lock). Same treatment as the hole fields above.
+    page_x_.store(x);
+    page_y_.store(y);
+    page_scale_x_.store(scale_x > 0 ? scale_x : 1);
+    page_scale_y_.store(scale_y > 0 ? scale_y : 1);
 }
 
 bool MediaServer::start(const std::string &path, bool video_window, std::string *why) {
@@ -243,6 +257,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         uint64_t mine = id;
         if (owner_.compare_exchange_strong(mine, 0)) {
             std::lock_guard<std::mutex> lock(mutex_);
+            clear_hole();  // the stream that owned the plane is gone (under mutex_, like the AREA store)
             lg_.unload();
             if (backend_ && ndl_loaded_) backend_->unload();
             use_lg_ = ndl_loaded_ = false;
@@ -283,6 +298,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         if (ndl_loaded_) b.unload();
         use_lg_ = ndl_loaded_ = false;
         owner_ = id;
+        if (hole_id_.load() != id) clear_hole();  // another stream's rectangle no longer applies (this one's AREA may precede its Load)
         units = 0;
         full_waits = 0;
         const bool with_audio = audio_state == AudioState::Hardware;
@@ -296,7 +312,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             a.rate = static_cast<int>(audio_format.rate);
             a.channels = static_cast<int>(audio_format.channels);
             a.header = audio_header;
-            use_lg_ = lg_.load("org.sostk.wpebrowser", l.window_id, c, static_cast<int>(l.width),
+            use_lg_ = lg_.load(WPEB_APP_ID_STRING, l.window_id, c, static_cast<int>(l.width),
                                static_cast<int>(l.height), l.fps_milli / 1000.0, with_audio ? &a : nullptr, &error);
             if (use_lg_) lg_.set_hdr(l.hdr);
             if (!use_lg_) WNK_LOGW(kCat, "stream %llu: LG media pipeline: %s; trying NDL", static_cast<unsigned long long>(id), error.c_str());
@@ -431,12 +447,32 @@ void MediaServer::serve(int fd, uint64_t id) {
             // WebKit reports the video area in page-surface pixels; map it to drawable pixels with the page
             // rectangle the UI keeps up to date (set_page_mapping), so the plane follows scrolling and the
             // render scale instead of sitting at a fixed page-pixel offset.
-            const auto sx = page_x_ + static_cast<float>(a.x) * page_scale_x_;
-            const auto sy = page_y_ + static_cast<float>(a.y) * page_scale_y_;
-            const auto sw = static_cast<float>(a.width) * page_scale_x_;
-            const auto sh = static_cast<float>(a.height) * page_scale_y_;
-            if (backend_ && a.width > 0 && a.height > 0 && (owner_.load() == id || owner_.load() == 0) && !use_lg_)
+            const auto scx = page_scale_x_.load(), scy = page_scale_y_.load();
+            const auto sx = page_x_.load() + static_cast<float>(a.x) * scx;
+            const auto sy = page_y_.load() + static_cast<float>(a.y) * scy;
+            const auto sw = static_cast<float>(a.width) * scx;
+            const auto sh = static_cast<float>(a.height) * scy;
+            // One line with the whole arithmetic, so the report can show it instead of asserting it.
+            static const bool area_debug = std::getenv("WPE_BROWSER_DEBUG_MEDIA_AREA") != nullptr;  // not on every message by default
+            if (area_debug)
+            fprintf(stderr, "[page-area] webkit=(%d,%d %dx%d) origin=(%.1f,%.1f) scale=(%.4f,%.4f) -> area=(%.1f,%.1f %.1fx%.1f)\n",
+                    a.x, a.y, a.width, a.height, page_x_.load(), page_y_.load(), scx, scy, sx, sy, sw, sh);
+            // Only the owner's stream drives the plane and the hole: another tab's sink must not repaint
+            // them while this one plays.
+            const bool from_owner = owner_.load() == id || owner_.load() == 0;
+            if (backend_ && a.width > 0 && a.height > 0 && from_owner && !use_lg_)
                 backend_->set_area(wnk::Rect{sx, sy, sw, sh});
+            // The same rectangle in PAGE pixels: page_view composites opacity outside it and transparency
+            // inside it, so a page without a background of its own stays white except where the video is.
+            if (from_owner) {
+                hole_x_.store(static_cast<float>(a.x));
+                hole_y_.store(static_cast<float>(a.y));
+                hole_w_.store(static_cast<float>(a.width));
+                hole_h_.store(static_cast<float>(a.height));
+                hole_id_.store(id);
+                ++hole_serial_;
+            }
+
             break;
         }
         case WPEB_MEDIA_PAUSE: {

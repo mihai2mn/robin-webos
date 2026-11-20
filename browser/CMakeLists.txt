@@ -2,6 +2,10 @@
 cmake_minimum_required(VERSION 3.22)
 project(wpebrowser LANGUAGES C CXX)
 
+# The app id: override for a development copy (e.g. -DWPEB_APPID=org.sostk.wpebrowser.dev) so it can be
+# installed and launched beside the real app. Everything that names the id at run time uses this same value.
+set(WPEB_APPID "org.sostk.wpebrowser" CACHE STRING "webOS application id")
+
 # The kit: -DWNK_KIT_DIR=..., else $WNK_KIT_DIR, else where it was when tools/new-app.py made this.
 # A relative path is taken from this folder (a git submodule at kit/ would be "kit").
 if (DEFINED ENV{WNK_KIT_DIR})
@@ -28,8 +32,11 @@ else ()
     message(STATUS "wpebrowser: no staged engine; the package will show 'engine not found'")
 endif ()
 
-add_executable(wpebrowser main.cpp chrome.cpp screens.cpp profile.cpp storage.cpp private_loader.cpp engine_client.cpp page_view.cpp keys.cpp direct_owner.cpp media_server.cpp lg_media_player.cpp wren_ui.cpp log_export.cpp)
+add_executable(wpebrowser main.cpp chrome.cpp screens.cpp profile.cpp storage.cpp private_loader.cpp engine_client.cpp page_view.cpp keys.cpp direct_owner.cpp media_server.cpp lg_media_player.cpp wren_ui.cpp log_export.cpp vt_texture_probe.cpp)
 target_include_directories(wpebrowser PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../common")
+target_compile_definitions(wpebrowser PRIVATE WPEB_APP_ID_STRING="${WPEB_APPID}")
+# printf-style mismatches (a %d given a float crashed the app, 2026-11-20) are build errors for the UI target.
+target_compile_options(wpebrowser PRIVATE -Wformat -Werror=format)
 target_link_libraries(wpebrowser PRIVATE wnk_app wnk_media_ndl ${CMAKE_DL_LIBS})
 if (WNK_WEBOS)
     # LG's buffer-feed media pipeline (lg_media_player.cpp), from the NDK's starfish-media-pipeline header.
@@ -48,7 +55,7 @@ add_custom_command(TARGET wpebrowser POST_BUILD
 
 wnk_add_webos_package(
         TARGET wpebrowser
-        APPID org.sostk.wpebrowser
+        APPID ${WPEB_APPID}
         TITLE "Wren"
         VERSION 0.3.3
         VENDOR "sostk"
