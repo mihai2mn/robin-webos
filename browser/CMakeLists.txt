@@ -6,8 +6,9 @@ project(wpebrowser LANGUAGES C CXX)
 # installed and launched beside the real app. Everything that names the id at run time uses this same value.
 set(WPEB_APPID "org.sostk.wpebrowser" CACHE STRING "webOS application id")
 # The title in the launcher: a development copy gets its own, so the two can be told apart on the TV.
-# appinfo requiredMemory (MB): webOS closes background apps until this much is free when Wren starts.
-set(WPEB_REQUIRED_MEMORY 450 CACHE STRING "appinfo requiredMemory")
+# appinfo requiredMemory (MB): with 1700 webOS closes a suspended background app (YouTube) when Wren starts, which frees ~200 MB; 1200 did
+# not, 2200 did but slowed the launch by ~8 s (TV, 2026-11-20).
+set(WPEB_REQUIRED_MEMORY 1700 CACHE STRING "appinfo requiredMemory")
 set(WPEB_TITLE "Wren" CACHE STRING "launcher title")
 
 # The kit: -DWNK_KIT_DIR=..., else $WNK_KIT_DIR, else where it was when tools/new-app.py made this.
