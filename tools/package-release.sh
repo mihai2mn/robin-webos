@@ -16,8 +16,8 @@
 #               The stripped libWPEWebKit has md5 a281cdbc88005b5338e401dc226f7613 (= the TV's engine254jit); NOT rebuilt here
 #               (a WebKit build takes hours; `tools/build-engine.sh start` with WEBKIT_VERSION=2.54.3 rebuilds it from the patch series).
 #   STAGE64     tools/engine-aarch64.sh stage output: build/engine-stage-aarch64/engine (aarch64 engine, glibc, Mesa)
-#   UBO_IPK     an earlier package that carries engine/ubo/ and engine/lib/web-extensions/libwren-ubo.so (dist/...ubo3...ipk);
-#               regenerate with tools/ubo/build.sh data + lib (needs cargo, node, network).
+#   uBO         built here from the clone (phase `ubo`): engine/ubo data (tools/ubo/update.py downloads the filter lists and uBO resources,
+#               needs network; tools/ubo/build.sh data compiles them with cargo + node) and libwren-ubo.so for armv7 (x-tools gcc) and aarch64 (Buildroot gcc).
 # Rebuilt here from the clean clone: wpe-engine + libgstwpebmedia.so (against the 2.54.3 headers), the launcher, the UI.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -32,7 +32,6 @@ WK_SHARED=${WK_SHARED:-$BR/br-out/build/wpewebkit-2.54.3}
 WK_TREE=${WK_TREE:-$WORK/wk-tree}
 WK254=$WK_TREE   # what stage takes the engine libraries from
 STAGE64=${STAGE64:-$repo/build/engine-stage-aarch64/engine}
-UBO_IPK=${UBO_IPK:-$repo/dist/org.sostk.wpebrowser_0.3.3-ubo3_arm.ipk}
 NDK=${WEBOS_NDK:-$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}
 STRIP32=$BR/x-tools/arm-webos-linux-gnueabi/bin/arm-webos-linux-gnueabi-strip
 STRIP64=$BR/br-out-aarch64/host/bin/aarch64-buildroot-linux-gnu-strip
@@ -55,6 +54,7 @@ do_clone() {
     git -C "$src" -c protocol.file.allow=always submodule update --init -q
     git -C "$src/third_party/webos-native-app-kit" checkout -q "$kitsha"
     ( cd "$src" && sh third_party/patches/apply-kit-patches.sh ) > "$WORK/kit-patches.log" 2>&1 || { tail "$WORK/kit-patches.log"; exit 1; }
+    find "$src/tools" -name "*.sh" -exec sed -i "s/$//" {} +   # a few scripts are stored with CRLF
     git -C "$src" log -1 --format='%H %s'
     # the kit with its patches must equal the working tree's (which the earlier builds used), file by file
     diff -rq --strip-trailing-cr --exclude=.git "$src/third_party/webos-native-app-kit" "$repo/third_party/webos-native-app-kit" \
@@ -143,6 +143,39 @@ do_webkit32() {
     rm -rf "$pr"
 }
 
+# ---- ubo: the ad blocker's data and web-process extension, built from the clone --------------------------------------
+# tools/ubo/update.py downloads uBO's default lists and resources (network; the lists are whatever they are today, uBO's
+# commit is recorded in COMMIT), tools/ubo/build.sh compiles them (cargo, node) and links libwren-ubo.so for the TV (armv7,
+# x-tools gcc = glibc 2.28) and for the 64-bit engine (aarch64, Buildroot gcc). The extension must accept the user data the
+# engine sends, "(sbasass)": checked with strings.
+do_ubo() {
+    export PATH=$HOME/.cargo/bin:$PATH RUSTC_WRAPPER=
+    local U=$WORK/ubo X32=$BR/x-tools/arm-webos-linux-gnueabi A64=$BR/br-out-aarch64
+    rm -rf "$U"; mkdir -p "$U"
+    rustup target add armv7-unknown-linux-gnueabi aarch64-unknown-linux-gnu 2>&1 | tail -2 | sed 's/^/   /'
+    ( cd "$src" && python3 tools/ubo/update.py ) > "$WORK/ubo-update.log" 2>&1 || { tail "$WORK/ubo-update.log"; exit 1; }
+    cp "$src/tools/ubo/ubo/COMMIT" "$U/COMMIT"
+    say "ubo data (cargo build of the list compiler)"
+    ( cd "$src" && OUT="$U" sh tools/ubo/build.sh data ) > "$WORK/ubo-data.log" 2>&1 || { tail -20 "$WORK/ubo-data.log"; exit 1; }
+    ls -l "$U/data/engine.dat" | sed 's/^/   /'
+    local sr32=$BR/br-out/host/arm-buildroot-linux-gnueabi/sysroot
+    say "libwren-ubo.so armv7"
+    ( cd "$src" && OUT="$U" CC="$X32/bin/arm-webos-linux-gnueabi-gcc -mcpu=cortex-a9 -mfloat-abi=softfp" \
+        EXT_CFLAGS="$(PKG_CONFIG_SYSROOT_DIR=$sr32 PKG_CONFIG_LIBDIR=$sr32/usr/lib/pkgconfig:$sr32/usr/share/pkgconfig pkg-config --cflags wpe-web-process-extension-2.0 libsoup-3.0)" \
+        sh tools/ubo/build.sh lib armv7-unknown-linux-gnueabi ) > "$WORK/ubo-lib32.log" 2>&1 || { tail -20 "$WORK/ubo-lib32.log"; exit 1; }
+    say "libwren-ubo.so aarch64"
+    local sr64=$A64/host/aarch64-buildroot-linux-gnu/sysroot
+    ( cd "$src" && OUT="$U" CC="$A64/host/bin/aarch64-buildroot-linux-gnu-gcc" \
+        EXT_CFLAGS="$(PKG_CONFIG_SYSROOT_DIR=$sr64 PKG_CONFIG_LIBDIR=$sr64/usr/lib/pkgconfig:$sr64/usr/share/pkgconfig pkg-config --cflags wpe-web-process-extension-2.0 libsoup-3.0)" \
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$U/cc-aarch64-unknown-linux-gnu" \
+        sh tools/ubo/build.sh lib aarch64-unknown-linux-gnu ) > "$WORK/ubo-lib64.log" 2>&1 || { tail -20 "$WORK/ubo-lib64.log"; exit 1; }
+    local f
+    for f in "$U"/armv7-unknown-linux-gnueabi/libwren-ubo.so "$U"/aarch64-unknown-linux-gnu/libwren-ubo.so; do
+        [ "$(strings -a "$f" | grep -c '(sbasass)')" -gt 0 ] || { echo "$f does not accept (sbasass)" >&2; exit 1; }
+        file "$f" | cut -c1-120 | sed 's/^/   /'
+    done
+}
+
 # ---- stage: <WORK>/stage-<id>/engine = base + WebKit 2.54.3 + launcher in front + uBO ---------------------------
 interp_all() {  # interp_all <dir> <link>: every 32-bit ARM executable gets PT_INTERP <link>
     local d=$1 link=$2 f
@@ -175,12 +208,10 @@ do_stage() {
         for f in "$s/wpe-engine32" "$s"/libexec/*; do
             "$PATCHELF" --print-interpreter "$f" >/dev/null 2>&1 && "$PATCHELF" --set-interpreter "/tmp/$app/ld-linux.so.3" "$f"
         done
-        # uBO: data + the web-process extension (prebuilt, from UBO_IPK)
-        local t; t=$(mktemp -d)
-        ( cd "$t" && ar x "$UBO_IPK" && tar xzf data.tar.gz --wildcards '*/engine/ubo/*' '*/engine/lib/web-extensions/*' )
-        cp -a "$t"/usr/palm/applications/*/engine/ubo "$s/"
-        mkdir -p "$s/lib/web-extensions"; cp -a "$t"/usr/palm/applications/*/engine/lib/web-extensions/. "$s/lib/web-extensions/"
-        rm -rf "$t"
+        # uBO: data + the web-process extension, built by the `ubo` phase from the clone
+        [ -f "$WORK/ubo/data/engine.dat" ] && [ -f "$WORK/ubo/armv7-unknown-linux-gnueabi/libwren-ubo.so" ] || { echo "run the ubo phase first" >&2; exit 1; }
+        mkdir -p "$s/ubo" "$s/lib/web-extensions"; cp -a "$WORK/ubo/data/." "$s/ubo/"
+        install -m755 "$WORK/ubo/armv7-unknown-linux-gnueabi/libwren-ubo.so" "$s/lib/web-extensions/libwren-ubo.so"
         du -sh "$s" | sed 's/^/   /'
     done
 }
@@ -223,12 +254,18 @@ do_add64() {
         for f in "$appdir/engine64/wpe-engine" "$appdir"/engine64/libexec/*; do
             "$PATCHELF" --print-interpreter "$f" >/dev/null 2>&1 && "$PATCHELF" --set-interpreter "/tmp/$app/ld-linux-aarch64.so.1" "$f"
         done
+        # uBO for the 64-bit engine: it looks for ubo/ and lib/web-extensions/ next to /proc/self/exe, which is the LOADER
+        # (engine64/lib/glibc/) because the launcher starts it through ld-linux-aarch64.so.1. So the aarch64 extension goes
+        # there and the data is a link to the 32-bit engine's copy (same format).
+        mkdir -p "$appdir/engine64/lib/glibc/lib/web-extensions"
+        install -m755 "$WORK/ubo/aarch64-unknown-linux-gnu/libwren-ubo.so" "$appdir/engine64/lib/glibc/lib/web-extensions/libwren-ubo.so"
+        ln -s ../../../engine/ubo "$appdir/engine64/lib/glibc/ubo"
         cat > "$appdir/ENGINES.txt" <<EOF
 Wren $VERSION ($app): two web engines in one package
   engine/    32-bit WPE WebKit 2.54.3 (ARMv7 JIT + DFG), the default. engine/wpe-engine is a small launcher; the real
              engine is engine/wpe-engine32.
   engine64/  the same WebKit 2.54.3 as an aarch64 process (about twice as fast on JavaScript, software rendering,
-             shared-memory frames only: no hardware video, no direct presentation). No ad blocker in it yet.
+             shared-memory frames only: no hardware video, no direct presentation). Its ad blocker is the same uBO data with an aarch64 extension.
 Switching (the launcher, engine/wpe-engine, reads these in this order):
   1. launch parameter  {"wpebEnv":{"WPE_BROWSER_DEBUG_ENGINE":"64"}}   (or "32")   - one start, e.g.
        ares-launch -d <tv> $app -p '{"wpebEnv":{"WPE_BROWSER_DEBUG_ENGINE":"64"}}'
@@ -257,7 +294,7 @@ do_sums() {
     { echo "commit $COMMIT ($(git -C "$repo" log -1 --format=%s "$COMMIT"))"
       echo "date $(date -u +%FT%TZ)"
       echo "WK254 libWPEWebKit (stripped) md5 $(md5sum "$WORK/stage-${IDS%% *}/engine/lib/libWPEWebKit-2.0.so.1" | cut -d' ' -f1)"
-      echo "STAGE_BASE $STAGE_BASE  STAGE64 $STAGE64  UBO_IPK $UBO_IPK"
+      echo "STAGE_BASE $STAGE_BASE  STAGE64 $STAGE64  uBO: built from the clone ($(cat "$WORK/ubo/COMMIT" 2>/dev/null))"
       echo "kit $(git -C "$src/third_party/webos-native-app-kit" log -1 --format=%h)"; } > "$OUT/BUILD-INFO.txt"
 }
 
@@ -268,10 +305,11 @@ case "$phase" in
     engine32) do_engine32 ;;
     backend) do_backend ;;
     webkit32) do_webkit32 "${2:-}" ;;
+    ubo) do_ubo ;;
     stage) do_stage ;;
     ui) do_ui ;;
     add64) do_add64 ;;
     sums) do_sums ;;
-    all) do_clone; do_overlay; do_launcher; do_webkit32; do_engine32; do_backend; do_stage; do_ui; do_add64; do_sums ;;
-    *) echo "usage: $0 all|clone|launcher|engine32|backend|stage|ui|add64|sums" >&2; exit 2 ;;
+    all) do_clone; do_overlay; do_launcher; do_webkit32; do_engine32; do_backend; do_ubo; do_stage; do_ui; do_add64; do_sums ;;
+    *) echo "usage: $0 all|clone|launcher|engine32|backend|ubo|stage|ui|add64|sums" >&2; exit 2 ;;
 esac
