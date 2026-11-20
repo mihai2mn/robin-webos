@@ -277,6 +277,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     uint64_t generation = 0;     // qm; a flush or load drops what was queued before it
     bool stop = false;
     bool ready = false;          // qm; the decoder is loaded (units wait until then)
+    std::atomic<bool> backend_audio{false};  // the backend's load took audio (feeder reads it)
     std::atomic<bool> eos_pushed{false};  // the decoder was told the stream ended (cleared by a flush or load)
     std::thread feeder([&] {
         Clock::time_point blocked_until[2] = {};
@@ -315,7 +316,8 @@ void MediaServer::serve(int fd, uint64_t id) {
                         eos_pushed = true;
                     }
                     // The Starfish backend's decoder (it reorders) keeps the last pictures until it is told the stream ended.
-                    else if (owner_.load() == id && !use_lg_ && ndl_loaded_ && backend_ && !pushed_eos && ended[0]) {
+                    else if (owner_.load() == id && !use_lg_ && ndl_loaded_ && backend_ && !pushed_eos && ended[0] &&
+                             (ended[1] || !backend_audio.load())) {
                         backend_->end_of_stream();
                         pushed_eos = true;
                         eos_pushed = true;
@@ -333,7 +335,7 @@ void MediaServer::serve(int fd, uint64_t id) {
                         if (pick == 0 || lg_.has_audio())
                             full = lg_.feed(pick == 1, u.packet.data.data(), u.packet.data.size(), u.packet.pts_us) ==
                                    LgMediaPlayer::Feed::Full;
-                    } else if (pick == 0) {
+                    } else if (pick == 0 || backend_audio.load()) {
                         full = backend_->feed(u.packet) == wnk::media::MediaBackend::Feed::Full;
                     }
                 }
@@ -400,6 +402,15 @@ void MediaServer::serve(int fd, uint64_t id) {
         v.height = static_cast<int>(l.height);
         v.frame_rate = l.fps_milli / 1000.0;
         f.video = v;
+        // Starfish takes the page's AAC next to the video (A/V sync from LG's pipeline); NDL only video.
+        if (starfish_ && audio_state == AudioState::Hardware && audio_format.codec == WPEB_MEDIA_AAC) {
+            wnk::media::AudioFormat af;
+            af.codec = wnk::media::CodecId::Aac;
+            af.sample_rate = static_cast<int>(audio_format.rate);
+            af.channels = static_cast<int>(audio_format.channels);
+            f.audio = af;
+        }
+        backend_audio = f.audio.has_value();
         std::string error;
         // One decoder per app: the newest stream takes it (another tab or element loses its picture).
         lg_.unload();

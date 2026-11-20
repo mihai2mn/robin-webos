@@ -1380,7 +1380,10 @@ class App : public wnk::app::Delegate {
             else if (media_.running() || media_.start(l.runtime_dir + "/media.sock",
                          /*video_window=*/direct_.active() && direct_.has_video_window(), &why,
                          launch_param(params, "wpebVideoBackend")))
+            {
                 l.media_socket = media_.path();
+                l.hw_audio = media_.takes_audio();
+            }
             else
                 WNK_LOGW(kCat, "hardware video unavailable: %s; software video", why.c_str());
         }

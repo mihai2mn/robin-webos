@@ -1255,7 +1255,9 @@ static WpebVideoSink *hardware_partner(WpebAudioSink *self)
     g_mutex_lock(&g_caps_lock);
     for (;;) {
         g_mutex_lock(&video->lock);
-        gboolean ready = video->codec != 0 && video->fd >= 0 && video->have_window;
+        /* have_window: the direct path (LG's pipeline on the page's video window). WPEB_MEDIA_HW_AUDIO (set by the UI when its
+         * Starfish backend runs, which takes the audio through the media socket too): SHM mode, no page window. */
+        gboolean ready = video->codec != 0 && video->fd >= 0 && (video->have_window || g_getenv("WPEB_MEDIA_HW_AUDIO"));
         g_mutex_unlock(&video->lock);
         if (ready) {
             ok = g_get_monotonic_time() - video->load_time < 800 * G_TIME_SPAN_MILLISECOND;
@@ -1320,7 +1322,10 @@ static gboolean wpeb_audio_sink_build(WpebAudioSink *self, GstCaps *caps)
     const gboolean encoded = codec != 0;
     const char *label = codec == WPEB_MEDIA_OPUS ? "Opus" : codec == WPEB_MEDIA_AAC ? "AAC" : "raw audio";
     WpebVideoSink *video = NULL;
-    if (encoded && !self->mute && self->volume > 0.001 && !g_getenv("WPE_BROWSER_DEBUG_NO_HW_AUDIO"))
+    /* WPEB_MEDIA_HW_AUDIO=aac: the UI's decoder takes AAC only (no Opus). */
+    const char *hw_env = g_getenv("WPEB_MEDIA_HW_AUDIO");
+    const gboolean hw_codec_ok = !hw_env || !g_str_equal(hw_env, "aac") || codec == WPEB_MEDIA_AAC;
+    if (encoded && hw_codec_ok && !self->mute && self->volume > 0.001 && !g_getenv("WPE_BROWSER_DEBUG_NO_HW_AUDIO"))
         video = hardware_partner(self);
     GstElement *first;
     if (video) {

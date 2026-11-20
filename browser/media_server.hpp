@@ -35,6 +35,8 @@ public:
     bool start(const std::string &path, bool video_window, std::string *why, const std::string &backend = "");
     void stop();
     bool running() const { return listen_fd_ >= 0; }
+    // The decoder takes the page's AAC audio too (Starfish backend): the engine is told so (WPEB_MEDIA_HW_AUDIO).
+    bool takes_audio() const { return starfish_ != nullptr; }
     const std::string &path() const { return path_; }
     // A page's video is on LG's decoder right now (any thread).
     bool video_active() const { return owner_.load() != 0; }

@@ -70,6 +70,7 @@ struct EngineLaunch {
     // Extra engine environment for experiments (launch parameter {"wpebEnv": {"WEBKIT_...": "..."}}): applied last,
     // only names starting with WEBKIT_, JSC_, WPE_BROWSER_DEBUG or GST_DEBUG.
     std::vector<std::pair<std::string, std::string>> extra_env;
+    bool hw_audio = false;  // WPEB_MEDIA_HW_AUDIO: audio of hardware video goes through the media socket too
 };
 
 class EngineClient {
