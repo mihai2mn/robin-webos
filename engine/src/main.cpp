@@ -1387,7 +1387,7 @@ gboolean memory_guard_tick(gpointer)
     const bool swap_gone = m.swap_total_kb <= 0 || m.swap_free_kb * 100 < m.swap_total_kb * swap_pct;
     // The web process (all tabs) is also watched on its own: at 70% of WebKit's own limit, background tabs go before WebKit's kill threshold
     // ends every tab at once (2026-11-20: all five tabs were reset together at the threshold while the TV was not yet out of memory).
-    static const long limit_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "420").c_str()) * 1024;
+    static const long limit_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "520").c_str()) * 1024;
     const bool process_big = limit_kb > 0 && g.tabs.size() > 1 && web_process_footprint_kb() * 10 > limit_kb * 7;
     if (!process_big && (m.avail_kb >= avail_floor_kb || !swap_gone))
         return G_SOURCE_CONTINUE;
@@ -2409,23 +2409,23 @@ int main(int, char **)
     // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=<n>: the process limit; the thresholds below are fractions of it (conservative / strict) and
     // the kill threshold stays off (a killed tab is worse than a slow one).
     {
-        const long limit_mb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "420").c_str());
+        const long limit_mb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "520").c_str());
         if (limit_mb > 0) {
             WebKitMemoryPressureSettings *mp = webkit_memory_pressure_settings_new();
             webkit_memory_pressure_settings_set_memory_limit(mp, static_cast<guint>(limit_mb));
             // strict first: the setter asserts conservative < strict, and the default strict is below 0.5
-            webkit_memory_pressure_settings_set_strict_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.75").c_str()));
-            webkit_memory_pressure_settings_set_conservative_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.5").c_str()));
+            webkit_memory_pressure_settings_set_strict_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.55").c_str()));
+            webkit_memory_pressure_settings_set_conservative_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.35").c_str()));
             // The kill threshold (a multiple of the limit, WebKit measures resident + swapped): a web process that goes on growing past
             // its limit while the TV is already swapping (2026-11-20: 585 MB at a 420 MB limit, swap full, the whole TV frozen) is
             // ended, and the UI reloads the tab (browser/main.cpp: crashed tabs). 0 = never.
             webkit_memory_pressure_settings_set_kill_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_KILL", "1.3").c_str()));
-            webkit_memory_pressure_settings_set_poll_interval(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_POLL_S", "5").c_str()));
+            webkit_memory_pressure_settings_set_poll_interval(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_POLL_S", "2").c_str()));
             webkit_network_session_set_memory_pressure_settings(mp);  // the network process
             g.context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", mp, nullptr));  // the web processes
             webkit_memory_pressure_settings_free(mp);
             log_msg("memory pressure: limit %ld MB, conservative %s, strict %s", limit_mb,
-                env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.5").c_str(), env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.75").c_str());
+                env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.35").c_str(), env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.55").c_str());
         }
     }
     if (!g.context) g.context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, nullptr));

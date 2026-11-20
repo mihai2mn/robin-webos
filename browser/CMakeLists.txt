@@ -6,6 +6,8 @@ project(wpebrowser LANGUAGES C CXX)
 # installed and launched beside the real app. Everything that names the id at run time uses this same value.
 set(WPEB_APPID "org.sostk.wpebrowser" CACHE STRING "webOS application id")
 # The title in the launcher: a development copy gets its own, so the two can be told apart on the TV.
+# appinfo requiredMemory (MB): webOS closes background apps until this much is free when Wren starts.
+set(WPEB_REQUIRED_MEMORY 450 CACHE STRING "appinfo requiredMemory")
 set(WPEB_TITLE "Wren" CACHE STRING "launcher title")
 
 # The kit: -DWNK_KIT_DIR=..., else $WNK_KIT_DIR, else where it was when tools/new-app.py made this.
@@ -64,7 +66,7 @@ wnk_add_webos_package(
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"
         ICON_COLOR "#0b1020"
-        REQUIRED_MEMORY 450  # MB; measured ~265 web + 75 UI + 56 engine + 35 network (PSS ~200); cobalt 512, LG browser 160
+        REQUIRED_MEMORY ${WPEB_REQUIRED_MEMORY}  # MB; measured ~265 web + 75 UI + 56 engine + 35 network (PSS ~200); cobalt 512, LG browser 160
         SUPPORT_GIP  # webOS 3.x launcher: the icon instead of a dark tile (PR #4)
         EXPECTED_NEEDED "${CMAKE_CURRENT_SOURCE_DIR}/expected-needed.txt"
         EXTRA_DIRS "${WNK_FONT_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/fonts" "${CMAKE_CURRENT_SOURCE_DIR}/icons"
