@@ -240,6 +240,10 @@ class App : public wnk::app::Delegate {
         auto at = find(opener);
         tabs_.insert(at == tabs_.end() ? tabs_.end() : at + 1, t);
         activate(id);
+        // A page that opens windows of its own (window.open, target=_blank) used to get past the live-tab limit: only open_in_engine
+        // enforced it, and these tabs are already live (2026-11-20: five tabs, two of them page-opened, in one web process).
+        size_t live = static_cast<size_t>(std::count_if(tabs_.begin(), tabs_.end(), [](const Tab &x) { return x.live; }));
+        while (live > kMaxLiveTabs && discard_background_tab(id, "too many open pages")) --live;
     }
 
     // window.close(): close it and show the page that opened it.

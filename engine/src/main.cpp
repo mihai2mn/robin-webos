@@ -814,10 +814,15 @@ constexpr const char *kMediaLimitScript = R"JS((function () {
   // Dolby (AC-3/E-AC-3): YouTube then sends 5.1 E-AC-3, decoded in software to 6 channels for a stereo
   // PulseAudio stream; the audio branch stalled and held the video 3 s ahead of it (TV, 2026-11-11). AAC/Opus play.
   const codecOk = (t) => !/av01|av1/.test(t) && !/ec-3|ac-3/.test(t) && (cfg.vp9 || !/^video\/.*(vp9|vp09)/.test(t));
+  // The TV's H.264 decoder presents only half of the frames of H.264 above 1080p at more than 30 fps (TV, 2026-11-20: 2560x1440@60 gave
+  // 30 frames/s through the LG player and 30 displayed + 130 dropped per 5 s through Starfish, whatever frame rate or envelope was declared;
+  // 3840x2160@50 gave 25; 1920x1080@60, 3840x2160@30 and HEVC 2560x1440@60 are full rate). Players are told such H.264 does not play, so they
+  // pick another rendition (1080p60 or 2160p30) or codec. WPE_BROWSER_DEBUG_MEDIA="...+nocap264" lifts it.
+  const slowAvc = (t, w, h, fps) => !cfg.noAvcCap && /avc|h264|h\.264/.test(t) && (w || 0) * (h || 0) > 1920 * 1088 && (fps || 0) > 30.5;
   const ok = (type) => {
     if (typeof type !== 'string') return true;
     const t = type.toLowerCase();
-    return codecOk(t) && !tooBig(num(t, 'width'), num(t, 'height'), num(t, 'framerate'));
+    return codecOk(t) && !tooBig(num(t, 'width'), num(t, 'height'), num(t, 'framerate')) && !slowAvc(t, num(t, 'width'), num(t, 'height'), num(t, 'framerate'));
   };
   for (const name of ['MediaSource', 'ManagedMediaSource', 'WebKitMediaSource']) {
     const MS = window[name];
@@ -834,7 +839,7 @@ constexpr const char *kMediaLimitScript = R"JS((function () {
     const original = mc.decodingInfo.bind(mc);
     mc.decodingInfo = function decodingInfo(config) {
       const v = config && config.video;
-      if (v && (!ok(String(v.contentType || '')) || tooBig(v.width, v.height, v.framerate)))
+      if (v && (!ok(String(v.contentType || '')) || tooBig(v.width, v.height, v.framerate) || slowAvc(String(v.contentType || '').toLowerCase(), v.width, v.height, v.framerate)))
         return Promise.resolve({ supported: false, smooth: false, powerEfficient: false, configuration: config });
       return original(config);
     };
@@ -864,8 +869,10 @@ std::string media_limit_script()
         vp9 = strstr(v, "+vp9") != nullptr;
         log_msg("media limit: %" PRIu64 " pixels, %" PRIu64 " fps%s", pixels, fps, vp9 ? ", VP9 allowed" : "");
     }
-    char cfg[128];
-    snprintf(cfg, sizeof(cfg), "{pixels: %" PRIu64 ", fps: %" PRIu64 ", vp9: %s}", pixels, fps, vp9 ? "true" : "false");
+    const char *dm = getenv("WPE_BROWSER_DEBUG_MEDIA");
+    const bool no_avc_cap = dm && strstr(dm, "+nocap264") != nullptr;
+    char cfg[160];
+    snprintf(cfg, sizeof(cfg), "{pixels: %" PRIu64 ", fps: %" PRIu64 ", vp9: %s, noAvcCap: %s}", pixels, fps, vp9 ? "true" : "false", no_avc_cap ? "true" : "false");
     std::string script = kMediaLimitScript;
     const std::string marker = "__WPEB_MEDIA__";
     script.replace(script.find(marker), marker.size(), cfg);
@@ -1321,16 +1328,68 @@ bool read_meminfo(MemInfo &m)
     return m.avail_kb >= 0;
 }
 
+// Resident + swapped memory (kB) of the web process (a child of this process), 0 if none is found. All tabs live in it.
+long web_process_footprint_kb()
+{
+    long best = 0;
+    const pid_t self = getpid();
+    GDir *dir = g_dir_open("/proc", 0, nullptr);
+    if (!dir)
+        return 0;
+    while (const gchar *name = g_dir_read_name(dir)) {
+        if (!g_ascii_isdigit(name[0]))
+            continue;
+        gchar *stat_path = g_strdup_printf("/proc/%s/stat", name);
+        gchar *stat = nullptr;
+        if (g_file_get_contents(stat_path, &stat, nullptr, nullptr)) {
+            // pid (comm) state ppid ...: comm may hold spaces, so find the last ')'
+            const char *rp = strrchr(stat, ')');
+            int ppid = 0;
+            char state;
+            if (rp && sscanf(rp + 1, " %c %d", &state, &ppid) == 2 && ppid == self) {
+                gchar *exe = g_strdup_printf("/proc/%s/exe", name);
+                gchar *target = g_file_read_link(exe, nullptr);
+                if (target && strstr(target, "WPEWebProcess")) {
+                    gchar *status_path = g_strdup_printf("/proc/%s/status", name);
+                    gchar *status = nullptr;
+                    if (g_file_get_contents(status_path, &status, nullptr, nullptr)) {
+                        long rss = 0, swap = 0;
+                        for (gchar **l = g_strsplit(status, "\n", 0), **it = l; *it; ++it) {
+                            long v;
+                            if (sscanf(*it, "VmRSS: %ld", &v) == 1) rss = v;
+                            else if (sscanf(*it, "VmSwap: %ld", &v) == 1) swap = v;
+                            if (!*(it + 1)) { g_strfreev(l); break; }
+                        }
+                        best = std::max(best, rss + swap);
+                        g_free(status);
+                    }
+                    g_free(status_path);
+                }
+                g_free(target);
+                g_free(exe);
+            }
+        }
+        g_free(stat);
+        g_free(stat_path);
+    }
+    g_dir_close(dir);
+    return best;
+}
+
 gboolean memory_guard_tick(gpointer)
 {
-    static const long avail_floor_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_AVAIL_MB", "350").c_str()) * 1024;
+    static const long avail_floor_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_AVAIL_MB", "110").c_str()) * 1024;
     static const long swap_pct = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_SWAP_PCT", "12").c_str());
     static gint64 last_kill_us = 0;
     MemInfo m;
     if (!read_meminfo(m))
         return G_SOURCE_CONTINUE;
     const bool swap_gone = m.swap_total_kb <= 0 || m.swap_free_kb * 100 < m.swap_total_kb * swap_pct;
-    if (m.avail_kb >= avail_floor_kb || !swap_gone)
+    // The web process (all tabs) is also watched on its own: at 70% of WebKit's own limit, background tabs go before WebKit's kill threshold
+    // ends every tab at once (2026-11-20: all five tabs were reset together at the threshold while the TV was not yet out of memory).
+    static const long limit_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "420").c_str()) * 1024;
+    const bool process_big = limit_kb > 0 && g.tabs.size() > 1 && web_process_footprint_kb() * 10 > limit_kb * 7;
+    if (!process_big && (m.avail_kb >= avail_floor_kb || !swap_gone))
         return G_SOURCE_CONTINUE;
     const gint64 now = g_get_monotonic_time();
     if (now - last_kill_us < 6 * G_USEC_PER_SEC)  // give the last kill time to free its memory
@@ -1415,13 +1474,13 @@ void tab_open(uint32_t id, const std::string &uri, WebKitWebView *opener)
     WebKitWebView *web_view = nullptr;
     // Its own content manager: a related view would otherwise share the first tab's (scroll reports per tab).
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
-    // Autoplay: muted videos only (thumbnails' hover previews keep working; a video with sound waits for Play), except
-    // in tabs opened on YouTube, whose TV app plays the next video by itself. Set once per tab (construct-only).
-    // WPE_BROWSER_DEBUG_AUTOPLAY=allow: every tab may autoplay with sound (tests without a remote).
-    const bool youtube = uri.find("youtube.com") != std::string::npos || uri.find("youtu.be") != std::string::npos
-        || g_strcmp0(getenv("WPE_BROWSER_DEBUG_AUTOPLAY"), "allow") == 0;
+    // Autoplay with sound is allowed in every tab: this is a TV, the page was opened on purpose, and a player whose play() is
+    // rejected for lack of a gesture tears itself down, so its Play button never works afterwards (TV, 2026-11-20).
+    // WPE_BROWSER_DEBUG_AUTOPLAY=policy: muted videos only, except in tabs opened on YouTube. Set once per tab (construct-only).
+    const bool restrict_autoplay = g_strcmp0(getenv("WPE_BROWSER_DEBUG_AUTOPLAY"), "policy") == 0
+        && uri.find("youtube.com") == std::string::npos && uri.find("youtu.be") == std::string::npos;
     WebKitWebsitePolicies *policies = webkit_website_policies_new_with_policies("autoplay",
-        youtube ? WEBKIT_AUTOPLAY_ALLOW : WEBKIT_AUTOPLAY_ALLOW_WITHOUT_SOUND, nullptr);
+        restrict_autoplay ? WEBKIT_AUTOPLAY_ALLOW_WITHOUT_SOUND : WEBKIT_AUTOPLAY_ALLOW, nullptr);
     if (g.direct) {
         WebKitWebViewBackend *backend = direct::create_backend(id, g.width, g.height, &tab.direct);
         if (backend) {

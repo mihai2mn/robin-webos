@@ -3,6 +3,7 @@
 
 #include "wnk/log.hpp"
 #include "wpe_media_ipc.h"
+#include "wnk/media/starfish_backend.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -201,11 +202,19 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
                       audio->channels == 1 ? "mono" : "stereo", audio->rate / 1000.0);
         audio_info = info;
     }
+    // The stream's frame rate, as the kit's Starfish backend declares it (esInfo videoFpsValue/videoFpsScale): without it LG's pipeline
+    // presented a 1440p60 and a 2160p50 stream at half the rate (TV, 2026-11-20: fed 60 units/s, presented 30/s).
+    std::string fps_info;
+    if (fps > 0) {
+        int64_t num = 0, den = 1;
+        wnk::media::StarfishBackend::frame_rate_fraction(fps, &num, &den);
+        fps_info = ",\"videoFpsValue\":" + std::to_string(num) + ",\"videoFpsScale\":" + std::to_string(den);
+    }
     char payload[4096];
     std::snprintf(payload, sizeof payload,
                   "{\"args\":[{\"mediaTransportType\":\"BUFFERSTREAM\",\"option\":{\"appId\":\"%s\",\"windowId\":\"%s\","
                   "\"externalStreamingInfo\":{\"contents\":{\"codec\":{\"video\":\"%s\"%s},\"esInfo\":{\"pauseAtDecodeTime\":false,"
-                  "\"ptsToDecode\":0,\"seperatedPTS\":true},\"format\":\"RAW\",\"provider\":\"wpebrowser\"%s},"
+                  "\"ptsToDecode\":0,\"seperatedPTS\":true%s},\"format\":\"RAW\",\"provider\":\"wpebrowser\"%s},"
                   "\"streamQualityInfo\":true,\"streamQualityInfoNonFlushable\":true,\"audioSync\":%s,\"restartStreaming\":false,"
                   "\"bufferingCtrInfo\":{\"bufferMaxLevel\":0,\"bufferMinLevel\":0,\"preBufferByte\":0,\"qBufferLevelAudio\":0,"
                   "\"qBufferLevelVideo\":0,\"srcBufferLevelAudio\":{\"minimum\":1,\"maximum\":%d},"
@@ -213,7 +222,7 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
                   "\"lowDelayMode\":%s,\"transmission\":{\"contentsType\":\"LIVE\"},\"adaptiveStreaming\":{\"audioOnly\":false,"
                   "\"adaptiveResolution\":true,\"maxWidth\":%d,\"maxHeight\":%d,\"maxFrameRate\":%d}}}]}",
                   app_id.c_str(), window_id.c_str(), codec_name(codec),
-                  !with_audio ? "" : opus ? ",\"audio\":\"OPUS\"" : pcm ? ",\"audio\":\"PCM\"" : ",\"audio\":\"AAC\"", audio_info.c_str(),
+                  !with_audio ? "" : opus ? ",\"audio\":\"OPUS\"" : pcm ? ",\"audio\":\"PCM\"" : ",\"audio\":\"AAC\"", fps_info.c_str(), audio_info.c_str(),
                   with_audio ? "true" : "false", with_audio ? 1048576 : 32768, with_audio ? "true" : "false",
                   with_audio ? "false" : "true", max_w, max_h, max_fps);
     api_ = new_api();

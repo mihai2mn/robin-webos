@@ -1206,10 +1206,23 @@ static void video_place(int sw, int sh, int x, int y, int w, int h, gboolean com
     pthread_mutex_lock(&g_video_lock);
     struct target *t = g_shown_target;
     if (t && t->video && w > 0 && h > 0) {
+        const int picture_w = sw > 0 ? sw : w, picture_h = sh > 0 ? sh : h;
+        const int surface_h = surface_height(t->width, t->height);
+        int dx = x, dy = y + (surface_h - (int)t->height), dw = w, dh = h;
+        // A rectangle that reaches past the surface's edge (the page scrolled the video partly out) is drawn wrongly by the compositor:
+        // the part of the picture inside shows, the rest of the box stays black (TV, 2026-11-20). It is cut to
+        // the surface. The compositor ignores the source rectangle (a cropped one gave the same picture as the whole one) and fits the
+        // whole picture into the destination, so a partly scrolled-out video is shown shrunk into its visible part instead of cropped.
+        // Entirely outside: left as it was (the video is gone from sight).
+        const int x0 = dx < 0 ? 0 : dx, y0 = dy < 0 ? 0 : dy;
+        const int x1 = dx + dw > (int)t->width ? (int)t->width : dx + dw, y1 = dy + dh > surface_h ? surface_h : dy + dh;
+        if ((x0 != dx || y0 != dy || x1 != dx + dw || y1 != dy + dh) && x1 > x0 && y1 > y0) {
+            dx = x0; dy = y0; dw = x1 - x0; dh = y1 - y0;
+        }
         struct wl_region *src = wl_compositor_create_region(t->renderer->compositor);
-        wl_region_add(src, 0, 0, sw > 0 ? sw : w, sh > 0 ? sh : h);
+        wl_region_add(src, 0, 0, picture_w, picture_h);
         struct wl_region *dst = wl_compositor_create_region(t->renderer->compositor);
-        wl_region_add(dst, x, y + (surface_height(t->width, t->height) - (int)t->height), w, h);
+        wl_region_add(dst, dx, dy, dw, dh);
         wl_webos_exported_set_exported_window(t->video, src, dst);
         wl_region_destroy(src);
         wl_region_destroy(dst);
