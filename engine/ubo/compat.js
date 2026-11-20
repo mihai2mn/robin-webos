@@ -224,6 +224,10 @@
         else if (v.__wrenEmeActive) why = 'protected';
         else if (policy.current()) why = 'fullscreen';
         else if (v.controls && !v.muted) why = 'controls';
+        // Sound only plays on the hardware plane: a software video's audio would go to PulseAudio, and webOS 5 TVs have no PulseAudio
+        // server (it is silent); LG's media pipeline plays the page's audio (AAC, or decoded Opus/Vorbis as PCM) next to the hardware
+        // video. Previews are muted (the isPreview rule), so they stay in the page.
+        else if (!v.muted) why = 'sound';
         else if (first ? v.getBoundingClientRect().width * v.getBoundingClientRect().height > policy.box : v.__wrenBox > policy.box) why = 'box';
         else if (first && playing().length >= policy.players) why = 'budget';
         else why = '';
@@ -315,6 +319,17 @@
         for (const v of work) transition(v);
     };
     for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener(ev, onFullscreenChange, true);
+    // A muted video in the page that is unmuted (a preview the user turns the sound on for) is decided again: with sound it belongs on the
+    // hardware plane, so it is reloaded there at its media time, as for a fullscreen transition (not an MSE stream: it cannot be reloaded).
+    document.addEventListener('volumechange', e => {
+        const v = e.target;
+        if (!(v instanceof HTMLVideoElement) || !policy.on || v.muted || v.volume === 0) return;
+        if (v.__wrenPolicy !== 'sw' || v.getAttribute('wren-policy') === 'page') return;
+        if (String(v.currentSrc || v.src || '').startsWith('blob:')) { log({ reload: false, reason: 'mse' }); return; }
+        const running = v.__wrenPolicy;
+        decide(v);
+        if (v.__wrenPolicy !== running) transition(v);
+    }, true);
     // Announced synchronously inside the page's own user-gesture handler (never deferred: the original runs at once),
     // so the engine log has the edge the transition can be measured against (DESIGN.md §3.5).
     const announce = el => {

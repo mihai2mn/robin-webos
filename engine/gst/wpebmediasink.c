@@ -1261,7 +1261,7 @@ static WpebVideoSink *hardware_partner(WpebAudioSink *self)
     /* The direct path opens the page's video window (up to a second) between setting the codec and sending the LOAD: wait for the
      * LOAD (load_time) as well, or this decision came before it and read the previous (zero) load time as "too late" -> software
      * audio, silent on webOS 5 (TV, 2026-11-20: Opus in WebM played silently, or with the audio declared wrongly, about one run in four). */
-    gint64 deadline = g_get_monotonic_time() + 2000 * G_TIME_SPAN_MILLISECOND;
+    gint64 deadline = g_get_monotonic_time() + 5000 * G_TIME_SPAN_MILLISECOND;
     gboolean ok = FALSE;
     g_mutex_lock(&g_caps_lock);
     for (;;) {

@@ -50,7 +50,7 @@ do_clone() {
     git clone -q --no-checkout "$repo" "$src"
     git -C "$src" checkout -q "$COMMIT"
     local kitsha; kitsha=$(git -C "$src" ls-tree HEAD third_party/webos-native-app-kit | awk '{print $3}')
-    git -C "$src" config submodule.third_party/webos-native-app-kit.url "$repo/third_party/webos-native-app-kit"
+    git -C "$src" config submodule.third_party/webos-native-app-kit.url "${KIT_REPO:-$repo/third_party/webos-native-app-kit}"   # KIT_REPO: a git clone of the kit when the working tree has only a copy
     git -C "$src" -c protocol.file.allow=always submodule update --init -q
     git -C "$src/third_party/webos-native-app-kit" checkout -q "$kitsha"
     ( cd "$src" && sh third_party/patches/apply-kit-patches.sh ) > "$WORK/kit-patches.log" 2>&1 || { tail "$WORK/kit-patches.log"; exit 1; }
@@ -88,11 +88,11 @@ do_engine32() {
     fi
     docker run --rm --user "$(id -u):$(id -g)" -e HOME=/build -v "$src:/src" -v "$BR:/build" -w /build webos-browser-build:1 sh -c '
         set -e
-        cmake -S /src/engine -B /build/release-work/engine-build -G Ninja \
+        cmake -S /src/engine -B /build/'"${WORK#$BR/}"'/engine-build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=/build/br-out/host/share/buildroot/toolchainfile.cmake -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_FLAGS="-I/build/inc254/wpe-webkit-2.0 -I/build/inc254/wpe-webkit-2.0/wpe-platform" \
-            -DCMAKE_C_FLAGS="-I/build/inc254/wpe-webkit-2.0 -I/build/inc254/wpe-webkit-2.0/wpe-platform" > /build/release-work/engine-cfg.log 2>&1
-        cmake --build /build/release-work/engine-build 2>&1 | tail -3' | sed 's/^/   /'
+            -DCMAKE_C_FLAGS="-I/build/inc254/wpe-webkit-2.0 -I/build/inc254/wpe-webkit-2.0/wpe-platform" > /build/'"${WORK#$BR/}"'/engine-cfg.log 2>&1
+        cmake --build /build/'"${WORK#$BR/}"'/engine-build 2>&1 | tail -3' | sed 's/^/   /'
     ls -l "$WORK/engine-build/wpe-engine" "$WORK/engine-build/libgstwpebmedia.so" | sed 's/^/   /'
 }
 
@@ -211,6 +211,9 @@ do_stage() {
         # uBO: data + the web-process extension, built by the `ubo` phase from the clone
         [ -f "$WORK/ubo/data/engine.dat" ] && [ -f "$WORK/ubo/armv7-unknown-linux-gnueabi/libwren-ubo.so" ] || { echo "run the ubo phase first" >&2; exit 1; }
         mkdir -p "$s/ubo" "$s/lib/web-extensions"; cp -a "$WORK/ubo/data/." "$s/ubo/"
+        # The page scripts are plain files: always the clone's, never the copy the ubo phase made (a ubo phase from before a change to
+        # engine/ubo/compat.js left the old policy in the package).
+        cp "$src/engine/ubo/compat.js" "$src/engine/ubo/cosmetic.js" "$s/ubo/"
         install -m755 "$WORK/ubo/armv7-unknown-linux-gnueabi/libwren-ubo.so" "$s/lib/web-extensions/libwren-ubo.so"
         du -sh "$s" | sed 's/^/   /'
     done
@@ -225,7 +228,7 @@ do_ui() {
             -e WEBOS_NDK="$NDK" -w /src/browser webos-browser-build:1 sh -c "
             set -e
             cmake -S . -B build/webos-$id -G 'Unix Makefiles' -DCMAKE_TOOLCHAIN_FILE=\"\$WEBOS_NDK/share/buildroot/toolchainfile.cmake\" \
-                -DCMAKE_BUILD_TYPE=Release -DWPEB_APPID=$app -DWPEB_ENGINE_STAGE=/build/release-work/stage-$id/engine > /tmp/cfg.log 2>&1 || { tail -25 /tmp/cfg.log; exit 1; }
+                -DCMAKE_BUILD_TYPE=Release -DWPEB_APPID=$app -DWPEB_ENGINE_STAGE=/build/${WORK#$BR/}/stage-$id/engine > /tmp/cfg.log 2>&1 || { tail -25 /tmp/cfg.log; exit 1; }
             cmake --build build/webos-$id -j\$(nproc) > /tmp/build.log 2>&1 || { grep -E 'error|Error' /tmp/build.log | head -20; exit 1; }
             cmake --build build/webos-$id --target wnk-ipks > /tmp/ipk.log 2>&1 || { tail -30 /tmp/ipk.log; exit 1; }
             ls -l build/webos-$id/dist/" 2>&1 | tail -6 | sed 's/^/   /'
