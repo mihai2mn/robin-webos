@@ -117,6 +117,18 @@ bool MediaServer::start(const std::string &path, bool video_window, std::string 
     return true;
 }
 
+bool MediaServer::release_owner(const char *why) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint64_t id = owner_.exchange(0);
+    if (id == 0) return false;
+    clear_hole();
+    lg_.unload();
+    if (backend_ && ndl_loaded_) backend_->unload();
+    use_lg_ = ndl_loaded_ = false;
+    WNK_LOGI(kCat, "stream %llu released by the UI: %s", static_cast<unsigned long long>(id), why);
+    return true;
+}
+
 void MediaServer::stop() {
     if (!running()) return;
     const char byte = 1;

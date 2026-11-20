@@ -265,6 +265,7 @@ class App : public wnk::app::Delegate {
             if (next == 0) next = tabs_[index + 1 < tabs_.size() ? index + 1 : index - 1].id;
             activate(next);
         }
+        release_video_of(id, "tab closed");
         if (live) engine_.tab_close(id);
         if (hole_tab_ == id) hole_tab_ = 0;
         tabs_.erase(find(id));
@@ -274,6 +275,15 @@ class App : public wnk::app::Delegate {
             return;
         }
         refresh_chrome();
+    }
+
+    // The tab whose page owns the hardware video leaves it (navigation, close): the engine does not unload the old
+    // page's stream (its media element is kept for the page cache and paused only later), so do it here.
+    void release_video_of(TabId id, const char *why) {
+        if (video_tab_ == id || hole_tab_ == id) {
+            if (media_.release_owner(why)) WNK_LOGI(kCat, "tab %u: hardware video released (%s)", id, why);
+            video_tab_ = 0;
+        }
     }
 
     void activate(TabId id) {
@@ -342,6 +352,7 @@ class App : public wnk::app::Delegate {
         // Home = this tab's New Tab page, as in Chromium with the default home page.
         Tab *t = tab(active_);
         if (t == nullptr) return;
+        release_video_of(t->id, "tab went home");
         if (t->live) engine_.tab_close(t->id);
         Tab fresh;
         fresh.id = t->id;
@@ -617,6 +628,10 @@ class App : public wnk::app::Delegate {
             // (or another tab) would keep the page transparent where nothing is playing.
             // The rectangle belongs to the tab that was showing when it last changed (the media stream has no tab id):
             // another tab must not get a transparent hole at that place, and switching back restores it.
+            if (const uint64_t owner = media_.owner_id(); owner != owner_seen_) {
+                owner_seen_ = owner;
+                if (owner != 0) video_tab_ = active_;  // the tab showing when a stream took the decoder
+            }
             if (const uint64_t serial = media_.hole_serial(); serial != hole_serial_seen_) {
                 hole_serial_seen_ = serial;
                 hole_tab_ = active_;
@@ -1199,6 +1214,7 @@ class App : public wnk::app::Delegate {
             Tab *t = tab(id);
             if (t == nullptr) return;
             if (e == WPE_LOAD_FINISHED) profile_.add_visit(t->title, t->url);
+            if (e == WPE_LOAD_STARTED) release_video_of(id, "navigation");
             const bool loading = e == WPE_LOAD_STARTED || e == WPE_LOAD_COMMITTED;
             if (loading != t->loading) {
                 t->loading = loading;
@@ -1487,6 +1503,8 @@ class App : public wnk::app::Delegate {
     float map_x_ = -1, map_y_ = -1, map_w_ = -1, map_h_ = -1;
     uint64_t hole_serial_seen_ = 0;  // MediaServer::hole_serial() last looked at, and the tab showing then
     TabId hole_tab_ = 0;
+    TabId video_tab_ = 0;       // the tab whose page owns the hardware video (0: none)
+    uint64_t owner_seen_ = 0;   // MediaServer::owner_id() last looked at
 };
 
 BrowserScreen::BrowserScreen(App &app, browser::EngineClient &engine) : Screen("browser"), app_(app) {

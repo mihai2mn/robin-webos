@@ -38,6 +38,12 @@ public:
     // (see engine/gst/wpebmediasink.c, the sink's "rectangle" property), while the decoder wants drawable
     // pixels and our window scrolls the page inside the view. Called on the main thread on every resize.
     void set_page_mapping(float x, float y, float scale_x, float scale_y);
+    // The page that owned the stream navigated away or its tab closed, and the engine has not said so (it keeps the old
+    // page's media element alive for a while and pauses it later): unload the decoder and clear the rectangle now.
+    // Any thread. Returns true if a stream was released.
+    bool release_owner(const char *why);
+    // The connection whose stream holds the decoder (0: none); changes with every new Load.
+    uint64_t owner_id() const { return owner_.load(); }
     // Clears the video rectangle (owner released, or another stream took over).
     void clear_hole();
     // The video rectangle in PAGE pixels (x, y, width, height), all zero when no video area is known. This is
