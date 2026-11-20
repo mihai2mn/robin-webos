@@ -33,3 +33,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "debuginfo"
+
+# rustc-hash with the 64-bit algorithm on every target: adblock-rust's flatbuffer hash tables are laid out with
+# FxHasher, engine.dat is built on a 64-bit host, and the 32-bit ARM extension must find the same slots
+# (vendor/README.md). Without this, generic class/id hiding finds nothing on the TV's 32-bit engine.
+[patch.crates-io]
+rustc-hash = { path = "vendor/rustc-hash" }
