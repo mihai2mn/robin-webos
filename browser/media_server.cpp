@@ -5,6 +5,7 @@
 #include "wnk/log.hpp"
 #include "wnk/media/ndl_backend.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -67,7 +68,9 @@ void MediaServer::clear_hole() {
 }
 
 
-void MediaServer::set_page_mapping(float x, float y, float scale_x, float scale_y) {
+void MediaServer::set_page_mapping(float x, float y, float scale_x, float scale_y, float view_w, float view_h) {
+    view_w_.store(view_w);
+    view_h_.store(view_h);
     // Called from the render thread on every layout: no mutex (the media thread reads these in the AREA
     // handler, and four float stores need no lock). Same treatment as the hole fields above.
     page_x_.store(x);
@@ -115,6 +118,63 @@ bool MediaServer::start(const std::string &path, bool video_window, std::string 
     acceptor_ = std::thread([this] { accept_loop(); });
     WNK_LOGI(kCat, "hardware video service on %s", path.c_str());
     return true;
+}
+
+// NDL_DirectVideoSetArea takes only a rectangle INSIDE the screen: any rectangle reaching past an edge (y < 0 as the
+// page scrolls the video up, a bottom beyond 1080, x < 0 or beyond 1920) makes the TV show a wrong picture or black with
+// a brightness jump (TV, 2026-11-20), and libNDL_directmedia has no crop or source-area call (its exports: Init, Load,
+// Unload, VideoPlay, VideoSetArea, SetHDRInfo, ...). So the plane is clipped to the screen; a clipped video is scaled
+// into the visible part (squashed, not cut). Entirely outside the page viewport: parked as a tiny rectangle at the
+// top-left corner, where the toolbar or the opaque page covers it.
+wnk::Rect MediaServer::plane_rect(float x, float y, float w, float h) const {
+    constexpr float kScreenW = 1920, kScreenH = 1080;
+    const float vx = page_x_.load(), vy = page_y_.load(), vw = view_w_.load(), vh = view_h_.load();
+    const float px1 = vw > 0 ? std::min(vx + vw, kScreenW) : kScreenW, py1 = vh > 0 ? std::min(vy + vh, kScreenH) : kScreenH;
+    const float px0 = std::max(vx, 0.0f), py0 = std::max(vy, 0.0f);
+    if (x >= px1 || y >= py1 || x + w <= px0 || y + h <= py0) return wnk::Rect{0, 0, 16, 9};  // not visible: parked
+    const float x0 = std::max(x, 0.0f), y0 = std::max(y, 0.0f);
+    const float x1 = std::min(x + w, kScreenW), y1 = std::min(y + h, kScreenH);
+    return wnk::Rect{x0, y0, std::max(x1 - x0, 2.0f), std::max(y1 - y0, 2.0f)};
+}
+
+// Called by the UI on its frame loop: `frame_ready` = an engine frame of the shown tab is about to be drawn. Applies
+// the newest AREA then (or after kMaxAge without a frame: a static page whose video moved). Never waits for the feeder.
+void MediaServer::commit_area(bool frame_ready) {
+    PendingArea p;
+    {
+        std::lock_guard<std::mutex> al(area_mu_);
+        if (!pending_.valid) return;
+        if (!frame_ready && Clock::now() - pending_.at < std::chrono::milliseconds(40)) return;
+        p = pending_;
+    }
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return;  // the feeder holds it: the next frame
+    {
+        std::lock_guard<std::mutex> al(area_mu_);
+        if (pending_seq_ == p.seq) pending_.valid = false;
+    }
+    const WpebMediaArea &a = p.area;
+    const auto scx = page_scale_x_.load(), scy = page_scale_y_.load();
+    const auto sx = page_x_.load() + static_cast<float>(a.x) * scx;
+    const auto sy = page_y_.load() + static_cast<float>(a.y) * scy;
+    const auto sw = static_cast<float>(a.width) * scx;
+    const auto sh = static_cast<float>(a.height) * scy;
+    static const bool area_debug = std::getenv("WPE_BROWSER_DEBUG_MEDIA_AREA") != nullptr;
+    if (area_debug)
+        fprintf(stderr, "[page-area] webkit=(%d,%d %dx%d) origin=(%.1f,%.1f) scale=(%.4f,%.4f) -> area=(%.1f,%.1f %.1fx%.1f)\n",
+                a.x, a.y, a.width, a.height, page_x_.load(), page_y_.load(), scx, scy, sx, sy, sw, sh);
+    // Only the owner's stream drives the plane and the hole: another tab's sink must not repaint them.
+    const bool from_owner = owner_.load() == p.id || owner_.load() == 0;
+    if (backend_ && a.width > 0 && a.height > 0 && from_owner && !use_lg_) backend_->set_area(plane_rect(sx, sy, sw, sh));
+    if (from_owner) {
+        // The same rectangle in PAGE pixels: page_view composites opacity outside it and transparency inside it.
+        hole_x_.store(static_cast<float>(a.x));
+        hole_y_.store(static_cast<float>(a.y));
+        hole_w_.store(static_cast<float>(a.width));
+        hole_h_.store(static_cast<float>(a.height));
+        hole_id_.store(p.id);
+        ++hole_serial_;
+    }
 }
 
 bool MediaServer::release_owner(const char *why) {
@@ -455,35 +515,11 @@ void MediaServer::serve(int fd, uint64_t id) {
             if (h.size < sizeof(WpebMediaArea)) break;
             WpebMediaArea a;
             std::memcpy(&a, payload.data(), sizeof(a));
-            std::lock_guard<std::mutex> lock(mutex_);
-            // WebKit reports the video area in page-surface pixels; map it to drawable pixels with the page
-            // rectangle the UI keeps up to date (set_page_mapping), so the plane follows scrolling and the
-            // render scale instead of sitting at a fixed page-pixel offset.
-            const auto scx = page_scale_x_.load(), scy = page_scale_y_.load();
-            const auto sx = page_x_.load() + static_cast<float>(a.x) * scx;
-            const auto sy = page_y_.load() + static_cast<float>(a.y) * scy;
-            const auto sw = static_cast<float>(a.width) * scx;
-            const auto sh = static_cast<float>(a.height) * scy;
-            // One line with the whole arithmetic, so the report can show it instead of asserting it.
-            static const bool area_debug = std::getenv("WPE_BROWSER_DEBUG_MEDIA_AREA") != nullptr;  // not on every message by default
-            if (area_debug)
-            fprintf(stderr, "[page-area] webkit=(%d,%d %dx%d) origin=(%.1f,%.1f) scale=(%.4f,%.4f) -> area=(%.1f,%.1f %.1fx%.1f)\n",
-                    a.x, a.y, a.width, a.height, page_x_.load(), page_y_.load(), scx, scy, sx, sy, sw, sh);
-            // Only the owner's stream drives the plane and the hole: another tab's sink must not repaint
-            // them while this one plays.
-            const bool from_owner = owner_.load() == id || owner_.load() == 0;
-            if (backend_ && a.width > 0 && a.height > 0 && from_owner && !use_lg_)
-                backend_->set_area(wnk::Rect{sx, sy, sw, sh});
-            // The same rectangle in PAGE pixels: page_view composites opacity outside it and transparency
-            // inside it, so a page without a background of its own stays white except where the video is.
-            if (from_owner) {
-                hole_x_.store(static_cast<float>(a.x));
-                hole_y_.store(static_cast<float>(a.y));
-                hole_w_.store(static_cast<float>(a.width));
-                hole_h_.store(static_cast<float>(a.height));
-                hole_id_.store(id);
-                ++hole_serial_;
-            }
+            // Not applied here: the UI commits the newest rectangle together with the page frame it draws
+            // (commit_area), so the plane, the hole and the picture move in the same frame instead of the plane
+            // running ahead of the page by one engine frame.
+            std::lock_guard<std::mutex> al(area_mu_);
+            pending_ = PendingArea{a, id, Clock::now(), ++pending_seq_, true};
 
             break;
         }

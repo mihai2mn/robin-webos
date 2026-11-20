@@ -617,6 +617,7 @@ class App : public wnk::app::Delegate {
             close_tab(id);
         }
         direct_.dispatch();
+        media_.commit_area(engine_.frame() != nullptr && engine_.frame()->tab == active_);
         // Hardware video: let the video plane under the UI show through the hole WebKit punches in the page.
         // While video is active the frame clear becomes transparent (the kit accumulates destination alpha for
         // exactly this) and the page view stops clearing opaquely, so the transparent hole stays transparent.
@@ -689,7 +690,7 @@ class App : public wnk::app::Delegate {
             if (mapping_dirty_ || r.x != map_x_ || r.y != map_y_ || r.w != map_w_ || r.h != map_h_) {
                 mapping_dirty_ = false;
                 map_x_ = r.x, map_y_ = r.y, map_w_ = r.w, map_h_ = r.h;
-                media_.set_page_mapping(static_cast<float>(r.x), static_cast<float>(r.y), m.x, m.y);
+                media_.set_page_mapping(static_cast<float>(r.x), static_cast<float>(r.y), m.x, m.y, static_cast<float>(r.w), static_cast<float>(r.h));
                 WNK_LOGI(kCat, "video area mapping: view=(%d,%d %dx%d) page=%ux%u rect_in=%s scale=(%.4f,%.4f)",
                          static_cast<int>(r.x), static_cast<int>(r.y), static_cast<int>(r.w), static_cast<int>(r.h), w, h,
                          m.which, static_cast<double>(m.x), static_cast<double>(m.y));

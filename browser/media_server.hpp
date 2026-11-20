@@ -12,6 +12,9 @@
 #include <thread>
 
 #include "lg_media_player.hpp"
+#include "wnk/geometry.hpp"
+#include "wpe_media_ipc.h"
+#include <chrono>
 
 namespace wnk::media { class NdlBackend; }
 
@@ -37,11 +40,14 @@ public:
     // Page -> screen mapping for the video area: WebKit reports the video rectangle in page-surface pixels
     // (see engine/gst/wpebmediasink.c, the sink's "rectangle" property), while the decoder wants drawable
     // pixels and our window scrolls the page inside the view. Called on the main thread on every resize.
-    void set_page_mapping(float x, float y, float scale_x, float scale_y);
+    void set_page_mapping(float x, float y, float scale_x, float scale_y, float view_w = 0, float view_h = 0);
     // The page that owned the stream navigated away or its tab closed, and the engine has not said so (it keeps the old
     // page's media element alive for a while and pauses it later): unload the decoder and clear the rectangle now.
     // Any thread. Returns true if a stream was released.
     bool release_owner(const char *why);
+    // UI frame loop: apply the newest video area (plane + hole) together with the page frame about to be drawn.
+    void commit_area(bool frame_ready);
+    wnk::Rect plane_rect(float x, float y, float w, float h) const;
     // The connection whose stream holds the decoder (0: none); changes with every new Load.
     uint64_t owner_id() const { return owner_.load(); }
     // Clears the video rectangle (owner released, or another stream took over).
@@ -75,6 +81,18 @@ private:
     // Page -> screen transform for WPEB_MEDIA_AREA (guarded by mutex_).
     // Read by the media thread from the WPEB_MEDIA_AREA handler, written by the render thread each
     // layout: four floats, so plain atomics -- a mutex here was taken every frame from the render thread.
+    using Clock = std::chrono::steady_clock;
+    struct PendingArea {
+        WpebMediaArea area{};
+        uint64_t id = 0;
+        Clock::time_point at{};
+        uint64_t seq = 0;
+        bool valid = false;
+    };
+    std::mutex area_mu_;  // pending_ only
+    PendingArea pending_;
+    uint64_t pending_seq_ = 0;
+    std::atomic<float> view_w_{0}, view_h_{0};
     std::atomic<float> page_x_{0}, page_y_{0}, page_scale_x_{1}, page_scale_y_{1};
     std::atomic<uint64_t> hole_serial_{0}, hole_id_{0};  // hole_id_: the stream that sent the stored rectangle
     std::atomic<float> hole_x_{0}, hole_y_{0}, hole_w_{0}, hole_h_{0};  // page px; read by the render thread
