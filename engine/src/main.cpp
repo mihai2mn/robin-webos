@@ -1010,6 +1010,20 @@ void on_hybrid_message(WebKitUserContentManager *, JSCValue *value, gpointer dat
     g_free(text);
 }
 
+// compat.js's emulated fullscreen (a hardware-plane video stretched over the page) tells the UI the same thing WebKit's own
+// fullscreen does, so the toolbar goes away and the page gets the whole screen. "1" entered, "0" left.
+void on_emulated_fullscreen(WebKitUserContentManager *, JSCValue *value, gpointer data)
+{
+    gchar *text = jsc_value_to_string(value);
+    const uint32_t id = GPOINTER_TO_UINT(data);
+    if (text && (text[0] == '1' || text[0] == '0') && !text[1]) {
+        WpeFlag flag = {static_cast<uint32_t>(text[0] == '1')};
+        log_msg("tab %u %s fullscreen (emulated)", id, flag.value ? "entered" : "left");
+        send_msg(WPE_ENGINE_FULLSCREEN, id, &flag, sizeof(flag));
+    }
+    g_free(text);
+}
+
 std::string hybrid_video_script()
 {
     if (getenv("WPE_BROWSER_DEBUG_HYBRID") && !strcmp(getenv("WPE_BROWSER_DEBUG_HYBRID"), "0"))
@@ -1054,6 +1068,8 @@ void add_hybrid_video(WebKitWebView *web_view, uint32_t id)
     WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(web_view);
     if (!ucm || source.empty())
         return;
+    if (webkit_user_content_manager_register_script_message_handler(ucm, "wpebFullscreen", nullptr))
+        g_signal_connect(ucm, "script-message-received::wpebFullscreen", G_CALLBACK(on_emulated_fullscreen), GUINT_TO_POINTER(id));
     // The decision log is a message handler every page could post to, and engine.log lives in the TV's RAM (/tmp):
     // only while debugging (WPE_BROWSER_DEBUG_HYBRID=log, or the console reporter is on anyway).
     if ((getenv("WPE_BROWSER_DEBUG_HYBRID") && !strcmp(getenv("WPE_BROWSER_DEBUG_HYBRID"), "log")) || getenv("WPE_BROWSER_DEBUG_CONSOLE")) {

@@ -90,6 +90,7 @@ PageToScreen page_to_screen_scale(float engine_scale) {
 }
 constexpr double kChromeSlideMs = 160;     // toolbar slide in/out
 constexpr double kChromeDwellMs = 350;  // the pointer rests this long at the top edge before the toolbar comes
+constexpr double kChromeHideDelayMs = 250;  // the toolbar must be unwanted this long before it slides away (no flicker when a reason flips back and forth)
 constexpr float kChromeLeaveMargin = 24.0f;  // logical px below the toolbar that send it away again
 constexpr float kChromeRevealEdge = 6.0f;  // logical px at the top of the screen that bring the toolbar back
 constexpr int kMaxRestarts = 3;
@@ -491,10 +492,18 @@ class App : public wnk::app::Delegate {
         // bottom of its last visible row.
         const float bottom = screen_->panel_->frame().bottom();
         const float h = std::max(0.0f, bottom - chrome->frame().y);
-        chrome_h_ = h;
-        const bool want = chrome_wanted(ui);
-        const bool dock = docked();
+        // A hidden toolbar has no layout height: keep the last real one, or the pointer's "left the toolbar" test
+        // (chrome_h_ + margin) collapses to the margin and cancels the reveal the moment it starts.
+        if (h > 0.0f || chrome->visible()) chrome_h_ = h;
         const double now = ui.now_ms();
+        const bool dock = docked();
+        const Tab *ft = tab(active_);
+        bool want = chrome_wanted(ui);
+        // Hysteresis: showing is immediate, hiding waits until the toolbar has been unwanted for a moment. Anything that
+        // flips its wanted state back and forth (the pointer at the edge, focus, a fullscreen report) then moves it once.
+        if (want || (ft != nullptr && ft->fullscreen)) want_false_since_ = 0;
+        else if (want_false_since_ == 0) want_false_since_ = now;
+        if (!want && want_false_since_ > 0 && chrome->visible() && now - want_false_since_ < kChromeHideDelayMs && chrome_shown_ > 0.0f) want = true;
         const double dt = last_chrome_ms_ > 0 ? now - last_chrome_ms_ : 0;
         last_chrome_ms_ = now;
         const float step = static_cast<float>(dt / kChromeSlideMs);
@@ -813,6 +822,8 @@ class App : public wnk::app::Delegate {
             if (at != nullptr && !at->url.empty()) {
                 if (e.down && !e.repeat) {
                     pointer_chrome_ = false;
+                    pointer_edge_since_ = 0;
+                    pointer_edge_armed_ = false;  // a pointer still resting at the edge must not bring it straight back
                     focus_content();
                 }
                 return true;
@@ -912,10 +923,14 @@ class App : public wnk::app::Delegate {
         // the page; clicking a toolbar control moves it there.
         if (p.type == T::Move) {
             if (l.y < kChromeRevealEdge) {
-                if (pointer_edge_since_ == 0) pointer_edge_since_ = ctx.ui().now_ms();
+                if (pointer_edge_since_ == 0 && pointer_edge_armed_) pointer_edge_since_ = ctx.ui().now_ms();
             } else {
                 pointer_edge_since_ = 0;
-                if (pointer_chrome_ && l.y > chrome_h_ + kChromeLeaveMargin) pointer_chrome_ = false;
+                pointer_edge_armed_ = true;
+                if (pointer_chrome_ && l.y > chrome_h_ + kChromeLeaveMargin) {
+                    pointer_chrome_ = false;
+                    pointer_edge_since_ = 0;
+                }
             }
         }
         if (!screen_->chrome_->visible() && l.y < kChromeRevealEdge) {
@@ -1513,6 +1528,8 @@ class App : public wnk::app::Delegate {
     float chrome_shown_ = 1.0f;  // 0 hidden .. 1 shown (slide position)
     float chrome_h_ = 0;         // height of the chrome's rows
     double last_chrome_ms_ = 0;
+    double want_false_since_ = 0;     // since when the toolbar has not been wanted (update_chrome's hide delay)
+    bool pointer_edge_armed_ = true;  // the pointer has left the top edge since the toolbar last went away
     bool pointer_chrome_ = false;    // the pointer brought the toolbar (at the top edge); it goes when the pointer leaves
     double pointer_edge_since_ = 0;  // the pointer reached the top edge then (0: not there)
     float dock_inset_ = -1;          // the page's top inset below the docked toolbar (logical px)

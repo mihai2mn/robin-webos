@@ -276,6 +276,11 @@
             const vs = el instanceof HTMLVideoElement ? [el] : (el.querySelectorAll ? [...el.querySelectorAll('video')] : []);
             return vs.some(v => v.isConnected && !v.hasAttribute('wren-software') && v.getAttribute('wren-policy') !== null && v.__wrenPolicy === 'hw');
         };
+        // Tell the browser UI (engine: wpebFullscreen), which hides its toolbar while a page is fullscreen: WebKit's own
+        // fullscreen reports itself, this emulated one has to.
+        const tellUi = on => {
+            try { window.webkit.messageHandlers.wpebFullscreen.postMessage(on ? '1' : '0'); } catch (e) {}
+        };
         const fire = el => {
             for (const name of ['fullscreenchange', 'webkitfullscreenchange']) {
                 try { el.dispatchEvent(new Event(name, { bubbles: true })); } catch (e) {}
@@ -297,6 +302,7 @@
             el.style.setProperty('background-color', 'rgba(0,0,0,0)', 'important');  // the hole must show the plane: nothing opaque behind the video
             document.documentElement.setAttribute('wren-emulated-fullscreen', '');
             log({ fullscreen: 'emulated enter', tag: el.tagName });
+            tellUi(true);
             fire(el);
         };
         function leave() {
@@ -306,6 +312,7 @@
             if (emu.style === null) el.removeAttribute('style'); else el.setAttribute('style', emu.style);
             document.documentElement.removeAttribute('wren-emulated-fullscreen');
             log({ fullscreen: 'emulated leave', tag: el.tagName });
+            tellUi(false);
             fire(el);
         }
         for (const [name, value] of [['fullscreenElement', () => emu.el || null], ['webkitFullscreenElement', () => emu.el || null],
