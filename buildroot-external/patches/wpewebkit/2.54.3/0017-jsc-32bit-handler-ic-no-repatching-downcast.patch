@@ -1,0 +1,91 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] JSC: do not downcast a handler-IC PropertyInlineCache to RepatchingPropertyInlineCache
+
+The baseline DataIC path on 32-bit uses the handler-IC form of PropertyInlineCache, a sibling type of
+RepatchingPropertyInlineCache with a smaller object. Three places downcast unconditionally and write members that only
+exist on the repatching form (m_usedRegisters, startLocation, m_slowPathCallLocation), corrupting memory past or inside
+the handler cache in release builds (the guarding ASSERTs compile out):
+
+- PropertyInlineCache::setUsedRegisters / removeUsedRegister: dynamicDowncast and return early.
+- JITInlineCacheGenerator::finalize: branch on the cache type; the handler IC only has doneLocation and
+  slowPathStartLocation.
+- JITInlineCacheGenerator::setUpStubInfo: do not call setUsedRegisters on a handler IC.
+
+See build/jit254/REPORT.md sections 15.3 and 17.4.
+---
+diff --git a/Source/JavaScriptCore/bytecode/PropertyInlineCache.h b/Source/JavaScriptCore/bytecode/PropertyInlineCache.h
+--- a/Source/JavaScriptCore/bytecode/PropertyInlineCache.h
++++ b/Source/JavaScriptCore/bytecode/PropertyInlineCache.h
+@@ -717,14 +717,21 @@
+ 
+ inline void PropertyInlineCache::setUsedRegisters(ScalarRegisterSet value)
+ {
+-    ASSERT(is<RepatchingPropertyInlineCache>(*this));
+-    downcast<RepatchingPropertyInlineCache>(*this).m_usedRegisters = value;
++    // m_usedRegisters only exists on the repatching form; a handler-IC cache is a sibling type with a
++    // smaller object, so an unchecked downcast here would write past its end. Release builds compile the
++    // guarding ASSERT out, so return early instead of corrupting memory.
++    auto* repatching = dynamicDowncast<RepatchingPropertyInlineCache>(*this);
++    if (!repatching)
++        return;
++    repatching->m_usedRegisters = value;
+ }
+ 
+ inline void PropertyInlineCache::removeUsedRegister(GPRReg reg)
+ {
+-    ASSERT(is<RepatchingPropertyInlineCache>(*this));
+-    downcast<RepatchingPropertyInlineCache>(*this).m_usedRegisters.remove(reg);
++    auto* repatching = dynamicDowncast<RepatchingPropertyInlineCache>(*this);
++    if (!repatching)
++        return;
++    repatching->m_usedRegisters.remove(reg);
+ }
+ 
+ inline auto appropriateGetByIdOptimizeFunction(AccessType type) -> decltype(&operationGetByIdOptimize)
+diff --git a/Source/JavaScriptCore/jit/JITInlineCacheGenerator.cpp b/Source/JavaScriptCore/jit/JITInlineCacheGenerator.cpp
+--- a/Source/JavaScriptCore/jit/JITInlineCacheGenerator.cpp
++++ b/Source/JavaScriptCore/jit/JITInlineCacheGenerator.cpp
+@@ -85,10 +85,20 @@
+     LinkBuffer& fastPath, LinkBuffer& slowPath, CodeLocationLabel<JITStubRoutinePtrTag> start)
+ {
+     ASSERT(m_propertyCache);
+-    auto& repatchingIC = downcast<RepatchingPropertyInlineCache>(*m_propertyCache);
+-    repatchingIC.startLocation = start;
++    // Only the repatching form has startLocation / m_slowPathCallLocation. A handler-IC cache -- which is
++    // what the baseline DataIC path uses on 32-bit -- is a sibling type, not a base of the repatching form,
++    // so an unconditional downcast writes those two members at offsets that belong to unrelated fields of
++    // the handler object and corrupts it. Branch on the cache type, exactly as
++    // PropertyInlineCache::usedRegisters()/setUsedRegisters() already do.
++    if (auto* repatchingIC = dynamicDowncast<RepatchingPropertyInlineCache>(*m_propertyCache)) {
++        repatchingIC->startLocation = start;
++        m_propertyCache->doneLocation = fastPath.locationOf<JSInternalPtrTag>(m_done);
++        repatchingIC->m_slowPathCallLocation = slowPath.locationOf<JSInternalPtrTag>(m_slowPathCall);
++        m_propertyCache->slowPathStartLocation = slowPath.locationOf<JITStubRoutinePtrTag>(m_slowPathBegin);
++        return;
++    }
++    // Handler IC: only the two shared CodeLocationLabel members exist on this cache.
+     m_propertyCache->doneLocation = fastPath.locationOf<JSInternalPtrTag>(m_done);
+-    repatchingIC.m_slowPathCallLocation = slowPath.locationOf<JSInternalPtrTag>(m_slowPathCall);
+     m_propertyCache->slowPathStartLocation = slowPath.locationOf<JITStubRoutinePtrTag>(m_slowPathBegin);
+ }
+ 
+diff --git a/Source/JavaScriptCore/jit/JITInlineCacheGenerator.h b/Source/JavaScriptCore/jit/JITInlineCacheGenerator.h
+--- a/Source/JavaScriptCore/jit/JITInlineCacheGenerator.h
++++ b/Source/JavaScriptCore/jit/JITInlineCacheGenerator.h
+@@ -97,7 +97,15 @@
+         } else {
+             propertyCache.codeOrigin = codeOrigin;
+             propertyCache.callSiteIndex = callSiteIndex;
+-            propertyCache.setUsedRegisters(usedRegisters.toScalarRegisterSet());
++            // Only the repatching form stores a register set. A handler-IC cache (the baseline DataIC form on
++            // 32-bit) is a sibling type with a smaller object, so writing m_usedRegisters on it would land past
++            // its end. isHandlerIC() is on the base class, so no extra include is needed here.
++            if constexpr (std::is_same_v<std::decay_t<PropertyInlineCache>, JSC::PropertyInlineCache>) {
++                if (!propertyCache.isHandlerIC())
++                    propertyCache.setUsedRegisters(usedRegisters.toScalarRegisterSet());
++            } else {
++                propertyCache.setUsedRegisters(usedRegisters.toScalarRegisterSet());
++            }
+         }
+         if constexpr (std::is_same_v<std::decay_t<PropertyInlineCache>, JSC::PropertyInlineCache>) {
+             if (codeOrigin.inlineCallFrame())

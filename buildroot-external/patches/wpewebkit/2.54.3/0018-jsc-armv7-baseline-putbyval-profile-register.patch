@@ -1,0 +1,46 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] JSC: baseline put_by_val profile register must not alias the handler register on ARMv7
+
+On ARMv7 BaselineJITRegisters::PutByVal::profileGPR was preferredArgumentGPR<operationPutByVal*Optimize, 4>() ==
+GPRInfo::regT7 == r9 == GPRInfo::handlerGPR. The handler-IC dispatch (ldr handlerGPR, [propertyCache, #m_handler])
+overwrote the live ArrayProfile* with the InlineCacheHandler*, so the slow path passed the shared handler to
+operationPutByVal*Optimize as an ArrayProfile and ArrayProfile::computeUpdatedPrediction() stored into handler+8 /
+handler+12 (m_next / m_callTarget); the next dispatch then jumped to a bit-set-shaped address. The 64-bit variant
+already static_asserts the non-overlap; the 32-bit one did not.
+
+Use GPRInfo::regCS0 (r10, metadataTable) for profileGPR on ARM_THUMB2, which emit_op_put_by_val and
+putByValSlowPathCodeGenerator already re-materialize, and add the missing static_assert. Other 32-bit CPUs keep the
+upstream definition.
+---
+diff --git a/Source/JavaScriptCore/jit/BaselineJITRegisters.h b/Source/JavaScriptCore/jit/BaselineJITRegisters.h
+--- a/Source/JavaScriptCore/jit/BaselineJITRegisters.h
++++ b/Source/JavaScriptCore/jit/BaselineJITRegisters.h
+@@ -260,7 +260,20 @@
+     static constexpr JSValueRegs propertyJSR { preferredArgumentJSR<SlowOperation, 1>() };
+     static constexpr JSValueRegs valueJSR { preferredArgumentJSR<SlowOperation, 2>() };
+     static constexpr GPRReg propertyCacheGPR { preferredArgumentGPR<SlowOperation, 3>() };
++#if USE(JSVALUE64)
++    static constexpr GPRReg profileGPR { preferredArgumentGPR<SlowOperation, 4>() };
++#elif CPU(ARM_THUMB2)
++    // On ARMv7 the 8th argument word of operationPutByVal*Optimize (base 2, property 2, value 2,
++    // propertyCache 1, profile 1) lands in GPRInfo::regT7 == r9 == GPRInfo::handlerGPR. The handler-IC
++    // dispatch (`ldr handlerGPR, [propertyCache, #offsetOfHandler]`) then overwrote the ArrayProfile*
++    // with the InlineCacheHandler*, so the slow path handed the handler to operationPutByVal*Optimize as
++    // an ArrayProfile and ArrayProfile::computeUpdatedPrediction() stored m_observedArrayModes /
++    // flags into handler+8 / handler+12 (m_next / m_callTarget): the "Bug A" crash. Use regCS0
++    // (metadataTable) instead; it is re-materialized after the fast path and after the slow-path call.
++    static constexpr GPRReg profileGPR { GPRInfo::regCS0 };
++#else
+     static constexpr GPRReg profileGPR { preferredArgumentGPR<SlowOperation, 4>() };
++#endif
+ #if USE(JSVALUE64)
+     static constexpr auto scratchRegisters = allocatedScratchRegisters<GPRInfo, baseJSR, propertyJSR, valueJSR, propertyCacheGPR, profileGPR, GPRInfo::handlerGPR>;
+     static constexpr GPRReg scratch1GPR { scratchRegisters[0] };
+@@ -270,6 +283,7 @@
+ #else
+     static constexpr auto scratchRegisters = allocatedScratchRegisters<GPRInfo, baseJSR, propertyJSR, valueJSR, propertyCacheGPR, profileGPR>;
+     static constexpr GPRReg scratch1GPR { scratchRegisters[0] };
++    static_assert(noOverlap(baseJSR, propertyJSR, valueJSR, propertyCacheGPR, profileGPR, GPRInfo::handlerGPR), "The handler IC dispatch clobbers handlerGPR before the slow operation call");
+ #endif
+ }
+ 

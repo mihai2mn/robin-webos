@@ -1,0 +1,31 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] JSC: initialise the metadata-table value profiles to the empty JSValue on JSVALUE32_64
+
+2.54 keeps the value profiles in the zero-filled front part of the MetadataTable (UnlinkedMetadataTable::link()
+memsets them to 0). A zeroed bucket is the empty JSValue only where JSValue::encode(JSValue()) == 0 (64-bit). On
+JSVALUE32_64 the empty value has EmptyValueTag != 0, so a zeroed bucket decodes as the double +0.0: every
+never-sampled profile predicted AnyIntAsDouble instead of "no information", and the DFG compiled never-executed
+code as if it had seen doubles. Observable failure: Map.prototype.forEach (builtin, @mapIterationEntry(storage) + 1
+passed back to the host function @mapIterationNext) was compiled with a double-typed `entry`, the host function read
+its low word (0) and iterated entry 0 forever once the DFG had compiled forEach with low tier-up thresholds.
+
+Construct the buckets with the ValueProfile constructor (clearBuckets) after the memset on 32-bit.
+---
+diff --git a/Source/JavaScriptCore/bytecode/UnlinkedMetadataTableInlines.h b/Source/JavaScriptCore/bytecode/UnlinkedMetadataTableInlines.h
+--- a/Source/JavaScriptCore/bytecode/UnlinkedMetadataTableInlines.h
++++ b/Source/JavaScriptCore/bytecode/UnlinkedMetadataTableInlines.h
+@@ -137,6 +137,14 @@
+     }
+     // FIXME: Is this needed since we'll clear the data in the CodeBlock Constructor... Plus I could see caching value profiles being profitable.
+     memset(buffer, 0, valueProfileSize);
++#if USE(JSVALUE32_64)
++    // A zeroed bucket is the empty JSValue only where JSValue::encode(JSValue()) == 0 (64-bit). On JSVALUE32_64
++    // EmptyValueTag != 0, so a zeroed bucket reads as the double +0.0: every never-sampled profile would predict
++    // AnyIntAsDouble instead of "no information", and the DFG then feeds doubles to host functions that need an
++    // int32 (e.g. @mapIterationNext(storage, entry) in Map.prototype.forEach looped forever on entry == 0).
++    for (unsigned offset = 0; offset < valueProfileSize; offset += sizeof(ValueProfile))
++        new (NotNull, buffer + offset) ValueProfile();
++#endif
+     memset(buffer + valueProfileSize + sizeof(LinkingData) + offsetTableSize, 0, totalSize - offsetTableSize - valueProfileSize);
+     return adoptRef(*new (buffer + valueProfileSize + sizeof(LinkingData)) MetadataTable(*this));
+ }

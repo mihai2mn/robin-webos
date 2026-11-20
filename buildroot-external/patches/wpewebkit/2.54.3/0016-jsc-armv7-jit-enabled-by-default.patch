@@ -1,0 +1,52 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] JSC: turn the JIT on by default on ARMv7 Linux (runtime default)
+
+2.54 narrowed Options::jitEnabledByDefault() to isAddress64Bit() and useDFGJIT / useRegExpJIT to is64Bit(), which
+switched the JIT off at runtime on 32-bit ARMv7 even though patch 0004 compiles it in. Add a constexpr
+armv7LinuxJITSupported() that repeats the compile-time predicate of 0004 word for word (CPU(ARM_THUMB2) &&
+(CPU(ARM_HARDFP) || CPU(ARM_SOFTFP_VFP)) && OS(LINUX)) and use it in the three defaults. Folds to false everywhere else,
+so no default changes on 64-bit or other 32-bit platforms.
+---
+diff --git a/Source/JavaScriptCore/runtime/Options.h b/Source/JavaScriptCore/runtime/Options.h
+--- a/Source/JavaScriptCore/runtime/Options.h
++++ b/Source/JavaScriptCore/runtime/Options.h
+@@ -174,7 +174,24 @@
+     static unsigned computeNumberOfGCMarkers(unsigned maxNumberOfGCMarkers);
+     static unsigned computeNumberOfWorkerThreads(int maxNumberOfWorkerThreads, int minimum = 1);
+     static int32_t computePriorityDeltaOfWorkerThreads(int32_t twoCorePriorityDelta, int32_t multiCorePriorityDelta);
+-    static constexpr bool jitEnabledByDefault() { return isAddress64Bit(); }
++    // True on ARMv7 Linux where the JIT is compiled in and actually usable. This must stay
++    // word-for-word identical to the predicate patch 0004 uses on the compile-time side
++    // (Source/WTF/wtf/PlatformEnable.h: `CPU(ARM_THUMB2) && (CPU(ARM_HARDFP) || CPU(ARM_SOFTFP_VFP))
++    // && OS(LINUX)`), so that "JIT compiled in" and "JIT on by default" can never disagree.
++    // It is constexpr and folds to `false` everywhere else, so every default below is unchanged on
++    // all 64-bit and non-ARMv7-32-bit platforms.
++    static constexpr bool armv7LinuxJITSupported()
++    {
++#if CPU(ARM_THUMB2) && (CPU(ARM_HARDFP) || CPU(ARM_SOFTFP_VFP)) && OS(LINUX)
++        return true;
++#else
++        return false;
++#endif
++    }
++
++    // 2.50.5: `is32Bit() || isAddress64Bit()`. 2.54 narrowed it to isAddress64Bit(), which switched
++    // the JIT off at runtime on 32-bit ARMv7 even though it is built there.
++    static constexpr bool jitEnabledByDefault() { return isAddress64Bit() || armv7LinuxJITSupported(); }
+     static constexpr bool ipintEnabledByDefault() { return isARM64() || isARM64E() || isX86_64(); }
+     static double defaultQuickDFGTierUpThresholdFactor()
+     {
+diff --git a/Source/JavaScriptCore/runtime/OptionsList.h b/Source/JavaScriptCore/runtime/OptionsList.h
+--- a/Source/JavaScriptCore/runtime/OptionsList.h
++++ b/Source/JavaScriptCore/runtime/OptionsList.h
+@@ -93,8 +93,8 @@
+     v(Bool, useLLInt,  true, Normal, "allows the LLINT to be used if true"_s) \
+     v(Bool, useJIT, jitEnabledByDefault(), Normal, "allows the executable pages to be allocated for JIT and thunks if true"_s) \
+     v(Bool, useBaselineJIT, true, Normal, "allows the baseline JIT to be used if true"_s) \
+-    v(Bool, useDFGJIT, is64Bit(), Normal, "allows the DFG JIT to be used if true"_s) \
+-    v(Bool, useRegExpJIT, jitEnabledByDefault() && is64Bit(), Normal, "allows the RegExp JIT to be used if true"_s) \
++    v(Bool, useDFGJIT, is64Bit() || armv7LinuxJITSupported(), Normal, "allows the DFG JIT to be used if true"_s) \
++    v(Bool, useRegExpJIT, jitEnabledByDefault() && (is64Bit() || armv7LinuxJITSupported()), Normal, "allows the RegExp JIT to be used if true"_s) \
+     v(Bool, useDOMJIT, is64Bit(), Normal, "allows the DOMJIT to be used if true"_s) \
+     \
+     v(Bool, reportMustSucceedExecutableAllocations, false, Normal, nullptr) \
