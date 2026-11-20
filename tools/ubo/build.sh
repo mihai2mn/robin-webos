@@ -64,7 +64,7 @@ lib)
     UNWIND=${UNWIND:-}
     if [ "$TARGET" = host ]; then
         CC=${CC:-cc}
-        cargo build --quiet --release --lib --manifest-path "$SRC/engine/ubo/Cargo.toml" --target-dir "$OUT/cargo-host"
+        cargo build --quiet --release --lib --features css-validation --manifest-path "$SRC/engine/ubo/Cargo.toml" --target-dir "$OUT/cargo-host"
         LIB=$OUT/cargo-host/release/libwren_ubo.a
         TARGET=$(rustc -vV | sed -n 's/^host: //p')
     else
@@ -78,7 +78,7 @@ lib)
         chmod +x "$OUT/cc-$TARGET"
         LINKER_VAR=CARGO_TARGET_$(echo "$TARGET" | tr 'a-z-' 'A-Z_')_LINKER
         env "$LINKER_VAR=$OUT/cc-$TARGET" CC="$OUT/cc-$TARGET" \
-            cargo build --quiet --release --lib --manifest-path "$SRC/engine/ubo/Cargo.toml" \
+            cargo build --quiet --release --lib --features css-validation --manifest-path "$SRC/engine/ubo/Cargo.toml" \
             --target "$TARGET" --target-dir "$OUT/cargo-target"
         LIB=$OUT/cargo-target/$TARGET/release/libwren_ubo.a
     fi

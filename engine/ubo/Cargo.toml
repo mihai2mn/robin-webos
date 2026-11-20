@@ -21,7 +21,8 @@ required-features = ["compiler"]
 [features]
 # css-validation: parse cosmetic filters properly (procedural operators like :has-text become procedural filters,
 # invalid selectors are dropped). Only needed where lists are parsed, i.e. at build time.
-compiler = ["adblock/resource-assembler", "adblock/css-validation"]
+css-validation = ["adblock/css-validation"]
+compiler = ["adblock/resource-assembler", "css-validation"]
 
 [dependencies]
 adblock = { version = "=0.13.6", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling", "single-thread"] }
