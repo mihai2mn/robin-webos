@@ -18,8 +18,9 @@ drivers, Wayland, PulseAudio and Widevine CDM are used.
 
 ## Engine
 
-WPE WebKit 2.50.5 (Skia), with the Baseline/DFG JavaScript JIT running on webOS's softfp ABI (patch 0004). Pages are
-painted on the CPU and composited with the TV's Mali GPU straight to the screen. See [patches.md](patches.md).
+WPE WebKit 2.54.3 (Skia; upstream Wren used 2.50.5), with the Baseline/DFG JavaScript JIT running on webOS's softfp ABI
+([jit-armv7.md](jit-armv7.md)). Pages are painted on the CPU and composited with the TV's Mali GPU straight to the
+screen. An optional 64-bit engine ships beside it ([engine64.md](engine64.md)). See [patches.md](patches.md).
 
 ## Media
 
@@ -28,8 +29,8 @@ WebKit's GStreamer pipeline hands encoded video (H.264, HEVC, VP9) and AAC to th
 pipeline (`StarfishMediaAPIs`; `browser/media_server.cpp`, `browser/lg_media_player.cpp`) on the TV's video plane,
 the same player LG's own Chromium uses. WebKit punches a hole in the page where the video is. HDR10/HLG metadata, end
 of stream, seeks and resolution changes are handled the way LG's Chromium does them
-([lg-chromium-media.md](lg-chromium-media.md)). Opus and Vorbis are decoded in software and played through
-PulseAudio.
+([lg-chromium-media.md](lg-chromium-media.md)). In this fork decoded audio (Opus, Vorbis) is sent to LG's pipeline as PCM with the video, because webOS 5 has no
+PulseAudio server. Details and the hybrid in-page/hardware policy: [video.md](video.md).
 
 LG player functions that not every firmware has (setHdrInfo, setAudioMute, setVolume, getMaxVideoResolution) are
 looked up at run time.
@@ -49,7 +50,7 @@ looked up at run time.
   ([lg-chromium-media.md](lg-chromium-media.md) §4).
 - ClearKey does not work while the Widevine (Thunder) backend is on; persistent licences and
   `setServerCertificate` are not implemented.
-- Audio other than AAC (Opus, Vorbis) is decoded in software. A codec change mid-stream can stall.
+- Audio other than AAC (Opus, Vorbis) is decoded in software and played as PCM through LG's pipeline when the video is on the hardware plane ([video.md](video.md)). A codec change mid-stream can stall.
 - One hardware video at a time per app (LG's pipeline); a second one loses its picture.
 - A site that only has a `favicon.ico` shows a letter instead of its icon (WPE has no favicon API; icons come from
   the page's icon links).
