@@ -152,6 +152,9 @@ do_webkit32() {
 do_ubo() {
     export PATH=$HOME/.cargo/bin:$PATH RUSTC_WRAPPER=
     local U=$WORK/ubo X32=$BR/x-tools/arm-webos-linux-gnueabi A64=$BR/br-out-aarch64
+    # UBO_LIBS_ONLY=1: keep the lists and data of the last run (no download), rebuild only the two extension libraries
+    # (a change to engine/ubo/src or extension.c).
+    if [ -z "${UBO_LIBS_ONLY:-}" ]; then
     rm -rf "$U"; mkdir -p "$U"
     rustup target add armv7-unknown-linux-gnueabi aarch64-unknown-linux-gnu 2>&1 | tail -2 | sed 's/^/   /'
     ( cd "$src" && python3 tools/ubo/update.py ) > "$WORK/ubo-update.log" 2>&1 || { tail "$WORK/ubo-update.log"; exit 1; }
@@ -159,6 +162,7 @@ do_ubo() {
     say "ubo data (cargo build of the list compiler)"
     ( cd "$src" && OUT="$U" sh tools/ubo/build.sh data ) > "$WORK/ubo-data.log" 2>&1 || { tail -20 "$WORK/ubo-data.log"; exit 1; }
     ls -l "$U/data/engine.dat" | sed 's/^/   /'
+    fi
     local sr32=$BR/br-out/host/arm-buildroot-linux-gnueabi/sysroot
     say "libwren-ubo.so armv7"
     ( cd "$src" && OUT="$U" CC="$X32/bin/arm-webos-linux-gnueabi-gcc -mcpu=cortex-a9 -mfloat-abi=softfp" \

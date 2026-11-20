@@ -192,18 +192,34 @@ pub extern "C" fn wren_ubo_check(
         return allow;
     };
     let mut rewritten = None;
+    // uBO's rule: an exception filter (`@@`) in ANY list wins over a block from any other list, except for
+    // `$important` blocks. Each engine only knows its own filters, so collect all answers first: the user's own
+    // exceptions (My filters) and the lists' unbreak exceptions must work against the other lists' blocks.
+    let mut blocked: Option<Option<String>> = None; // Some(redirect) for the first block
+    let mut important = false;
+    let mut excepted = false;
     for (_, engine) in &ubo.engines {
-        let result = engine.check_network_request(&request);
-        if result.should_block() {
+        // force_check_exceptions: report an exception even when this engine has no block of its own.
+        let result = engine.check_network_request_subset(&request, false, true);
+        if result.exception.is_some() {
+            excepted = true;
+        }
+        if result.should_block() && (blocked.is_none() || (result.important && !important)) {
             // A redirect replaces the blocked resource with uBO's neutered version (an empty script, a stub of
             // the ad library, a 1x1 GIF, ...), so pages waiting on it keep working.
-            if let Some(redirect) = result.redirect {
-                return WrenUboVerdict { action: WREN_UBO_REDIRECT, text: c_string(redirect) };
-            }
-            return WrenUboVerdict { action: WREN_UBO_BLOCK, text: ptr::null_mut() };
+            blocked = Some(result.redirect);
+            important = result.important;
         }
         if rewritten.is_none() {
             rewritten = result.rewritten_url;
+        }
+    }
+    if let Some(redirect) = blocked {
+        if important || !excepted {
+            return match redirect {
+                Some(r) => WrenUboVerdict { action: WREN_UBO_REDIRECT, text: c_string(r) },
+                None => WrenUboVerdict { action: WREN_UBO_BLOCK, text: ptr::null_mut() },
+            };
         }
     }
     match rewritten {
