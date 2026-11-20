@@ -101,17 +101,23 @@ check_plugins() {
 }
 # Mesa is what WPEWebProcess draws with (no EGL in the engine: platform.cpp reports no EGL display); the 32-bit
 # engine ships without it by default, the aarch64 one cannot. libEGL/libGLESv2 alone are useless: they dispatch to
-# libgallium, which needs libLLVM (~100 MB with it).
+# libgallium. libgallium embeds whichever Gallium drivers the defconfig enabled; with BR2_PACKAGE_MESA3D_LLVM off
+# there is no libLLVM and softpipe is the rasteriser. engine64 ships llvmpipe; softpipe-only stays stageable.
 check_mesa() {
     # Globs must be expanded by the shell, so they are written literally with the directory prefix.
     local found=0
     for p in "$TARGET/usr/lib"/libEGL.so.1 "$TARGET/usr/lib"/libGLESv2.so.2 "$TARGET/usr/lib"/libgallium-*.so \
-             "$TARGET/usr/lib"/libLLVM.so.*[0-9] "$TARGET/usr/lib"/libgbm.so.1 "$TARGET/usr/lib"/libdrm.so.2; do
+             "$TARGET/usr/lib"/libgbm.so.1 "$TARGET/usr/lib"/libdrm.so.2; do
         [ -e "$p" ] || { echo "missing $(basename "$p") in target/usr/lib (BR2_PACKAGE_MESA3D*)" >&2; return 1; }
         found=1
     done
+    # libLLVM is optional: present only when llvmpipe is enabled. libgallium must be able to load either way.
     [ "$found" = 1 ] || return 1
-    echo "   Mesa: $(du -ch "$TARGET"/usr/lib/libgallium-*.so "$TARGET"/usr/lib/libLLVM.so.*[0-9] 2>/dev/null | tail -n 1 | cut -f1) (libgallium + libLLVM) to stage"
+    if ls "$TARGET"/usr/lib/libLLVM.so.*[0-9] >/dev/null 2>&1; then
+        echo "   Mesa: $(du -ch "$TARGET"/usr/lib/libgallium-*.so "$TARGET"/usr/lib/libLLVM.so.*[0-9] 2>/dev/null | tail -n 1 | cut -f1) (libgallium + libLLVM, llvmpipe)"
+    else
+        echo "   Mesa: $(du -sh "$TARGET"/usr/lib/libgallium-*.so 2>/dev/null | cut -f1) (libgallium, softpipe - no libLLVM)"
+    fi
 }
 # libpulse comes from the TV (its PulseAudio 9 drops newer clients, NOTES.md); bundling ours breaks sound silence-
 # side, so make sure the tree's copy is NOT a dependency candidate for the engine's package.
@@ -191,11 +197,12 @@ fi
 cmake=cmake
 [ -x "$BR_OUT/host/bin/cmake" ] && cmake=$BR_OUT/host/bin/cmake
 echo "== configure: $build"
-# CMAKE_SYSROOT explicitly: Buildroot's toolchainfile.cmake leaves it to CMake, which would derive <host>/ (the
-# parent of the toolchain sysroot) from the compiler path instead of the target tree.
+# CMAKE_SYSROOT is deliberately NOT passed: Buildroot's toolchainfile.cmake sets it (toolchainfile.cmake:76-77) to
+# the TOOLCHAIN sysroot, which holds the CRT objects (Scrt1.o, crti.o, ...) and the wpe-*.pc files. Passing $TARGET
+# (the target rootfs) instead has the libraries but no CRT objects, so even CMake's compiler sanity check dies with
+# "ld: cannot find Scrt1.o". CMAKE_FIND_ROOT_PATH still searches the target tree first so newly-built packages win.
 "$cmake" -S "$project/engine" -B "$build" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$BR_OUT/host/share/buildroot/toolchainfile.cmake" \
-    -DCMAKE_SYSROOT="$TARGET" \
     -DCMAKE_FIND_ROOT_PATH="$TARGET;$TC" \
     -DCMAKE_BUILD_TYPE=Release
 echo "== build (jobs=$JOBS)"
@@ -293,6 +300,12 @@ collect() {
                 case "$SYSTEM_LIBS" in *" $need "*) continue ;; esac
                 case "$seen" in *" $need "*) continue ;; esac
                 seen="$seen$need "
+                # Mesa's libraries are already staged in lib/mesa/ (and lib/mesa precedes lib/ in RUNPATH). Copying
+                # them into lib/ as well duplicated libLLVM (64 MB) + libgallium (17 MB) byte for byte: 81 MB wasted.
+                if [ -f "$stage/lib/mesa/$need" ]; then
+                    next="$next $stage/lib/mesa/$need"
+                    continue
+                fi
                 path=$(find_lib "$need") || { echo "   ! $need (needed by $(basename "$f")) not in the tree" >&2; continue; }
                 cp -L "$path" "$stage/lib/$need"
                 next="$next $stage/lib/$need"
@@ -332,9 +345,49 @@ for exe in "$stage/wpe-engine" "$stage"/libexec/* "$stage/lib/gstreamer-1.0/libg
     # Shared objects have no PT_INTERP; only executables do.
     "$READELF" -l "$exe" 2>/dev/null | grep -q 'Requesting program interpreter' || continue
     "$PATCHELF" --set-interpreter "$LOADER_LINK" "$exe"
-    # $ORIGIN/lib first, then the bundled glibc, then the Mesa directory (which is not on the default path).
-    "$PATCHELF" --set-rpath '$ORIGIN/lib:$ORIGIN/lib/glibc:$ORIGIN/lib/mesa' "$exe"
+    # $ORIGIN is the directory the executable lives in, so a helper in libexec/ needs ../lib, not lib.
+    # Using $ORIGIN/lib for everything made libexec/WPENetworkProcess look in libexec/lib (which does not exist)
+    # and the network/web processes then failed with "libWPEWebKit-2.0.so.1: cannot open shared object file".
+    case "$exe" in
+        "$stage"/libexec/*) origin='$ORIGIN/../lib:$ORIGIN/../lib/glibc:$ORIGIN/../lib/mesa' ;;
+        *)                  origin='$ORIGIN/lib:$ORIGIN/lib/glibc:$ORIGIN/lib/mesa' ;;
+    esac
+    # --force-rpath is required, not cosmetic. DT_RUNPATH is NOT transitive: when libWPEWebKit-2.0.so.1 needs
+    # libatomic.so.1, the loader searches the RUNPATH of libWPEWebKit (which has none), NOT the executable's.
+    # DT_RPATH *is* inherited by the whole closure, so the bundled lib/ is found for every level. Symptom without
+    # it: helpers fail with "libatomic.so.1: cannot open shared object file" even though lib/libatomic.so.1 exists.
+    "$PATCHELF" --force-rpath --set-rpath "$origin" "$exe"
 done
+
+# ---- RPATH on every bundled SHARED OBJECT, not just the executables ----
+# A library that is loaded *dynamically* (libsoup/gnutls pulling in libbrotlidec, for example) is resolved against
+# its OWN RPATH: the executing binary's RPATH is not consulted for a dlopen()-style load, and DT_RUNPATH is not
+# transitive at all. Without this, WPENetworkProcess gets past libWPEWebKit and libatomic and then dies with
+#   find library=libbrotlidec.so.1; search path=/lib64:/usr/lib64   (no RPATH line)
+# even though lib/libbrotlidec.so.1 exists. So each .so gets a search path relative to its own directory.
+#
+# lib/glibc/ is deliberately EXCLUDED: those objects are the bundled loader, libc and its companions, and pointing
+# them at the bundle's own lib/ risks resolving a second libc (or the loader's own deps) against the wrong copy.
+# They are found through the loader's --library-path / the executable RPATH, which is how the loader itself works.
+echo "== RPATH on bundled shared objects"
+rpath_count=0
+while IFS= read -r so; do
+    # Only ELF shared objects; skip the glibc directory (see above) and the gstreamer scanner-style binaries.
+    case "$so" in
+        "$stage"/lib/glibc/*) continue ;;
+    esac
+    case "$(head -c4 "$so" 2>/dev/null | od -An -tx1 | tr -d ' \n')" in
+        7f454c46) ;;
+        *) continue ;;
+    esac
+    case "$so" in
+        "$stage"/lib/mesa/*) so_origin='$ORIGIN:$ORIGIN/..:$ORIGIN/../lib:$ORIGIN/../lib/glibc' ;;
+        "$stage"/lib/gstreamer-1.0/*) so_origin='$ORIGIN:$ORIGIN/..:$ORIGIN/../mesa:$ORIGIN/../glibc' ;;
+        *) so_origin='$ORIGIN:$ORIGIN/..:$ORIGIN/mesa:$ORIGIN/glibc' ;;
+    esac
+    "$PATCHELF" --force-rpath --set-rpath "$so_origin" "$so" 2>/dev/null && rpath_count=$((rpath_count+1))
+done < <(find "$stage" -type f -name '*.so*' 2>/dev/null)
+echo "   RPATH set on $rpath_count shared objects (lib/glibc excluded)"
 
 echo "== check: every executable loads through $LOADER_LINK and finds its libraries"
 bad=0
@@ -352,7 +405,10 @@ for so in libc.so.6 libstdc++.so.6 libgcc_s.so.1; do
     [ -e "$stage/lib/glibc/$so" ] || { echo "   ! lib/glibc/$so missing" >&2; bad=1; }
 done
 [ -e "$stage/lib/mesa/libgallium-"[0-9]*.so ] || { echo "   ! lib/mesa/libgallium-*.so missing (no renderer)" >&2; bad=1; }
-[ -e "$stage/lib/mesa/libLLVM.so."* ] || { echo "   ! lib/mesa/libLLVM.so.* missing (libgallium needs it)" >&2; bad=1; }
+# libLLVM is only required when libgallium was built with llvmpipe; with softpipe-only Mesa it is absent by design.
+if "$READELF" -d "$stage/lib/mesa/libgallium-"[0-9]*.so 2>/dev/null | grep -q 'libLLVM'; then
+    [ -e "$stage/lib/mesa/libLLVM.so."* ] || { echo "   ! lib/mesa/libLLVM.so.* missing but libgallium needs it" >&2; bad=1; }
+fi
 [ "$bad" = 0 ] || exit 1
 
 echo "== dependencies of the engine"
