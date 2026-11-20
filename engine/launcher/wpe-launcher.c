@@ -239,6 +239,22 @@ static void exec_engine64(const char *app, int argc, char **argv)
     if (join(mesa, sizeof mesa, base, "/lib/mesa/libEGL.so.1") == 0 && access(mesa, R_OK) != 0)
         note("warning: no bundled Mesa, the 64-bit engine cannot read frames back", mesa);
 
+    /* The aarch64 helpers (WPEWebProcess, WPENetworkProcess) are exec'd by WebKit itself, so their PT_INTERP
+     * (/tmp/<app id>/ld-linux-aarch64.so.1, set when the package is built) must resolve: nobody else creates that link,
+     * and /tmp is empty after every reboot ("Failed to spawn child process ... (No such file or directory)"). */
+    {
+        const char *slash = strrchr(app, '/');
+        char dir[PATHBUF], link[PATHBUF], cur[PATHBUF];
+        if (slash && join(dir, sizeof dir, "/tmp/", slash + 1) == 0 && join(link, sizeof link, dir, "/ld-linux-aarch64.so.1") == 0) {
+            mkdir(dir, 0755);
+            ssize_t n = readlink(link, cur, sizeof cur - 1);
+            if (n < 0 || (size_t)n != strlen(loader) || strncmp(cur, loader, (size_t)n) != 0) {
+                unlink(link);
+                if (symlink(loader, link) != 0) note("warning: cannot link the aarch64 loader", link);
+            }
+        }
+    }
+
     char **env = engine64_environ(base, libs);
     if (!env) { note("out of memory, using 32-bit", ""); return; }
 
