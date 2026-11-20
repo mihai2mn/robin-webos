@@ -826,8 +826,6 @@ class App : public wnk::app::Delegate {
             if (at != nullptr && !at->url.empty()) {
                 if (e.down && !e.repeat) {
                     pointer_chrome_ = false;
-                    pointer_edge_since_ = 0;
-                    pointer_edge_armed_ = false;  // a pointer still resting at the edge must not bring it straight back
                     focus_content();
                 }
                 return true;
@@ -927,14 +925,10 @@ class App : public wnk::app::Delegate {
         // the page; clicking a toolbar control moves it there.
         if (p.type == T::Move) {
             if (l.y < kChromeRevealEdge) {
-                if (pointer_edge_since_ == 0 && pointer_edge_armed_) pointer_edge_since_ = ctx.ui().now_ms();
+                if (pointer_edge_since_ == 0) pointer_edge_since_ = ctx.ui().now_ms();
             } else {
                 pointer_edge_since_ = 0;
-                pointer_edge_armed_ = true;
-                if (pointer_chrome_ && l.y > chrome_h_ + kChromeLeaveMargin) {
-                    pointer_chrome_ = false;
-                    pointer_edge_since_ = 0;
-                }
+                if (pointer_chrome_ && l.y > chrome_h_ + kChromeLeaveMargin) pointer_chrome_ = false;
             }
         }
         if (!screen_->chrome_->visible() && l.y < kChromeRevealEdge) {
@@ -1533,7 +1527,6 @@ class App : public wnk::app::Delegate {
     float chrome_h_ = 0;         // height of the chrome's rows
     double last_chrome_ms_ = 0;
     double want_false_since_ = 0;     // since when the toolbar has not been wanted (update_chrome's hide delay)
-    bool pointer_edge_armed_ = true;  // the pointer has left the top edge since the toolbar last went away
     bool pointer_chrome_ = false;    // the pointer brought the toolbar (at the top edge); it goes when the pointer leaves
     double pointer_edge_since_ = 0;  // the pointer reached the top edge then (0: not there)
     float dock_inset_ = -1;          // the page's top inset below the docked toolbar (logical px)
