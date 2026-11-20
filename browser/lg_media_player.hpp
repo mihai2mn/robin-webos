@@ -42,6 +42,10 @@ public:
     // One access unit (Annex B for H.264/HEVC) or AAC frame, presentation time in microseconds of media time.
     Feed feed(bool audio, const uint8_t *data, size_t size, int64_t pts_us);
     bool has_audio() const { return has_audio_; }
+    // The pipeline's last error code (0: none since the Load) and the frames it has presented: a stream that failed before its first
+    // picture (decoder not yet free, resource contention) can be loaded again.
+    int error() const { return error_.load(); }
+    int64_t frames_presented() const { return frames_.load(); }
     // HDR10/HLG metadata from the container (setHdrInfo after Load): without it LG's panel stays in SDR for VP9/AV1
     // PQ (the kit's A/B on this TV). Nothing is declared for SDR or without mastering/light-level values.
     void set_hdr(const WpebMediaHdr &hdr);
@@ -67,6 +71,7 @@ private:
     bool has_audio_ = false;
     int64_t audio_lead_us_ = 0;  // added to the pts of PCM audio (Audio::pcm_lead_ms)
     int64_t fed_ = 0, full_ = 0, last_pts_us_ = 0, audio_fed_ = 0;
+    std::atomic<int> error_{0};
     std::atomic<int64_t> frames_{0};  // from the pipeline's thread
     int64_t stats_at_ms_ = 0;
 };

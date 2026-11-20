@@ -358,7 +358,12 @@ void MediaServer::serve(int fd, uint64_t id) {
     bool stop = false;
     bool ready = false;          // qm; the decoder is loaded (units wait until then)
     std::atomic<bool> backend_audio{false};  // the backend's load took audio (feeder reads it)
+    std::deque<Unit> replay;  // qm; units fed since the Load while no picture has been presented yet (a Load that fails early is repeated with them)
+    uint64_t replay_bytes = 0;
+    bool replay_ok = false;   // qm; the replay is complete (nothing was dropped from it)
+    std::atomic<bool> retry_wanted{false};  // the pipeline failed before its first picture: the reader thread loads it again
     std::atomic<bool> eos_pushed{false};  // the decoder was told the stream ended (cleared by a flush or load)
+    constexpr uint64_t kReplayMax = 48u << 20;  // 4K at 40 Mbit/s: about 9 s
     std::thread feeder([&] {
         Clock::time_point blocked_until[2] = {};
         bool ended[2] = {};          // feeder thread; the streams whose end was reached, in eos_generation
@@ -424,10 +429,25 @@ void MediaServer::serve(int fd, uint64_t id) {
             if (full && generation == g) {
                 ++full_waits;
                 blocked_until[pick] = Clock::now() + std::chrono::milliseconds(10);
+                if (replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
                 continue;
             }
-            if (!queues[pick].empty() && queues[pick].front().generation == g) queues[pick].pop_front();
+            if (!queues[pick].empty() && queues[pick].front().generation == g) {
+                // Keep what the decoder was given until its first picture shows (a failed start is repeated with it).
+                if (replay_ok && use_lg_) {
+                    if (lg_.frames_presented() > 0 || replay_bytes > kReplayMax) {
+                        replay.clear();
+                        replay_bytes = 0;
+                        replay_ok = false;
+                    } else {
+                        replay_bytes += queues[pick].front().packet.data.size();
+                        replay.push_back(queues[pick].front());
+                    }
+                }
+                queues[pick].pop_front();
+            }
             if (pick == 0) ++units;
+            if (replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
         }
     });
     const auto drop_queued = [&] {
@@ -466,6 +486,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     bool no_audio_track = false;
     bool load_pending = false;
     WpebMediaLoad pending{};
+    bool pending_valid = false;
     Clock::time_point load_at{};
 
     // The page element's volume and mute (WPEB_MEDIA_VOLUME): kept for the stream, applied after its Load. A muted element that
@@ -474,6 +495,8 @@ void MediaServer::serve(int fd, uint64_t id) {
     uint32_t vol_permille = 1000;
     bool vol_muted = false;
 
+    bool force_ndl = false;  // the last attempt after LG's pipeline failed to start: the Starfish backend's decoder
+    int retries = 0;
     const auto do_load = [&](const WpebMediaLoad &l) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!backend_) return;
@@ -509,7 +532,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         units = 0;
         full_waits = 0;
         const bool with_audio = audio_state == AudioState::Hardware;
-        if (l.window_id[0] && LgMediaPlayer::available()) {
+        if (l.window_id[0] && !force_ndl && LgMediaPlayer::available()) {
             const LgMediaPlayer::Codec c = l.codec == WPEB_MEDIA_H264 ? LgMediaPlayer::Codec::H264
                                            : l.codec == WPEB_MEDIA_HEVC ? LgMediaPlayer::Codec::Hevc
                                            : l.codec == WPEB_MEDIA_VP9  ? LgMediaPlayer::Codec::Vp9
@@ -543,6 +566,45 @@ void MediaServer::serve(int fd, uint64_t id) {
                      !(use_lg_ && with_audio) ? "" : audio_format.codec == WPEB_MEDIA_OPUS ? " with its Opus audio" : audio_format.codec == WPEB_MEDIA_PCM ? " with its PCM audio" : " with its AAC audio", l.window_id[0] ? ", window " : "", l.window_id);
         else
             WNK_LOGW(kCat, "stream %llu: decoder load failed: %s", static_cast<unsigned long long>(id), error.c_str());
+        std::lock_guard<std::mutex> ql(qm);
+        replay.clear();
+        replay_bytes = 0;
+        replay_ok = use_lg_;
+    };
+    // The LG pipeline failed before showing a picture (TV, 2026-11-20: "fail to create AVProxy" for a page's main video right after its
+    // ads, while another app still held a decoder or the ad's pipeline was still being released): load it again after a pause, with
+    // what it was fed, up to twice; the last attempt uses the other decoder (the Starfish backend). Generic: any early pipeline error.
+    const auto do_retry = [&] {
+        if (!retry_wanted.exchange(false)) return;
+        if (!pending_valid) return;
+        const int code = lg_.error();
+        ++retries;
+        std::deque<Unit> again;
+        {
+            std::lock_guard<std::mutex> ql(qm);
+            ready = false;
+            again.swap(replay);
+            replay_bytes = 0;
+            replay_ok = false;
+        }
+        const int delay_ms = retries == 1 ? 500 : 1500;
+        WNK_LOGW(kCat, "stream %llu: LG pipeline error %d before its first picture: attempt %d to load it again in %d ms%s", static_cast<unsigned long long>(id),
+                 code, retries + 1, delay_ms, retries >= 2 ? " (Starfish backend)" : "");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (owner_.load() == id) lg_.unload();
+            use_lg_ = false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        if (retries >= 2) force_ndl = true;
+        do_load(pending);
+        {
+            std::lock_guard<std::mutex> ql(qm);
+            // What was fed goes first again (per stream in order), ahead of what came meanwhile.
+            for (auto it = again.rbegin(); it != again.rend(); ++it) queues[it->packet.type == wnk::media::TrackType::Audio ? 1 : 0].push_front(std::move(*it));
+            ready = use_lg_ || ndl_loaded_;
+            qcv.notify_all();
+        }
     };
     const auto maybe_load = [&] {
         if (!load_pending) return;
@@ -557,11 +619,12 @@ void MediaServer::serve(int fd, uint64_t id) {
 
     for (;;) {
         pollfd pfd{fd, POLLIN, 0};
-        const int pr = ::poll(&pfd, 1, load_pending ? 100 : -1);
+        const int pr = ::poll(&pfd, 1, load_pending || retry_wanted.load() ? 100 : -1);
         if (pr < 0 && errno == EINTR) continue;
         if (pr < 0) break;
         if (pr == 0) {
             maybe_load();
+            do_retry();
             continue;
         }
         WpebMediaHeader h;
@@ -582,6 +645,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             // A held Load also times out while units keep arriving: poll() never goes idle when a page streams
             // without pause (YouTube's TV app), and the Load waited forever (TV, 2026-11-14).
             if (load_pending) maybe_load();
+            if (retry_wanted.load()) do_retry();
             const bool audio = h.type == WPEB_MEDIA_AUDIO;
             if (audio && audio_state != AudioState::Hardware) continue;
             Unit u;
@@ -600,6 +664,10 @@ void MediaServer::serve(int fd, uint64_t id) {
             drop_queued();
             set_ready(false);
             std::memcpy(&pending, payload.data(), sizeof(pending));
+            pending_valid = true;
+            retries = 0;
+            force_ndl = false;
+            retry_wanted = false;
             pending.window_id[sizeof(pending.window_id) - 1] = '\0';
             load_pending = true;
             load_at = Clock::now();

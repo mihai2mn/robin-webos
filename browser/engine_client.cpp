@@ -205,7 +205,9 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
     if (l.hw_audio) set_env(env, "WPEB_MEDIA_HW_AUDIO", "aac,pcm");  // the UI's decoder takes the page's AAC, and decoded audio as PCM (media socket)
     for (const auto &[name, value] : l.extra_env) {
         if (name.rfind("WEBKIT_", 0) == 0 || name.rfind("JSC_", 0) == 0 || name.rfind("WPE_BROWSER_DEBUG", 0) == 0 ||
-            name.rfind("GST_DEBUG", 0) == 0 || name.rfind("G_TLS_", 0) == 0) {  // G_TLS_GNUTLS_PRIORITY: TLS cipher order (network speed tests)
+            name.rfind("GST_DEBUG", 0) == 0 || name.rfind("G_TLS_", 0) == 0 ||
+            name.rfind("MSE_", 0) == 0) {  // MSE_MAX_BUFFER_SIZE: WPE's per-type SourceBuffer byte limit (experiments)
+  // G_TLS_GNUTLS_PRIORITY: TLS cipher order (network speed tests)
             set_env(env, name, value);
             WNK_LOGI(kCat, "engine env %s=%s (launch parameter)", name.c_str(), value.c_str());
         }

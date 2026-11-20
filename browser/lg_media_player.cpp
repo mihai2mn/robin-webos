@@ -236,6 +236,7 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
     fed_ = full_ = last_pts_us_ = audio_fed_ = 0;
     has_audio_ = with_audio;
     frames_ = 0;
+    error_ = 0;
     stats_at_ms_ = 0;
     if (!api_->Load(payload, &event_callback, this)) {
         *error = "StarfishMediaAPIs::Load refused the stream";
@@ -438,6 +439,7 @@ void LgMediaPlayer::on_event(int type, int64_t num, const char *str) {
     case PF_EVENT_TYPE_INT_ERROR:
     case PF_EVENT_TYPE_STR_ERROR:
         WNK_LOGW(kCat, "pipeline error %lld %s", static_cast<long long>(num), str ? str : "");
+        error_ = num != 0 ? static_cast<int>(num) : -1;
         return;
     case PF_EVENT_TYPE_STR_BUFFERFULL:
     case PF_EVENT_TYPE_STR_BUFFERLOW:
