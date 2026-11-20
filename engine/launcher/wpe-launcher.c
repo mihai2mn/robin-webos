@@ -122,45 +122,73 @@ static int switch_file_says_64(void)
            (p[2] == '\0' || p[2] == '\n' || p[2] == '\r' || p[2] == ' ' || p[2] == '\t');
 }
 
-/* A copy of our environment with the overrides the 64-bit engine needs. Everything else passes through untouched (the
- * UI already computed it for the engine tree, and engine64 mirrors that layout: WEBKIT_EXEC_PATH, LD_LIBRARY_PATH,
- * GST_*, WPE_BROWSER_DATA_DIR, the CA file...). NULL on allocation failure.
- *
- * The two overrides are the only presentation decision made here, and they are forced on purpose:
- *   WPE_BROWSER_PRESENT=shm       a 64-bit engine can only present through shared memory (direct mode needs the TV's
- *                                 32-bit Mali EGL and the 32-bit libwpeb-owner.so). Launching it with wpebPresent=direct
- *                                 would also put the UI in direct mode, whose surface group and video window can never
- *                                 be used by an SHM web process - see ui-launch/LAUNCHER.md "Follow-up 2". Overriding
- *                                 it makes the outcome deterministic instead of dependent on the compositor.
- *   WPE_BROWSER_RENDERER=software the same reason, for the renderer selection. */
-static char **engine64_environ(void)
+/* Keys the 64-bit tree must own. The UI computed these for the 32-bit engine tree (<app>/engine: its libexec, its
+ * GStreamer plugins, its fontconfig...), and the web process the 64-bit engine launches must come from engine64 too:
+ * with the 32-bit WEBKIT_EXEC_PATH the engine started the 32-bit WPEWebProcess, which talks a different (32-bit)
+ * IPC layout and was rejected with "Received invalid message: AcceleratedBackingStore_DidChangeBufferConfiguration"
+ * (TV, 2026-11-20, through the real UI). Values are built from <app>/engine64. */
+static const char *const kOwned[] = {
+    "WEBKIT_EXEC_PATH", "WEBKIT_INJECTED_BUNDLE_PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "GCONV_PATH", "GIO_MODULE_DIR",
+    "GIO_EXTRA_MODULES", "GST_PLUGIN_PATH", "GST_PLUGIN_PATH_1_0", "GST_PLUGIN_SYSTEM_PATH", "GST_PLUGIN_SYSTEM_PATH_1_0",
+    "GST_PLUGIN_SCANNER", "GST_PLUGIN_SCANNER_1_0", "FONTCONFIG_FILE", "XDG_DATA_DIRS", "PULSE_CLIENTCONFIG",
+    "GALLIUM_DRIVER", "WEBKIT_SKIA_ENABLE_CPU_RENDERING", "WEBKIT_DISABLE_DEFAULT_EGL_DISPLAY",
+    "WEBKIT_SKIA_CPU_PAINTING_THREADS", "WPE_BROWSER_PRESENT", "WPE_BROWSER_RENDERER", NULL
+};
+
+static char *kv(const char *k, const char *a, const char *b)
+{
+    size_t n = strlen(k) + strlen(a) + strlen(b) + 2;
+    char *s = malloc(n);
+    if (s) snprintf(s, n, "%s=%s%s", k, a, b);
+    return s;
+}
+
+static char **engine64_environ(const char *base, const char *libs)
 {
     extern char **environ;
     size_t count = 0;
     while (environ && environ[count]) ++count;
-    char **env = calloc(count + 8, sizeof *env);
+    char **env = calloc(count + 32, sizeof *env);
     if (!env) return NULL;
     size_t keep = 0;
     for (size_t i = 0; i < count; ++i) {
         const char *e = environ[i];
-        if (strncmp(e, "WPE_BROWSER_PRESENT=", 20) == 0 || strncmp(e, "WPE_BROWSER_RENDERER=", 21) == 0) {
-            /* Say so when we overrule a real choice: the user launched with e.g. wpebPresent=direct and picked the
-             * 64-bit engine. Silent overruling reads like a bug in a log; this line names the decision. */
-            const char *value = strchr(e, '=') + 1;
-            const int was_shm = strcmp(value, "shm") == 0;
-            const int was_software = strcmp(value, "software") == 0;
-            if (strncmp(e, "WPE_BROWSER_PRESENT=", 20) == 0 && !was_shm)
-                note("64-bit engine is SHM-only; overriding the UI's presentation", e);
-            else if (strncmp(e, "WPE_BROWSER_RENDERER=", 21) == 0 && !was_software)
-                note("64-bit engine renders in software; overriding the UI's renderer", e);
-            continue;
-        }
-        env[keep++] = environ[i];
+        const char *eq = strchr(e, '=');
+        size_t klen = eq ? (size_t)(eq - e) : strlen(e);
+        int owned = 0;
+        for (size_t k = 0; kOwned[k]; ++k)
+            if (strlen(kOwned[k]) == klen && strncmp(e, kOwned[k], klen) == 0) owned = 1;
+        if (!owned) { env[keep++] = environ[i]; continue; }
+        /* Say so when we overrule a real presentation choice (e.g. wpebPresent=direct with the 64-bit engine). */
+        const char *value = eq ? eq + 1 : "";
+        if (klen == 19 && strncmp(e, "WPE_BROWSER_PRESENT", 19) == 0 && strcmp(value, "shm") != 0)
+            note("64-bit engine is SHM-only; overriding the UI's presentation", e);
+        else if (klen == 20 && strncmp(e, "WPE_BROWSER_RENDERER", 20) == 0 && strcmp(value, "software") != 0)
+            note("64-bit engine renders in software; overriding the UI's renderer", e);
     }
-    static char present[] = "WPE_BROWSER_PRESENT=shm";
-    static char renderer[] = "WPE_BROWSER_RENDERER=software";
-    env[keep++] = present;
-    env[keep++] = renderer;
+    /* WPE_BROWSER_PRESENT=shm / WPE_BROWSER_RENDERER=software: a 64-bit engine can only present through shared memory
+     * (direct mode needs the TV's 32-bit Mali EGL and libwpeb-owner.so), see ui-launch/LAUNCHER.md "Follow-up 2". */
+    env[keep++] = kv("WPE_BROWSER_PRESENT", "shm", "");
+    env[keep++] = kv("WPE_BROWSER_RENDERER", "software", "");
+    env[keep++] = kv("LD_LIBRARY_PATH", libs, "");
+    env[keep++] = kv("LD_PRELOAD", "", "");
+    env[keep++] = kv("WEBKIT_EXEC_PATH", base, "/libexec");
+    env[keep++] = kv("WEBKIT_INJECTED_BUNDLE_PATH", base, "/lib/injected-bundle");
+    env[keep++] = kv("GCONV_PATH", base, "/lib/glibc/gconv");
+    env[keep++] = kv("GIO_MODULE_DIR", base, "/lib/gio/modules");
+    env[keep++] = kv("GIO_EXTRA_MODULES", "", "");
+    env[keep++] = kv("GST_PLUGIN_PATH", "", "");
+    env[keep++] = kv("GST_PLUGIN_PATH_1_0", "", "");
+    env[keep++] = kv("GST_PLUGIN_SYSTEM_PATH", base, "/lib/gstreamer-1.0");
+    env[keep++] = kv("GST_PLUGIN_SYSTEM_PATH_1_0", base, "/lib/gstreamer-1.0");
+    env[keep++] = kv("GST_PLUGIN_SCANNER", base, "/libexec/gst-plugin-scanner");
+    env[keep++] = kv("GST_PLUGIN_SCANNER_1_0", base, "/libexec/gst-plugin-scanner");
+    env[keep++] = kv("FONTCONFIG_FILE", base, "/etc/fonts/fonts.conf");
+    env[keep++] = kv("XDG_DATA_DIRS", base, "/share");
+    env[keep++] = kv("PULSE_CLIENTCONFIG", base, "/etc/pulse/client.conf");
+    env[keep++] = kv("GALLIUM_DRIVER", "llvmpipe", "");
+    env[keep++] = kv("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1", "");
+    env[keep++] = kv("WEBKIT_SKIA_CPU_PAINTING_THREADS", "4", "");
     env[keep] = NULL;
     return env;
 }
@@ -184,7 +212,7 @@ static void exec_engine64(const char *app, int argc, char **argv)
     if (join(mesa, sizeof mesa, base, "/lib/mesa/libEGL.so.1") == 0 && access(mesa, R_OK) != 0)
         note("warning: no bundled Mesa, the 64-bit engine cannot read frames back", mesa);
 
-    char **env = engine64_environ();
+    char **env = engine64_environ(base, libs);
     if (!env) { note("out of memory, using 32-bit", ""); return; }
 
     /* loader --library-path <libs> <program> [the UI's arguments, if it ever passes any] */

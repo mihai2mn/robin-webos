@@ -20,14 +20,18 @@ mkdir -p "$out"
 
 # -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=softfp: identical to the UI and the 32-bit engine (the TV's ABI).
 # -Os: it is called once per engine start; size and clarity matter, speed does not.
-"$cc" -static -Os -Wall -Wextra -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=softfp -marm \
+static_flag=(); [ "${LAUNCHER_STATIC:-0}" = 1 ] && static_flag=(-static)
+"$cc" "${static_flag[@]}" -Os -Wall -Wextra -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=softfp -marm \
     -o "$out/wpe-engine" "$src"
 
 "$readelf" -h "$out/wpe-engine" | grep -E 'Class|Machine|Type' | sed 's/^/  /'
 echo "  $(du -h "$out/wpe-engine" | cut -f1)  $out/wpe-engine"
-# It must be static: the UI execs it before the app's private loader link exists (browser/private_loader.cpp).
+# Dynamic by default (PT_INTERP /lib/ld-linux.so.3, the TV's own loader, needs only its libc): the UI reads the engine's
+# PT_INTERP (browser/private_loader.cpp) and refuses to start an engine that has none ("cannot read the dynamic
+# loader of .../engine/wpe-engine"), so a static launcher cannot sit in front of the engine. LAUNCHER_STATIC=1 builds the
+# old static one (only useful with fake-ui, which does not look).
 if "$readelf" -lW "$out/wpe-engine" | grep -q 'Requesting program interpreter'; then
-    echo "error: the launcher is dynamically linked; it must be static" >&2
-    exit 1
+    echo "  dynamic: $("$readelf" -lW "$out/wpe-engine" | sed -n 's/.*interpreter: \(.*\)\]/\1/p')"
+else
+    echo "  static: no PT_INTERP (the UI will refuse it)"
 fi
-echo "  static: no PT_INTERP (runs on the TV's own glibc, or none at all)"
