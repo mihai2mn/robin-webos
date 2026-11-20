@@ -202,7 +202,7 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
     } else {
         set_env(env, "WPE_BROWSER_PRESENT", "shm");
     }
-    if (l.hw_audio) set_env(env, "WPEB_MEDIA_HW_AUDIO", "aac");  // the UI's decoder takes the page's AAC (media socket)
+    if (l.hw_audio) set_env(env, "WPEB_MEDIA_HW_AUDIO", "aac,pcm");  // the UI's decoder takes the page's AAC, and decoded audio as PCM (media socket)
     for (const auto &[name, value] : l.extra_env) {
         if (name.rfind("WEBKIT_", 0) == 0 || name.rfind("JSC_", 0) == 0 || name.rfind("WPE_BROWSER_DEBUG", 0) == 0 ||
             name.rfind("GST_DEBUG", 0) == 0) {

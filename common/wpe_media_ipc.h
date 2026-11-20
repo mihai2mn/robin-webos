@@ -43,6 +43,7 @@ enum WpebMediaType {
 enum WpebMediaAudioCodec {
     WPEB_MEDIA_AAC = 1,
     WPEB_MEDIA_OPUS = 2, /* experimental (WPEB_HW_OPUS=1): LG's opusInfo, as Chromium on webOS declares it */
+    WPEB_MEDIA_PCM = 3,  /* audio the web process decoded (Opus, Vorbis, MP3, ...): S16LE interleaved, 48000 Hz, 2 channels */
 };
 
 /* Followed by header_size bytes of codec header (Opus: the OpusHead, RFC 7845 5.1). */

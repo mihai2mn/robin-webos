@@ -1034,7 +1034,8 @@ struct _WpebAudioHw {
 G_DEFINE_TYPE(WpebAudioHw, wpeb_audio_hw, GST_TYPE_BASE_SINK)
 
 static GstStaticPadTemplate audio_hw_template = GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS,
-    GST_STATIC_CAPS("audio/mpeg, mpegversion = (int) { 2, 4 }, stream-format = (string) { raw, adts }; audio/x-opus"));
+    GST_STATIC_CAPS("audio/mpeg, mpegversion = (int) { 2, 4 }, stream-format = (string) { raw, adts }; audio/x-opus; "
+        "audio/x-raw, format = (string) S16LE, layout = (string) interleaved, rate = (int) 48000, channels = (int) 2"));
 
 /* Opus: LG's pipeline gets the OpusHead (from the caps' stream header, else rebuilt from the caps' fields). */
 static gboolean audio_hw_opus_caps(WpebAudioHw *self, GstCaps *caps)
@@ -1085,6 +1086,13 @@ static gboolean wpeb_audio_hw_set_caps(GstBaseSink *sink, GstCaps *caps)
     GstStructure *s = gst_caps_get_structure(caps, 0);
     if (g_str_equal(gst_structure_get_name(s), "audio/x-opus"))
         return audio_hw_opus_caps(self, caps);
+    if (g_str_equal(gst_structure_get_name(s), "audio/x-raw")) {
+        /* Audio the web process decoded (the chain's capsfilter made it S16LE, 48 kHz, stereo): LG's pipeline plays it as PCM. */
+        self->codec = WPEB_MEDIA_PCM;
+        WpebMediaAudio pcm = {WPEB_MEDIA_PCM, 48000, 2, 0};
+        GST_INFO_OBJECT(self, "caps %" GST_PTR_FORMAT, caps);
+        return self->video && send_msg(self->video, WPEB_MEDIA_AUDIO_FORMAT, 0, &pcm, sizeof(pcm));
+    }
     self->codec = WPEB_MEDIA_AAC;
     const char *format = gst_structure_get_string(s, "stream-format");
     int rate = 0, channels = 0;
@@ -1315,27 +1323,108 @@ static GstElement *make_software_chain(WpebAudioSink *self, gboolean decode)
     return first;
 }
 
+static void send_volume(WpebAudioSink *self);
+
+/* Decoded audio for LG's pipeline: audioconvert ! audioresample ! S16LE/48000/stereo ! hardware audio sink. The web process
+ * decodes (Opus, Vorbis, MP3, FLAC...), LG plays the PCM next to the hardware video (the TV has no PulseAudio server). */
+static GstElement *make_pcm_chain(WpebAudioSink *self, WpebVideoSink *video)
+{
+    GstElement *convert = gst_element_factory_make("audioconvert", NULL);
+    GstElement *resample = gst_element_factory_make("audioresample", NULL);
+    GstElement *filter = gst_element_factory_make("capsfilter", NULL);
+    if (!convert || !resample || !filter) {
+        GST_ERROR_OBJECT(self, "audioconvert, audioresample or capsfilter missing");
+        g_clear_object(&convert);
+        g_clear_object(&resample);
+        g_clear_object(&filter);
+        return NULL;
+    }
+    GstCaps *caps = gst_caps_from_string("audio/x-raw, format=S16LE, layout=interleaved, rate=48000, channels=2");
+    g_object_set(filter, "caps", caps, NULL);
+    gst_caps_unref(caps);
+    self->hw = g_object_new(WPEB_TYPE_AUDIO_HW, NULL);
+    WPEB_AUDIO_HW(self->hw)->video = video;
+    gst_bin_add_many(GST_BIN(self), convert, resample, filter, self->hw, NULL);
+    gst_element_link_many(convert, resample, filter, self->hw, NULL);
+    return convert;
+}
+
+/* playbin's volume and mute (what WebKit sets for the page's element) do not reach this bin: playsink only forwards them to a
+ * sink it picked for the property (it found none in the empty bin) or to a software volume element, which an encoded stream
+ * never passes. So watch the stream volume of the pipeline above us and send what it says to the hardware path. */
+static void stream_volume_changed(GObject *volume_owner, GParamSpec *pspec, gpointer data)
+{
+    WpebAudioSink *self = WPEB_AUDIO_SINK(data);
+    gboolean mute = FALSE;
+    g_object_get(volume_owner, "mute", &mute, NULL);
+    self->volume = gst_stream_volume_get_volume(GST_STREAM_VOLUME(volume_owner), GST_STREAM_VOLUME_FORMAT_LINEAR);
+    self->mute = mute;
+    GST_INFO_OBJECT(self, "%s of the page's element: volume %.2f%s (%s)", pspec->name, self->volume, mute ? ", muted" : "",
+        self->hw ? "hardware audio" : "software audio");
+    send_volume(self);
+}
+
+static void watch_stream_volume(WpebAudioSink *self)
+{
+    GstObject *obj = gst_object_ref(GST_OBJECT(self));
+    while (obj) {
+        GstObject *parent = gst_object_get_parent(obj);
+        gst_object_unref(obj);
+        obj = parent;
+        if (obj && GST_IS_STREAM_VOLUME(obj) && !WPEB_IS_AUDIO_SINK(obj)) {
+            gboolean mute = FALSE;
+            g_object_get(obj, "mute", &mute, NULL);
+            self->volume = gst_stream_volume_get_volume(GST_STREAM_VOLUME(obj), GST_STREAM_VOLUME_FORMAT_LINEAR);
+            self->mute = mute;
+            g_signal_connect_object(obj, "notify::volume", G_CALLBACK(stream_volume_changed), self, 0);
+            g_signal_connect_object(obj, "notify::mute", G_CALLBACK(stream_volume_changed), self, 0);
+            GST_INFO_OBJECT(self, "watching the volume of %" GST_PTR_FORMAT ": now %.2f%s", obj, self->volume, mute ? ", muted" : "");
+            gst_object_unref(obj);
+            return;
+        }
+    }
+    GST_INFO_OBJECT(self, "no stream volume above this sink: the element's volume and mute will not reach it");
+}
+
 /* The first caps decide the path; later caps go to what was built. */
 static gboolean wpeb_audio_sink_build(WpebAudioSink *self, GstCaps *caps)
 {
+    watch_stream_volume(self);
     const uint32_t codec = hw_codec(caps);
     const gboolean encoded = codec != 0;
     const char *label = codec == WPEB_MEDIA_OPUS ? "Opus" : codec == WPEB_MEDIA_AAC ? "AAC" : "raw audio";
     WpebVideoSink *video = NULL;
     /* WPEB_MEDIA_HW_AUDIO=aac: the UI's decoder takes AAC only (no Opus). */
     const char *hw_env = g_getenv("WPEB_MEDIA_HW_AUDIO");
-    const gboolean hw_codec_ok = !hw_env || !g_str_equal(hw_env, "aac") || codec == WPEB_MEDIA_AAC;
-    if (encoded && hw_codec_ok && !self->mute && self->volume > 0.001 && !g_getenv("WPE_BROWSER_DEBUG_NO_HW_AUDIO"))
+    /* WPEB_MEDIA_HW_AUDIO is a list: "aac" (AAC as it is), "pcm" (everything else, decoded here and played by LG as PCM). */
+    const gboolean hw_pcm = hw_env && strstr(hw_env, "pcm");
+    const gboolean hw_codec_ok = !hw_env || (codec == WPEB_MEDIA_AAC ? strstr(hw_env, "aac") != NULL : codec == 0 ? hw_pcm : FALSE);
+    /* A muted (or silent) element still gets the hardware chain when the UI's Starfish backend plays the audio
+     * (WPEB_MEDIA_HW_AUDIO): it applies the element's volume and mute to LG's pipeline (setVolume/setAudioMute), so an
+     * element that starts muted and is unmuted later has sound without rebuilding anything. The direct path's LG player
+     * has no verified volume control, so a muted element stays on the software chain there. */
+    const gboolean hw_volume = hw_env != NULL;
+    if ((encoded || hw_pcm) && hw_codec_ok && (hw_volume || (!self->mute && self->volume > 0.001)) && !g_getenv("WPE_BROWSER_DEBUG_NO_HW_AUDIO"))
         video = hardware_partner(self);
     GstElement *first;
-    if (video) {
+    if (video && codec != WPEB_MEDIA_AAC) {
+        /* Opus (WPEB_HW_OPUS off), Vorbis, MP3, raw: decoded already; LG plays the PCM. */
+        first = make_pcm_chain(self, video);
+        if (!first)
+            return FALSE;
+        GST_INFO_OBJECT(self, "%s decoded here, played by LG's media pipeline as PCM (volume %.2f%s)", label, self->volume,
+            self->mute ? ", muted" : "");
+        send_volume(self);
+    } else if (video) {
         self->hw = g_object_new(WPEB_TYPE_AUDIO_HW, NULL);
         WPEB_AUDIO_HW(self->hw)->video = video;
         gst_bin_add(GST_BIN(self), self->hw);
         first = self->hw;
-        GST_INFO_OBJECT(self, "%s with hardware video: LG's media pipeline plays it", label);
+        GST_INFO_OBJECT(self, "%s with hardware video: LG's media pipeline plays it (volume %.2f%s)", label, self->volume,
+            self->mute ? ", muted" : "");
+        send_volume(self); /* the element's volume and mute so far (set before the chain existed) */
     } else {
-        if (encoded) {
+        {
             /* The UI may be holding LG's Load for this playback's audio: tell it to go ahead without. */
             WpebVideoSink *v = find_video_sink(GST_ELEMENT(self));
             if (v) {
@@ -1347,6 +1436,9 @@ static gboolean wpeb_audio_sink_build(WpebAudioSink *self, GstCaps *caps)
         if (!first)
             return FALSE;
         GST_INFO_OBJECT(self, "%s: software audio (PulseAudio)", label);
+        if (!g_getenv("PULSE_SERVER") && !g_getenv("WPEB_PULSE_OK"))
+            GST_WARNING_OBJECT(self, "%s plays through PulseAudio, which webOS 5 TVs have no server for: this audio is silent "
+                "(audio of hardware video goes through LG's pipeline instead; audio-only elements and Web Audio have no such path)", label);
     }
     GstPad *target = gst_element_get_static_pad(first, "sink");
     gst_ghost_pad_set_target(GST_GHOST_PAD(self->ghost), target);
@@ -1423,6 +1515,8 @@ static void wpeb_audio_sink_set_property(GObject *object, guint id, const GValue
     case AUDIO_PROP_MUTE: self->mute = g_value_get_boolean(value); break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec); return;
     }
+    GST_INFO_OBJECT(self, "%s set: volume %.2f%s (%s)", pspec->name, self->volume, self->mute ? ", muted" : "",
+        self->hw ? "hardware audio" : self->pulse ? "software audio" : "chain not built yet");
     send_volume(self);
 }
 

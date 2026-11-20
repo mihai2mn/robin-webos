@@ -11,6 +11,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -155,15 +156,63 @@ wnk::Rect MediaServer::plane_rect(float x, float y, float w, float h) const {
     return wnk::Rect{x0, y0, std::max(x1 - x0, 2.0f), std::max(y1 - y0, 2.0f)};
 }
 
-// Called by the UI on its frame loop: `frame_ready` = an engine frame of the shown tab is about to be drawn. Applies
+// The plane's lead (ms): see the header. Re-read from /tmp/wpeb-plane-lead twice a second so a test can change it on the fly.
+// 100 ms: measured on the TV with an auto-scrolling page (screenshots, plane vs the hole): the plane trailed the hole by one
+// scroll step (10-12 px, one area interval of ~116 ms) in nearly every shot; with a lead of 0/60/100/130 ms the black strip
+// at the top of the hole averaged 10.6/5.7/2.2/0.8 px and the strips at both edges together 18.7/13.0/5.7/6.5 px.
+float MediaServer::default_plane_lead_ms() { return 100.0f; }
+
+float MediaServer::plane_lead_ms() {
+    const auto now = Clock::now();
+    if (lead_read_.time_since_epoch().count() == 0 || now - lead_read_ > std::chrono::milliseconds(500)) {
+        lead_read_ = now;
+        lead_ms_ = default_plane_lead_ms();
+        if (FILE *f = std::fopen("/tmp/wpeb-plane-lead", "r")) {
+            float v;
+            if (std::fscanf(f, "%f", &v) == 1) lead_ms_ = std::max(0.0f, std::min(v, 200.0f));
+            std::fclose(f);
+        }
+    }
+    return lead_ms_;
+}
+
+// The plane for the page rectangle (sx, sy, sw, sh) in screen pixels, unclipped. Starfish's exported window takes a source
+// rectangle: a video partly off the screen is cut by the compositor, not squashed into the visible part (NDL has no such
+// call). A parked (not visible) video keeps the whole picture.
+void MediaServer::place_plane(float sx, float sy, float sw, float sh) {
+    const wnk::Rect vis = plane_rect(sx, sy, sw, sh);
+    const bool parked = vis.w <= 16 && vis.h <= 9 && vis.x == 0 && vis.y == 0 && (sx > 16 || sy > 9 || sw > 16 || sh > 9);
+    if (starfish_ && !parked && sw > 0 && sh > 0)
+        starfish_->set_area_cropped(vis, (vis.x - sx) / sw, (vis.y - sy) / sh, vis.w / sw, vis.h / sh);
+    else
+        backend_->set_area(vis);
+}
+
+// No new area this frame: a plane that was placed ahead of the hole goes back onto it once the motion has stopped (no area
+// for 220 ms: areas of a scrolling page come every 100-120 ms), or it would stay displaced by the predicted distance.
+void MediaServer::settle_plane() {
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock() || !track_.shifted || !backend_) return;
+    if (Clock::now() - track_.at < std::chrono::milliseconds(220)) return;
+    track_.shifted = false;
+    track_.count = 0;
+    if (!use_lg_) place_plane(track_.sx, track_.sy, track_.sw, track_.sh);
+}
+
+// Called by the UI on its frame loop: frame_ready = an engine frame of the shown tab is about to be drawn. Applies
 // the newest AREA then (or after kMaxAge without a frame: a static page whose video moved). Never waits for the feeder.
 void MediaServer::commit_area(bool frame_ready) {
     PendingArea p;
     {
         std::lock_guard<std::mutex> al(area_mu_);
-        if (!pending_.valid) return;
-        if (!frame_ready && Clock::now() - pending_.at < std::chrono::milliseconds(40)) return;
-        p = pending_;
+        if (pending_.valid) {
+            if (!frame_ready && Clock::now() - pending_.at < std::chrono::milliseconds(40)) return;
+            p = pending_;
+        }
+    }
+    if (!p.valid) {
+        settle_plane();
+        return;
     }
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
     if (!lock.owns_lock()) return;  // the feeder holds it: the next frame
@@ -184,14 +233,45 @@ void MediaServer::commit_area(bool frame_ready) {
     // Only the owner's stream drives the plane and the hole: another tab's sink must not repaint them.
     const bool from_owner = owner_.load() == p.id || owner_.load() == 0;
     if (backend_ && a.width > 0 && a.height > 0 && from_owner && !use_lg_) {
-        const wnk::Rect vis = plane_rect(sx, sy, sw, sh);
-        // Starfish's exported window takes a source rectangle: a video partly off the screen is cut by the compositor,
-        // not squashed into the visible part (NDL has no such call). A parked (not visible) video keeps the whole picture.
-        const bool parked = vis.w <= 16 && vis.h <= 9 && vis.x == 0 && vis.y == 0 && (sx > 16 || sy > 9 || sw > 16 || sh > 9);
-        if (starfish_ && !parked && sw > 0 && sh > 0)
-            starfish_->set_area_cropped(vis, (vis.x - sx) / sw, (vis.y - sy) / sh, vis.w / sw, vis.h / sh);
-        else
-            backend_->set_area(vis);
+        // Where the video is going: the compositor shows the plane some milliseconds after the UI's own frame (screenshots of a
+        // scrolling page: the plane trailed the hole by one to two scroll steps), so a plane put on the hole trails it by that
+        // much motion. The plane is placed plane_lead_ms() of its measured motion ahead; the hole stays exact, and once the
+        // motion stops (settle_plane) the plane returns to it.
+        const auto now = Clock::now();
+        const float lead = plane_lead_ms();
+        PlaneTrack &t = track_;
+        if (t.id != p.id || t.sw != sw || t.sh != sh) t.count = t.head = 0;
+        t.id = p.id;
+        t.sw = sw;
+        t.sh = sh;
+        t.ring[t.head] = PlaneSample{now, sx, sy};
+        t.head = (t.head + 1) % 8;
+        if (t.count < 8) ++t.count;
+        // Velocity (px/ms): the newest sample against the newest one that is at least 40 ms older (and not over 160 ms).
+        float vx = 0, vy = 0;
+        for (int i = 2; i <= t.count; ++i) {
+            const PlaneSample &o = t.ring[(t.head - i + 16) % 8];
+            const float dt = std::chrono::duration<float, std::milli>(now - o.at).count();
+            if (dt > 160) break;
+            if (dt >= 40) {
+                vx = (sx - o.sx) / dt;
+                vy = (sy - o.sy) / dt;
+                break;
+            }
+        }
+        t.sx = sx;
+        t.sy = sy;
+        t.at = now;
+        float px = sx, py = sy;
+        t.shifted = false;
+        if (lead > 0 && (vx != 0 || vy != 0)) {
+            constexpr float kCap = 60.0f;  // never further than this from the hole
+            px = sx + std::max(-kCap, std::min(kCap, vx * lead));
+            py = sy + std::max(-kCap, std::min(kCap, vy * lead));
+            t.shifted = true;
+        }
+        if (area_debug) fprintf(stderr, "[plane] v=(%.3f,%.3f px/ms) lead=%.0f ms -> %+.1f,%+.1f px\n", vx, vy, lead, px - sx, py - sy);
+        place_plane(px, py, sw, sh);
     }
     if (from_owner) {
         // The same rectangle in PAGE pixels: page_view composites opacity outside it and transparency inside it.
@@ -388,6 +468,12 @@ void MediaServer::serve(int fd, uint64_t id) {
     WpebMediaLoad pending{};
     Clock::time_point load_at{};
 
+    // The page element's volume and mute (WPEB_MEDIA_VOLUME): kept for the stream, applied after its Load. A muted element that
+    // is unmuted later is the same stream: its audio goes through LG's pipeline from the start (the sink no longer builds the
+    // software chain for a muted element when this backend takes the audio), so only these two values change.
+    uint32_t vol_permille = 1000;
+    bool vol_muted = false;
+
     const auto do_load = [&](const WpebMediaLoad &l) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!backend_) return;
@@ -403,9 +489,11 @@ void MediaServer::serve(int fd, uint64_t id) {
         v.frame_rate = l.fps_milli / 1000.0;
         f.video = v;
         // Starfish takes the page's AAC next to the video (A/V sync from LG's pipeline); NDL only video.
-        if (starfish_ && audio_state == AudioState::Hardware && audio_format.codec == WPEB_MEDIA_AAC) {
+        if (starfish_ && audio_state == AudioState::Hardware &&
+            (audio_format.codec == WPEB_MEDIA_AAC || audio_format.codec == WPEB_MEDIA_PCM)) {
             wnk::media::AudioFormat af;
-            af.codec = wnk::media::CodecId::Aac;
+            // PCM: what the web process decoded (Opus, Vorbis, MP3, ...), as S16LE, which LG's pipeline plays like the AAC.
+            af.codec = audio_format.codec == WPEB_MEDIA_PCM ? wnk::media::CodecId::PcmS16 : wnk::media::CodecId::Aac;
             af.sample_rate = static_cast<int>(audio_format.rate);
             af.channels = static_cast<int>(audio_format.channels);
             f.audio = af;
@@ -440,6 +528,8 @@ void MediaServer::serve(int fd, uint64_t id) {
             error.clear();
             ndl_loaded_ = b.load(f, &error);
         }
+        if (ndl_loaded_ && starfish_) starfish_->set_volume(static_cast<int>(vol_permille / 10), vol_muted);
+        if (use_lg_) lg_.set_volume(vol_permille, vol_muted);
         if (use_lg_ || ndl_loaded_)
             WNK_LOGI(kCat, "stream %llu: %s for %s %ux%u @ %.2f fps%s%s%s", static_cast<unsigned long long>(id),
                      use_lg_ ? "LG media pipeline" : "NDL", codec_label(l.codec), l.width, l.height, l.fps_milli / 1000.0,
@@ -517,7 +607,7 @@ void MediaServer::serve(int fd, uint64_t id) {
                                     payload.begin() + sizeof(WpebMediaAudio) + audio_format.header_size);
                 audio_state = AudioState::Hardware;
                 WNK_LOGI(kCat, "stream %llu: %s %u Hz, %u channels goes with the video", static_cast<unsigned long long>(id),
-                         audio_format.codec == WPEB_MEDIA_OPUS ? "Opus" : "AAC", audio_format.rate, audio_format.channels);
+                         audio_format.codec == WPEB_MEDIA_OPUS ? "Opus" : audio_format.codec == WPEB_MEDIA_PCM ? "PCM" : "AAC", audio_format.rate, audio_format.channels);
                 maybe_load();
             }
             break;
@@ -589,8 +679,15 @@ void MediaServer::serve(int fd, uint64_t id) {
             if (h.size < sizeof(WpebMediaVolume)) break;
             WpebMediaVolume v;
             std::memcpy(&v, payload.data(), sizeof(v));
+            vol_permille = v.permille;
+            vol_muted = v.muted != 0;
             std::lock_guard<std::mutex> lock(mutex_);
-            if (owner_.load() == id && use_lg_) lg_.set_volume(v.permille, v.muted != 0);
+            if (owner_.load() == id) {
+                if (use_lg_) lg_.set_volume(v.permille, v.muted != 0);
+                else if (ndl_loaded_ && starfish_) starfish_->set_volume(static_cast<int>(v.permille / 10), v.muted != 0);
+            }
+            WNK_LOGI(kCat, "stream %llu: volume %u.%u%%%s", static_cast<unsigned long long>(id), v.permille / 10, v.permille % 10,
+                     v.muted ? " (muted)" : "");
             break;
         }
         default:

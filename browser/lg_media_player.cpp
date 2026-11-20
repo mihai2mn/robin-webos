@@ -356,12 +356,13 @@ void LgMediaPlayer::set_hdr(const WpebMediaHdr &c) {
 void LgMediaPlayer::set_volume(unsigned permille, bool muted) {
 #if defined(WNK_SDL_WEBOS)
     if (api_ == nullptr || !has_audio_) return;
-    // LG's player takes setVolume(volume, duration, ease) underneath (libpf); the JSON keys are not documented.
+    // The keys are the ones libplayerAPIs' parsers read (disassembly of setVolume/setAudioMute, webOS 5.3): "volume" (int),
+    // "ease.duration" and "ease.type"; the mute flag is "isMuteOn".
     char json[96];
-    std::snprintf(json, sizeof json, "{\"volume\":%u,\"duration\":0,\"easeType\":\"Linear\"}", muted ? 0u : permille / 10);
+    std::snprintf(json, sizeof json, "{\"volume\":%u,\"ease\":{\"duration\":0,\"type\":\"Linear\"}}", muted ? 0u : permille / 10);
     const auto &apis = player_apis();
     const bool v = apis.set_volume != nullptr && apis.set_volume(api_, json);
-    const bool m = apis.set_audio_mute != nullptr && apis.set_audio_mute(api_, muted ? "{\"mute\":true}" : "{\"mute\":false}");
+    const bool m = apis.set_audio_mute != nullptr && apis.set_audio_mute(api_, muted ? "{\"isMuteOn\":true}" : "{\"isMuteOn\":false}");
     WNK_LOGI(kCat, "volume %u%%%s: setVolume -> %d, setAudioMute -> %d", permille / 10, muted ? " (muted)" : "", v ? 1 : 0,
              m ? 1 : 0);
 #else

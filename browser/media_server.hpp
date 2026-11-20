@@ -53,6 +53,9 @@ public:
     // UI frame loop: apply the newest video area (plane + hole) together with the page frame about to be drawn.
     void commit_area(bool frame_ready);
     wnk::Rect plane_rect(float x, float y, float w, float h) const;
+    // How far ahead of a scrolling video the plane is placed, in ms of its own motion: the compositor shows the plane later than
+    // the hole the UI draws, so a plane put exactly where the hole is trails it. /tmp/wpeb-plane-lead (ms, 0 = off) overrides it.
+    static float default_plane_lead_ms();
     // The connection whose stream holds the decoder (0: none); changes with every new Load.
     uint64_t owner_id() const { return owner_.load(); }
     // Clears the video rectangle (owner released, or another stream took over).
@@ -95,6 +98,25 @@ private:
         uint64_t seq = 0;
         bool valid = false;
     };
+    // The plane's motion (mutex_): where the video was in the last commits, to place the plane where it is going to be.
+    struct PlaneSample {
+        Clock::time_point at{};
+        float sx = 0, sy = 0;
+    };
+    struct PlaneTrack {
+        PlaneSample ring[8];
+        int count = 0, head = 0;
+        float sw = 0, sh = 0;  // the tracked rectangle's size (a resize starts the motion over)
+        uint64_t id = 0;
+        float sx = 0, sy = 0;  // the exact (not predicted) rectangle of the last commit
+        Clock::time_point at{};
+        bool shifted = false;  // the plane is where it was predicted to go, not on the hole
+    } track_;
+    float lead_ms_ = 0;
+    Clock::time_point lead_read_{};
+    float plane_lead_ms();
+    void place_plane(float sx, float sy, float sw, float sh);  // mutex_ held
+    void settle_plane();                                        // UI thread: no new area, put a shifted plane on the hole
     std::mutex area_mu_;  // pending_ only
     PendingArea pending_;
     uint64_t pending_seq_ = 0;

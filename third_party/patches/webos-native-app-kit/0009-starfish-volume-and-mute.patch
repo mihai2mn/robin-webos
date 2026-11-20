@@ -1,0 +1,126 @@
+--- a/media/include/wnk/media/starfish_backend.hpp
++++ b/media/include/wnk/media/starfish_backend.hpp
+@@ -138,6 +138,9 @@
+     bool pause(bool paused) override;
+     bool splice_settled() const override;
+     void end_of_stream() override;
++    // The page element's volume (0..100) and mute for the stream (kept for the next Load too). Applied through the firmware's
++    // setVolume {"volume":..} and setAudioMute {"isMuteOn":..} as soon as the stream has loaded.
++    void set_volume(int percent, bool muted);
+ 
+     // Pure helpers, exposed for tests.
+     static std::string build_load_payload(const StarfishLoad &l);
+@@ -174,6 +177,7 @@
+     void place_acb_locked();
+     bool open_exported_window();
+     bool open_acb();
++    void apply_volume(void *object, int percent, bool muted);
+     void acb_state(int play_state);
+ 
+     StarfishOptions options_;
+@@ -199,6 +203,10 @@
+     bool play_issued_ = false;
+     bool replayed_ = false;  // Play issued again after loadCompleted
+     bool paused_ = false;
++    int volume_pct_ = -1;        // the element's volume, -1 until the page sets one (mutex_)
++    bool muted_ = false;         // (mutex_)
++    bool volume_dirty_ = false;  // to be applied again with the stream's first Feed (mutex_)
++    bool volume_fed_ = false;    // the stream has had a Feed (mutex_)
+     bool native_seek_ = false;          // chosen at construction
+     bool native_seek_refused_ = false;  // a Seek returned false: splice from then on (mutex_)
+     bool native_seek_pending_ = false;  // flush() asked; the next packet issues it (mutex_)
+--- a/media/src/starfish_backend.cpp
++++ b/media/src/starfish_backend.cpp
+@@ -69,6 +69,10 @@
+     int (*push_eos)(void *self) = nullptr;
+     void (*notify_foreground)(void *self) = nullptr;
+     int (*seek)(void *self, const char *millis) = nullptr;  // bool Seek(const char*), on every release
++    // bool setVolume(const char*) {"volume":0..100,"ease":{"duration":ms,"type":"Linear"}} and bool setAudioMute(const char*)
++    // {"isMuteOn":bool} (keys read from the firmware's parsers); optional: absent on webOS 1.x-2.x
++    int (*set_volume)(void *self, const char *payload) = nullptr;
++    int (*set_audio_mute)(void *self, const char *payload) = nullptr;
+     // Optional (absent on webOS 1.x-3.x images): smp::util::getMaxVideoResolution. Its std::string
+     // parameter is by value up to webOS 10 and const& from 11; both pass the string's address.
+     bool (*max_video_resolution)(const std::string &codec, int32_t *w, int32_t *h, int32_t *fps) = nullptr;
+@@ -129,6 +133,8 @@
+     ok = sym(h, g_api.push_eos, "_ZN17StarfishMediaAPIs7pushEOSEv") && ok;
+     ok = sym(h, g_api.notify_foreground, "_ZN17StarfishMediaAPIs16notifyForegroundEv") && ok;
+     g_api.seek = reinterpret_cast<decltype(g_api.seek)>(dlsym(h, "_ZN17StarfishMediaAPIs4SeekEPKc"));
++    g_api.set_volume = reinterpret_cast<decltype(g_api.set_volume)>(dlsym(h, "_ZN17StarfishMediaAPIs9setVolumeEPKc"));
++    g_api.set_audio_mute = reinterpret_cast<decltype(g_api.set_audio_mute)>(dlsym(h, "_ZN17StarfishMediaAPIs12setAudioMuteEPKc"));
+     g_api.max_video_resolution = reinterpret_cast<decltype(g_api.max_video_resolution)>(dlsym(
+         h, "_ZN3smp4util21getMaxVideoResolutionENSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEPiS7_S7_"));
+     if (g_api.max_video_resolution == nullptr) {
+@@ -859,6 +865,8 @@
+         epoch_ = epoch;
+         format_ = format;
+         loaded_ = true;
++        volume_dirty_ = volume_pct_ >= 0;  // the element's volume and mute apply to this stream too
++        volume_fed_ = false;
+         play_issued_ = false;
+         paused_ = false;
+         splice_.reset();
+@@ -875,7 +883,8 @@
+     if (p.type != TrackType::Video && p.type != TrackType::Audio) return Feed::Accepted;
+     void *object;
+     int64_t out_us;
+-    bool play = false, replay = false;
++    bool play = false, replay = false, apply_vol = false, vol_muted = false;
++    int vol_pct = 0;
+     int64_t seek_out_us = kNoTime;
+     {
+         std::lock_guard<std::mutex> lock(mutex_);
+@@ -914,7 +923,15 @@
+         // Play issued before loadCompleted is queued; it is issued once more after it (samples README).
+         if (!paused_ && !play_issued_) play = play_issued_ = true;
+         if (!paused_ && load_completed_ && !replayed_) replay = replayed_ = true;
++        volume_fed_ = true;
++        if (volume_dirty_) {
++            volume_dirty_ = false;
++            apply_vol = true;
++            vol_pct = volume_pct_;
++            vol_muted = muted_;
++        }
+     }
++    if (apply_vol) apply_volume(object, vol_pct, vol_muted);
+     if (seek_out_us != kNoTime) {
+         // On the feeding thread, before the packet: Feed takes no lock and would race the flush.
+         const std::string millis = std::to_string(seek_out_us / 1000);
+@@ -1052,6 +1069,37 @@
+     // The memory block itself is never freed or reused: a late callback carries only its address.
+ }
+ 
++// The element's volume and mute (the page's <video>), for this stream and the ones after it. The firmware's setVolume only
++// takes effect on a loaded stream (it answers false before). They go out at once, and again with the first Feed of a
++// stream (a call between Load and the first unit may land before the pipeline has its audio side up). load_completed_
++// is not used: webOS 5's events never carry the string it waits for.
++void StarfishBackend::set_volume(int percent, bool muted) {
++    void *object = nullptr;
++    {
++        std::lock_guard<std::mutex> lock(mutex_);
++        volume_pct_ = std::clamp(percent, 0, 100);
++        muted_ = muted;
++        volume_dirty_ = !volume_fed_;
++        if (loaded_) object = object_;
++        percent = volume_pct_;
++    }
++    if (object != nullptr) apply_volume(object, percent, muted);
++}
++
++void StarfishBackend::apply_volume(void *object, int percent, bool muted) {
++    const Api &a = api();
++    if (a.set_volume == nullptr && a.set_audio_mute == nullptr) {
++        WNK_LOGI(kCat, "volume: this firmware has no setVolume/setAudioMute");
++        return;
++    }
++    // Muted: volume 0 as well as the mute flag (the unmute restores both), in case a firmware ignores one of them.
++    char json[128];
++    std::snprintf(json, sizeof json, "{\"volume\":%d,\"ease\":{\"duration\":0,\"type\":\"Linear\"}}", muted ? 0 : percent);
++    const int v = a.set_volume != nullptr ? (a.set_volume(object, json) & 0xFF) : -1;
++    const int m = a.set_audio_mute != nullptr ? (a.set_audio_mute(object, muted ? "{\"isMuteOn\":true}" : "{\"isMuteOn\":false}") & 0xFF) : -1;
++    WNK_LOGI(kCat, "volume %d%%%s: setVolume -> %d, setAudioMute -> %d", percent, muted ? " (muted)" : "", v, m);
++}
++
+ bool StarfishBackend::pause(bool paused) {
+     void *object;
+     {
