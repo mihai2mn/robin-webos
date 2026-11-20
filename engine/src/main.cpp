@@ -91,6 +91,9 @@ struct Engine {
     uint8_t *frames = nullptr;
     uint32_t slot_bytes = 0;
     uint32_t next_slot = 0;
+    // last frame handed to the UI (for the identical-empty-frame skip in on_frame)
+    bool last_valid = false;
+    uint32_t last_slot = 0, last_tab = 0, last_width = 0, last_height = 0, last_stride = 0;
     uint32_t serial = 0;
     WPEBuffer *in_flight[WPE_IPC_FRAME_SLOTS] = {};
     WPEView *in_flight_view[WPE_IPC_FRAME_SLOTS] = {};
@@ -238,6 +241,7 @@ bool ensure_frames(uint32_t needed)
     g.frames = static_cast<uint8_t *>(map);
     g.slot_bytes = slot;
     g.next_slot = 0;
+    g.last_valid = false;   // the new memfd holds no previous frame
     WpeFrames f { slot, WPE_IPC_FRAME_SLOTS };
     return send_msg(WPE_ENGINE_FRAMES, 0, &f, sizeof(f), g.frames_fd);
 }
@@ -259,6 +263,19 @@ void on_frame(void *, WPEView *view, WPEBuffer *buffer, const WPERectangle *dama
         return;
     }
 
+    // WebKit 2.54 paints a frame per animation tick even when nothing visible changed, and an empty damage list is
+    // NOT proof of that (AcceleratedSurface::takeFrameDamageRects returns {} also when no damage was recorded, e.g.
+    // after a swap-chain reset on resize). So an empty list is treated as "unknown", and the frame is skipped only
+    // when its pixels are byte-identical to the last frame handed to the UI for this tab: then nothing can be lost.
+    if (n_damage == 0 && g.last_valid && g.last_tab == tab && g.last_width == width && g.last_height == height
+        && g.last_stride == stride) {
+        const bool same = !memcmp(g.frames + static_cast<size_t>(g.last_slot) * g.slot_bytes, pixels, needed);
+        if (same) {
+            webos_view_frame_shown(WEBOS_VIEW(view), buffer);
+            return;
+        }
+    }
+
     uint32_t slot = g.next_slot;
     for (uint32_t i = 0; i < WPE_IPC_FRAME_SLOTS && g.in_flight[slot]; ++i)
         slot = (slot + 1) % WPE_IPC_FRAME_SLOTS;
@@ -268,6 +285,7 @@ void on_frame(void *, WPEView *view, WPEBuffer *buffer, const WPERectangle *dama
     }
     g.next_slot = (slot + 1) % WPE_IPC_FRAME_SLOTS;
     memcpy(g.frames + static_cast<size_t>(slot) * g.slot_bytes, pixels, needed);
+    g.last_valid = true; g.last_slot = slot; g.last_tab = tab; g.last_width = width; g.last_height = height; g.last_stride = stride;
 
     WpeFrame f {};
     f.slot = slot;
