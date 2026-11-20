@@ -348,7 +348,8 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
     else if (!strcmp(interface, "wl_webos_surface_group_compositor"))
         r->groups = wpeb_registry_bind(registry, name, &wl_webos_surface_group_compositor_interface, 1);
     else if (!strcmp(interface, "wl_webos_foreign") && !r->foreign)
-        r->foreign = wpeb_registry_bind(registry, name, &wl_webos_foreign_interface, 1);
+        // Version 2 (when the compositor has it) adds wl_webos_exported.set_crop_region; the exported object takes its version from this one.
+        r->foreign = wpeb_registry_bind(registry, name, &wl_webos_foreign_interface, version >= 2 ? 2 : 1);
     else if (!strcmp(interface, "wl_seat") && !r->seat)
         r->seat = wpeb_registry_bind(registry, name, &wl_seat_interface, 1);
 }
@@ -1209,20 +1210,35 @@ static void video_place(int sw, int sh, int x, int y, int w, int h, gboolean com
         const int picture_w = sw > 0 ? sw : w, picture_h = sh > 0 ? sh : h;
         const int surface_h = surface_height(t->width, t->height);
         int dx = x, dy = y + (surface_h - (int)t->height), dw = w, dh = h;
-        // A rectangle that reaches past the surface's edge (the page scrolled the video partly out) is drawn wrongly by the compositor:
-        // the part of the picture inside shows, the rest of the box stays black (TV, 2026-11-20). It is cut to
-        // the surface. The compositor ignores the source rectangle (a cropped one gave the same picture as the whole one) and fits the
-        // whole picture into the destination, so a partly scrolled-out video is shown shrunk into its visible part instead of cropped.
-        // Entirely outside: left as it was (the video is gone from sight).
+        int cx = 0, cy = 0, cw = picture_w, ch = picture_h;  // the part of the picture that is shown
+        // A destination that reaches past the surface's edge (the page scrolled the video partly out) is drawn wrongly by the compositor
+        // (TV, 2026-11-20: the rest of the box stays black), and set_exported_window ignores its source rectangle: the whole picture is
+        // fitted into the destination. So the destination is cut to the surface and, with wl_webos_exported v2, set_crop_region shows
+        // just the matching part of the picture (the original size, the part shown, where). Without v2 the picture is shrunk into the
+        // visible part instead. Entirely outside: left as it was (the video is gone from sight).
         const int x0 = dx < 0 ? 0 : dx, y0 = dy < 0 ? 0 : dy;
         const int x1 = dx + dw > (int)t->width ? (int)t->width : dx + dw, y1 = dy + dh > surface_h ? surface_h : dy + dh;
-        if ((x0 != dx || y0 != dy || x1 != dx + dw || y1 != dy + dh) && x1 > x0 && y1 > y0) {
+        gboolean crop = FALSE;
+        if ((x0 != dx || y0 != dy || x1 != dx + dw || y1 != dy + dh) && x1 > x0 && y1 > y0 && dw > 0 && dh > 0) {
+            cx = (int)(((int64_t)(x0 - dx) * picture_w) / dw);
+            cy = (int)(((int64_t)(y0 - dy) * picture_h) / dh);
+            cw = (int)(((int64_t)(x1 - x0) * picture_w) / dw);
+            ch = (int)(((int64_t)(y1 - y0) * picture_h) / dh);
+            if (cw < 2) cw = 2;
+            if (ch < 2) ch = 2;
             dx = x0; dy = y0; dw = x1 - x0; dh = y1 - y0;
+            crop = wl_proxy_get_version((struct wl_proxy *)t->video) >= 2 && !getenv("WPEB_NO_CROP");
         }
+        struct wl_region *org = crop ? wl_compositor_create_region(t->renderer->compositor) : NULL;
+        if (org) wl_region_add(org, 0, 0, picture_w, picture_h);
         struct wl_region *src = wl_compositor_create_region(t->renderer->compositor);
-        wl_region_add(src, 0, 0, picture_w, picture_h);
+        wl_region_add(src, crop ? cx : 0, crop ? cy : 0, crop ? cw : picture_w, crop ? ch : picture_h);
         struct wl_region *dst = wl_compositor_create_region(t->renderer->compositor);
         wl_region_add(dst, dx, dy, dw, dh);
+        if (crop) {
+            wl_webos_exported_set_crop_region(t->video, org, src, dst);
+            wl_region_destroy(org);
+        } else
         wl_webos_exported_set_exported_window(t->video, src, dst);
         wl_region_destroy(src);
         wl_region_destroy(dst);
