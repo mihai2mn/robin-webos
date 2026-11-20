@@ -106,10 +106,24 @@ static void video_window_place(int sw, int sh, int x, int y, int w, int h)
 #define WPEB_TYPE_VIDEO_SINK (wpeb_video_sink_get_type())
 G_DECLARE_FINAL_TYPE(WpebVideoSink, wpeb_video_sink, WPEB, VIDEO_SINK, GstBaseSink)
 
+typedef struct WpebCtl {
+    uint32_t type, size;
+    uint8_t data[32];
+} WpebCtl;
+
 struct _WpebVideoSink {
     GstBaseSink parent;
-    GMutex lock; /* fd, area */
-    int fd;
+    /* Two locks, taken only in the order io_lock, then lock: `io_lock` serializes writes to the media socket and the
+     * closing of `fd`; a write can block for SO_SNDTIMEO (the UI stopped reading), so NOTHING that runs on WebKit's
+     * main thread may wait for it (area_painted uses g_mutex_trylock). `lock` guards the area/paint state below and
+     * is only ever held for a few instructions, never across a socket call. */
+    GMutex io_lock;
+    GMutex lock; /* area, painted_area, ctl, bookkeeping */
+    WpebCtl ctl[16]; /* control messages queued by threads that must not wait for the socket (send_ctl) */
+    guint nctl;
+    int fd;      /* written under io_lock; read with g_atomic_int_get elsewhere */
+    gint closing;   /* stop() is waiting for io_lock: a writer stuck for the UI gives up at its next 100 ms tick */
+    gint ctl_retry; /* a timer is already set to retry the queued control messages */
     uint32_t codec;
     gboolean have_area;    /* the page window has been told where the hole is at least once */
     gboolean area_pending; /* the UI has not got the current rectangle yet (see area_flush_pending_locked) */
@@ -200,7 +214,7 @@ static GstStaticPadTemplate video_sink_template = GST_STATIC_PAD_TEMPLATE("sink"
                     "video/x-h265, stream-format = (string) { byte-stream, hvc1, hev1 }, alignment = (string) au; "
                     "video/x-vp9"));
 
-/* Lock held by the caller (every caller locks: send_msg, area_painted, area_flush_pending_locked). One message; TRUE
+/* io_lock held by the caller (send_msg, area_flush_pending_locked, ctl_drain_io, start). One message; TRUE
  * when all of it went out.
  *
  * The socket is BLOCKING with SO_SNDTIMEO = 2 s, not O_NONBLOCK, so a send can stop in the middle of a message: if the
@@ -210,7 +224,13 @@ static GstStaticPadTemplate video_sink_template = GST_STATIC_PAD_TEMPLATE("sink"
  * payload -- so a short write is unrecoverable: the connection is closed and FALSE is returned, which makes render()
  * error the element and WebKit tear the pipeline down (a new pipeline reconnects in start()). Do not "retry" a short
  * write, and do not soften this to a warning. */
-static gboolean send_locked(WpebVideoSink *self, uint32_t type, int64_t pts_us, const void *data, uint32_t size)
+static int64_t now_us(void)
+{
+    return g_get_monotonic_time();
+}
+
+static gboolean send_locked_mode(WpebVideoSink *self, uint32_t type, int64_t pts_us, const void *data, uint32_t size,
+                                 gboolean nonblock)
 {
     if (self->fd < 0)
         return FALSE;
@@ -220,17 +240,31 @@ static gboolean send_locked(WpebVideoSink *self, uint32_t type, int64_t pts_us, 
     msg.msg_iov = iov;
     msg.msg_iovlen = size ? 2 : 1;
     size_t want = sizeof(h) + size;
+    int64_t progress_us = now_us(); /* last time the socket took anything (or the message began) */
     while (want) {
-        ssize_t n = sendmsg(self->fd, &msg, MSG_NOSIGNAL);
+        /* nonblock (main-thread callers): the FIRST sendmsg of the message must not wait. With no room in the socket
+         * buffer nothing was sent, the caller keeps the message for later and the connection stays up. Once part of a
+         * message is out the rest is written the normal way: a half message cannot be left on the wire. */
+        const gboolean first = want == sizeof(h) + size;
+        ssize_t n = sendmsg(self->fd, &msg, MSG_NOSIGNAL | (nonblock && first ? MSG_DONTWAIT : 0));
         if (n < 0) {
             if (errno == EINTR)
                 continue;
+            if (nonblock && first && (errno == EAGAIN || errno == EWOULDBLOCK))
+                return FALSE;
+            /* The socket's SO_SNDTIMEO is a 100 ms tick, not the give-up time: the UI gets 2 s (as
+             * before) to take data again, but stop() (closing) cuts a stuck writer short so it never waits that long.
+             * Nothing was sent by a sendmsg that timed out with EAGAIN, so trying again is safe. */
+            if ((errno == EAGAIN || errno == EWOULDBLOCK) && !g_atomic_int_get(&self->closing) &&
+                now_us() - progress_us < 2000000)
+                continue;
             GST_WARNING_OBJECT(self, "media server: %s", g_strerror(errno));
             close(self->fd);
-            self->fd = -1;
+            g_atomic_int_set(&self->fd, -1);
             return FALSE;
         }
         want -= (size_t)n;
+        progress_us = now_us();
         while (n > 0 && msg.msg_iovlen) {
             if ((size_t)n >= msg.msg_iov[0].iov_len) {
                 n -= (ssize_t)msg.msg_iov[0].iov_len;
@@ -249,39 +283,129 @@ static gboolean send_locked(WpebVideoSink *self, uint32_t type, int64_t pts_us, 
         GST_WARNING_OBJECT(self, "media server: %" G_GSIZE_FORMAT " bytes of a %u-byte message not sent: dropping the "
                                  "connection", want, size);
         close(self->fd);
-        self->fd = -1;
+        g_atomic_int_set(&self->fd, -1);
         return FALSE;
     }
     return TRUE;
 }
 
+/* io_lock held. */
+static gboolean send_locked(WpebVideoSink *self, uint32_t type, int64_t pts_us, const void *data, uint32_t size)
+{
+    return send_locked_mode(self, type, pts_us, data, size, FALSE);
+}
+
+/* Control messages from threads that must not wait for the socket (WebKit's main thread: PAUSE and UNLOAD from state
+ * changes, FLUSH from a seek, VOLUME from a property): queued under `lock`, written by whoever holds io_lock next
+ * (the streaming thread before its next unit and right after its write, or this thread when the socket is free).
+ * Order among control messages is kept; a message that does not fit the socket buffer right now just stays queued. */
+#define WPEB_CTL_MAX 16
+static void ctl_drain_io(WpebVideoSink *self, gboolean nonblock)
+{
+    for (;;) {
+        g_mutex_lock(&self->lock);
+        if (!self->nctl) {
+            g_mutex_unlock(&self->lock);
+            return;
+        }
+        WpebCtl c = self->ctl[0];
+        g_mutex_unlock(&self->lock);
+        if (!send_locked_mode(self, c.type, 0, c.size ? c.data : NULL, c.size, nonblock))
+            return;
+        g_mutex_lock(&self->lock);
+        if (self->nctl) {
+            self->nctl--;
+            memmove(&self->ctl[0], &self->ctl[1], sizeof(self->ctl[0]) * self->nctl);
+        }
+        g_mutex_unlock(&self->lock);
+    }
+}
+
+static void ctl_kick(WpebVideoSink *self);
+
+/* A control message that found the socket full stays queued; with nothing else being written (a paused stream's
+ * streaming thread is idle) nobody would send it, so the queue is retried from the main loop until it is empty or
+ * the connection is gone. */
+static gboolean ctl_retry_cb(gpointer data)
+{
+    WpebVideoSink *self = data;
+    g_atomic_int_set(&self->ctl_retry, 0);
+    ctl_kick(self);
+    gst_object_unref(self);
+    return G_SOURCE_REMOVE;
+}
+
+static void ctl_kick(WpebVideoSink *self)
+{
+    if (g_mutex_trylock(&self->io_lock)) {
+        ctl_drain_io(self, TRUE);
+        g_mutex_unlock(&self->io_lock);
+    }
+    g_mutex_lock(&self->lock);
+    const guint pending = self->nctl;
+    g_mutex_unlock(&self->lock);
+    if (pending && g_atomic_int_get(&self->fd) >= 0 && g_atomic_int_compare_and_exchange(&self->ctl_retry, 0, 1))
+        g_timeout_add(100, ctl_retry_cb, gst_object_ref(self));
+}
+
+static void send_ctl(WpebVideoSink *self, uint32_t type, const void *data, uint32_t size)
+{
+    g_assert(size <= sizeof(((WpebCtl *)0)->data));
+    g_mutex_lock(&self->lock);
+    if (self->nctl == WPEB_CTL_MAX) { /* the UI is not reading at all: keep the newest */
+        self->nctl--;
+        memmove(&self->ctl[0], &self->ctl[1], sizeof(self->ctl[0]) * self->nctl);
+    }
+    WpebCtl *c = &self->ctl[self->nctl++];
+    c->type = type;
+    c->size = size;
+    if (size)
+        memcpy(c->data, data, size);
+    g_mutex_unlock(&self->lock);
+    ctl_kick(self);
+}
+
 static gboolean send_msg(WpebVideoSink *self, uint32_t type, int64_t pts_us, const void *data, uint32_t size)
 {
-    g_mutex_lock(&self->lock);
+    g_mutex_lock(&self->io_lock);
+    ctl_drain_io(self, FALSE); /* what other threads queued comes first */
     gboolean ok = send_locked(self, type, pts_us, data, size);
+    ctl_drain_io(self, FALSE);
+    g_mutex_unlock(&self->io_lock);
+    /* A thread that queued a message while we held io_lock could not take it (its trylock failed): it is ours. */
+    g_mutex_lock(&self->lock);
+    const guint pending = self->nctl;
     g_mutex_unlock(&self->lock);
+    if (pending)
+        ctl_kick(self);
     return ok;
 }
 
-static int64_t now_us(void)
-{
-    return g_get_monotonic_time();
-}
 
-/* Sends area_pending if there is one. Called with the lock already held, from three places: render() and start() on
- * the streaming thread, and area_painted() on WebKit's main thread (which locks first). This is the path that
+/* Sends area_pending if there is one. Called with io_lock held (not `lock`), from three places: render() and start() on
+ * the streaming thread, and area_painted() on WebKit's main thread (trylock, non-blocking). This is the path that
  * guarantees the last rectangle of a scroll is never lost, because it does not depend on another paint ever happening
  * (WebKit paints nothing once the page is idle, so a rectangle skipped in area_painted -- the streaming thread held
  * the lock, or the send failed -- would otherwise never go out and the LG window would stay where it was while the
- * page's own window moved: the hole and the picture permanently apart). Lock held. */
-static void area_flush_pending_locked(WpebVideoSink *self)
+ * page's own window moved: the hole and the picture permanently apart). */
+static void area_flush_pending_locked(WpebVideoSink *self, gboolean nonblock)
 {
-    if (!self->area_pending || self->fd < 0)
+    if (self->fd < 0)
         return;
-    if (send_locked(self, WPEB_MEDIA_AREA, 0, &self->area, sizeof(self->area))) {
-        self->area_pending = FALSE;
-        self->sent_area = self->area;
+    g_mutex_lock(&self->lock);
+    const gboolean pending = self->area_pending;
+    const WpebMediaArea area = self->area;
+    g_mutex_unlock(&self->lock);
+    if (!pending)
+        return;
+    if (send_locked_mode(self, WPEB_MEDIA_AREA, 0, &area, sizeof(area), nonblock)) {
+        g_mutex_lock(&self->lock);
+        /* A newer rectangle set meanwhile (by the main thread) stays pending. */
+        if (!memcmp(&self->area, &area, sizeof(area)))
+            self->area_pending = FALSE;
+        self->sent_area = area;
         self->area_next_us = now_us() + self->area_send_gap_us;
+        g_mutex_unlock(&self->lock);
     }
 }
 
@@ -380,27 +504,31 @@ static void area_painted(WpebVideoSink *self, WpebMediaArea a)
         area_extrapolate(self, &previous, &out, dt_us);
     WpebMediaArea sent = {0};
     gboolean did_send = FALSE;
-    /* The UI's copy. Skipping it for the gap is not lost: area_pending stays set, so a later painted rectangle sends
-     * it (one goes out per painted frame at most) -- and if there IS no later rectangle (the scroll's last paint), the
-     * streaming thread's next render() sends it (area_flush_pending_locked). The lock is held HERE already, so the send
-     * goes through send_locked() directly: g_mutex_trylock() on a mutex this thread owns always fails (GMutex is not
-     * recursive), which is what made an earlier version of this silent -- it sent nothing, ever. */
+    gboolean try_send = FALSE;
+    /* The UI's copy. Skipping it is not lost: area_pending stays set, so a later painted rectangle sends it (one goes
+     * out per painted frame at most) -- and if there IS no later rectangle (the scroll's last paint), the streaming
+     * thread's next render() sends it (area_flush_pending_locked). */
     if (changed) {
         self->have_area = TRUE;
         self->area = out;
         self->area_pending = TRUE;
-        if (now >= self->area_next_us &&
-            send_locked(self, WPEB_MEDIA_AREA, 0, &self->area, sizeof(self->area))) {
-            self->area_pending = FALSE;
-            self->sent_area = self->area;
-            self->area_next_us = now + self->area_send_gap_us;
-            did_send = TRUE;
-            sent = self->sent_area;
-        }
+        try_send = now >= self->area_next_us;
     }
     const gboolean have_window = self->have_window;
     const int vw = self->video_width, vh = self->video_height;
     g_mutex_unlock(&self->lock);
+    /* This is WebKit's main thread: it must never wait for the socket. A streaming thread inside a blocked write
+     * (the UI stopped reading) holds io_lock for up to SO_SNDTIMEO per message; waiting for it here froze the page's
+     * main thread and every load behind it (TV, 2026-11-20: ~5-7 s stall of a second tab while a video played). So:
+     * trylock, and a non-blocking write; whatever does not go out stays area_pending for the streaming thread. */
+    if (try_send && g_mutex_trylock(&self->io_lock)) {
+        area_flush_pending_locked(self, TRUE);
+        g_mutex_unlock(&self->io_lock);
+        g_mutex_lock(&self->lock);
+        did_send = !self->area_pending;
+        sent = self->sent_area;
+        g_mutex_unlock(&self->lock);
+    }
     if (have_window && video_window.place) {
         const int64_t t0 = now_us();
         video_window_place(vw, vh, a.x, a.y, a.width, a.height);
@@ -520,22 +648,28 @@ static gboolean wpeb_video_sink_start(GstBaseSink *sink)
         return FALSE;
     }
     /* A stuck UI must not hang the streaming thread forever (and with it the page's media element). */
-    struct timeval tv = {2, 0};
+    struct timeval tv = {0, 100000}; /* a tick: send_locked_mode gives the UI 2 s in all */
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    g_atomic_int_set(&self->closing, 0);
+    g_mutex_lock(&self->io_lock);
+    g_atomic_int_set(&self->fd, fd);
     g_mutex_lock(&self->lock);
-    self->fd = fd;
     self->codec = 0;
+    self->nctl = 0; /* messages queued for the previous connection are stale */
     memset(&self->load, 0, sizeof(self->load));
     self->sent = 0;
+    g_mutex_unlock(&self->lock);
     uint32_t version = WPEB_MEDIA_IPC_VERSION;
     send_locked(self, WPEB_MEDIA_HELLO, 0, &version, sizeof(version));
     /* The hole's rectangle before anything else goes out (the UI has no window to run until it knows where). A new
      * connection has sent nothing, so the rectangle we hold -- the last painted one -- goes now, whether or not it
      * already went over the previous connection. */
+    g_mutex_lock(&self->lock);
     if (self->have_area)
         self->area_pending = TRUE;
-    area_flush_pending_locked(self);
     g_mutex_unlock(&self->lock);
+    area_flush_pending_locked(self, FALSE);
+    g_mutex_unlock(&self->io_lock);
     GST_INFO_OBJECT(self, "connected to %s", path);
     return TRUE;
 }
@@ -543,12 +677,16 @@ static gboolean wpeb_video_sink_start(GstBaseSink *sink)
 static gboolean wpeb_video_sink_stop(GstBaseSink *sink)
 {
     WpebVideoSink *self = WPEB_VIDEO_SINK(sink);
-    g_mutex_lock(&self->lock);
-    send_locked(self, WPEB_MEDIA_UNLOAD, 0, NULL, 0);
+    /* UNLOAD goes through the control queue (non-blocking when io_lock is busy); the close is what the UI acts on in
+     * any case (its connection thread ends and releases the decoder). */
+    send_ctl(self, WPEB_MEDIA_UNLOAD, NULL, 0);
+    g_atomic_int_set(&self->closing, 1); /* a writer stuck for the UI stops within one tick: io_lock is not held for 2 s */
+    g_mutex_lock(&self->io_lock);
+    ctl_drain_io(self, TRUE);
     if (self->fd >= 0)
         close(self->fd);
-    self->fd = -1;
-    g_mutex_unlock(&self->lock);
+    g_atomic_int_set(&self->fd, -1);
+    g_mutex_unlock(&self->io_lock);
     if (self->have_window && video_window.close)
         video_window.close();
     self->have_window = FALSE;
@@ -721,10 +859,10 @@ static GstFlowReturn wpeb_video_sink_render(GstBaseSink *sink, GstBuffer *buffer
     }
     /* A rectangle the paint path could not hand over (the streaming thread held the lock, or the send failed) goes
      * now, in the stream's own message order: this is what makes the last rectangle of a scroll safe once the page
-     * stops painting and never asks again. The lock is free here (send_msg above released it). */
-    g_mutex_lock(&self->lock);
-    area_flush_pending_locked(self);
-    g_mutex_unlock(&self->lock);
+     * stops painting and never asks again. */
+    g_mutex_lock(&self->io_lock);
+    area_flush_pending_locked(self, FALSE);
+    g_mutex_unlock(&self->io_lock);
     GST_LOG_OBJECT(self, "unit %" G_GUINT64_FORMAT ": media %" G_GINT64_FORMAT " us, %" G_GSIZE_FORMAT " bytes", self->sent + 1, pts_us, size);
     if (++self->sent == 1)
         GST_INFO_OBJECT(self, "first access unit: media time %" G_GINT64_FORMAT " us, %" G_GSIZE_FORMAT " bytes", pts_us, map.size);
@@ -735,7 +873,7 @@ static gboolean wpeb_video_sink_event(GstBaseSink *sink, GstEvent *event)
 {
     WpebVideoSink *self = WPEB_VIDEO_SINK(sink);
     if (GST_EVENT_TYPE(event) == GST_EVENT_FLUSH_STOP) {
-        send_msg(self, WPEB_MEDIA_FLUSH, 0, NULL, 0);
+        send_ctl(self, WPEB_MEDIA_FLUSH, NULL, 0);
     } else if (GST_EVENT_TYPE(event) == GST_EVENT_EOS) {
         uint32_t audio = 0;
         send_msg(self, WPEB_MEDIA_EOS, 0, &audio, sizeof(audio));
@@ -750,10 +888,10 @@ static GstStateChangeReturn wpeb_video_sink_change_state(GstElement *element, Gs
     switch (transition) {
     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
         paused = 0;
-        send_msg(self, WPEB_MEDIA_PAUSE, 0, &paused, sizeof(paused));
+        send_ctl(self, WPEB_MEDIA_PAUSE, &paused, sizeof(paused));
         break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
-        send_msg(self, WPEB_MEDIA_PAUSE, 0, &paused, sizeof(paused));
+        send_ctl(self, WPEB_MEDIA_PAUSE, &paused, sizeof(paused));
         break;
     default:
         break;
@@ -797,13 +935,15 @@ static void wpeb_video_sink_finalize(GObject *object)
     g_byte_array_unref(self->parameter_sets);
     g_byte_array_unref(self->scratch);
     g_mutex_clear(&self->lock);
+    g_mutex_clear(&self->io_lock);
     G_OBJECT_CLASS(wpeb_video_sink_parent_class)->finalize(object);
 }
 
 static void wpeb_video_sink_init(WpebVideoSink *self)
 {
+    g_mutex_init(&self->io_lock);
     g_mutex_init(&self->lock);
-    self->fd = -1;
+    g_atomic_int_set(&self->fd, -1);
     self->parameter_sets = g_byte_array_new();
     self->scratch = g_byte_array_new();
     /* The hole's rectangle: at most one per this many µs (the UI applies areas between access units, so a narrower
@@ -1260,7 +1400,7 @@ static void send_volume(WpebAudioSink *self)
         g_object_set(self->pulse, "volume", self->volume, "mute", self->mute, NULL);
     if (self->hw && WPEB_AUDIO_HW(self->hw)->video) {
         WpebMediaVolume v = {(uint32_t)(CLAMP(self->volume, 0.0, 1.0) * 1000 + 0.5), self->mute ? 1u : 0u};
-        send_msg(WPEB_AUDIO_HW(self->hw)->video, WPEB_MEDIA_VOLUME, 0, &v, sizeof(v));
+        send_ctl(WPEB_AUDIO_HW(self->hw)->video, WPEB_MEDIA_VOLUME, &v, sizeof(v));
     }
 }
 
