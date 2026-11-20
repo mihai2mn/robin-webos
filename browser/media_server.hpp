@@ -16,7 +16,7 @@
 #include "wpe_media_ipc.h"
 #include <chrono>
 
-namespace wnk::media { class NdlBackend; }
+namespace wnk::media { class MediaBackend; class NdlBackend; }
 
 namespace browser {
 
@@ -74,7 +74,7 @@ private:
     std::mutex mutex_;  // the backends
     // As Chromium on webOS: a stream with a video window on the page surface plays through LG's media pipeline
     // bound to it (LgMediaPlayer); without one, through NDL (whose video sits below the UI window).
-    std::unique_ptr<wnk::media::NdlBackend> backend_;
+    std::unique_ptr<wnk::media::MediaBackend> backend_;
     LgMediaPlayer lg_;
     bool use_lg_ = false;  // the owner's stream is on lg_ (else on NDL)
     bool ndl_loaded_ = false;

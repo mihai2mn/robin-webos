@@ -37,7 +37,7 @@ target_include_directories(wpebrowser PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../co
 target_compile_definitions(wpebrowser PRIVATE WPEB_APP_ID_STRING="${WPEB_APPID}")
 # printf-style mismatches (a %d given a float crashed the app, 2026-11-20) are build errors for the UI target.
 target_compile_options(wpebrowser PRIVATE -Wformat -Werror=format)
-target_link_libraries(wpebrowser PRIVATE wnk_app wnk_media_ndl ${CMAKE_DL_LIBS})
+target_link_libraries(wpebrowser PRIVATE wnk_app wnk_media_ndl wnk_media_starfish ${CMAKE_DL_LIBS})
 if (WNK_WEBOS)
     # LG's buffer-feed media pipeline (lg_media_player.cpp), from the NDK's starfish-media-pipeline header.
     target_include_directories(wpebrowser SYSTEM PRIVATE "${CMAKE_SYSROOT}/usr/include/starfish-media-pipeline")

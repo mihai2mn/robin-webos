@@ -1,0 +1,13 @@
+--- a/media/src/starfish_backend.cpp
++++ b/media/src/starfish_backend.cpp
+@@ -394,7 +394,9 @@
+          "\"srcBufferLevelAudio\":{\"minimum\":1,\"maximum\":" + audio_buffer +
+          "},\"srcBufferLevelVideo\":{\"minimum\":1,\"maximum\":8388608}}}";
+     p += std::string(",\"needAudio\":") + (has_audio ? "true" : "false");
+-    p += std::string(",\"queryPosition\":false,\"lowDelayMode\":") + (has_audio ? "false" : "true");
++    // A low-delay decoder shows pictures in decode order, so a stream with B-frames steps back and forth. Video-only streams
++    // got low delay (audio ones did not); the reordering decoder is right for files and costs nothing for the page's video.
++    p += ",\"queryPosition\":false,\"lowDelayMode\":false";
+     p += ",\"transmission\":{\"contentsType\":\"LIVE\"}";
+     p += ",\"adaptiveStreaming\":{\"audioOnly\":false";
+     if (l.frame_rate > 0) p += ",\"adaptiveResolution\":true";

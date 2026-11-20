@@ -4,6 +4,7 @@
 #include "wpe_media_ipc.h"
 #include "wnk/log.hpp"
 #include "wnk/media/ndl_backend.hpp"
+#include "wnk/media/starfish_backend.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -114,7 +115,23 @@ bool MediaServer::start(const std::string &path, bool video_window, std::string 
     }
     path_ = path;
     listen_fd_ = fd;
-    backend_ = std::make_unique<wnk::media::NdlBackend>();
+    // WPEB_STARFISH=1 (or the file /tmp/wpeb-starfish): LG's buffer-feed pipeline with its own exported video window
+    // (the kit's StarfishBackend) instead of NDL, whose decoder is low-delay and shows B-frames out of order.
+    // The exported window is created here, on the main thread.
+    const bool want_starfish = std::getenv("WPEB_STARFISH") != nullptr ? std::strcmp(std::getenv("WPEB_STARFISH"), "0") != 0
+                                                                       : ::access("/tmp/wpeb-starfish", F_OK) == 0;
+    std::string sf_why;
+    if (want_starfish && wnk::media::StarfishBackend::available(&sf_why)) {
+        auto sf = std::make_unique<wnk::media::StarfishBackend>();
+        WNK_LOGI(kCat, "video through the Starfish pipeline (video plane: %s)",
+                 sf->plane() == wnk::media::VideoPlane::ExportedWindow ? "exported window"
+                 : sf->plane() == wnk::media::VideoPlane::Acb          ? "ACB"
+                                                                       : "none");
+        backend_ = std::move(sf);
+    } else {
+        if (want_starfish) WNK_LOGW(kCat, "Starfish pipeline unavailable (%s): NDL", sf_why.c_str());
+        backend_ = std::make_unique<wnk::media::NdlBackend>();
+    }
     acceptor_ = std::thread([this] { accept_loop(); });
     WNK_LOGI(kCat, "hardware video service on %s", path.c_str());
     return true;
