@@ -38,3 +38,13 @@ Setup: an ssh host called `lgtv` (root on a rooted TV with `/opt/bin/tv` and pyt
 - The pointer's recent positions and clicks are in the app's events.log (`[pointer]` lines), handy to check where a click landed.
 
 Proof run (Wikipedia article: open, scroll, click a link, back, type into the search box): `proof/`.
+
+## Motion traces (animation as text)
+Screenshots at about 1 fps cannot show an animation. `motion-recorder.js` runs in the page (launch parameter
+`wpebEnv: {"WPE_BROWSER_DEBUG_SCRIPT": "<path on the TV>/motion-recorder.js", "WPE_BROWSER_DEBUG_CONSOLE": "1"}`) and
+samples, every rendered frame, the boxes and opacity of what can move by itself (fixed/sticky elements, running
+animations, videos, `window.__motionSelectors`) plus the scroll offset; `window.__motionRecorder.mark("label")` puts a
+label on the timeline. `node motion.js engine.log [--svg out.svg] [--from ms] [--to ms]` turns the log into text:
+per element and property the holds, moves (duration, easing, speed) and one-frame jumps, direction reversals
+(three within a second is reported as FLICKER), and frame gaps with the long frames. It sees layout motion only:
+a picture that flickers without any element moving (a compositing fault) is not in it.
