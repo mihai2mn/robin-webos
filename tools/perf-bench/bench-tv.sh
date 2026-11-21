@@ -15,6 +15,7 @@ OUT=${OUT:-$root/build/plan/build/bench/$LABEL}; mkdir -p "$OUT"
 APP=org.sostk.wpebrowser.dev; LOCK=/tmp/wren-devapp.lock; OWNER=${OWNER:-wren-build}; PORT=18899
 IDLE_MIN=${IDLE_MIN:-85}; PAGES=${PAGES:-"https://en.wikipedia.org/wiki/Romania https://www.bbc.com/news https://www.theguardian.com/international"}
 ONLY=${ONLY:-"jsb pages scroll video"}  # which parts to run, e.g. ONLY=pages; PAGE_ENV='"WREN_UBO":"0"' adds wpebEnv entries to the page loads
+penv=""; [ -n "${PAGE_ENV:-}" ] && penv=",\"wpebEnv\":{$PAGE_ENV}"
 want() { case " $ONLY " in *" $1 "*) return 0 ;; esac; return 1; }
 SUM=$OUT/summary.txt; : > "$SUM"
 tv() { timeout "${1:-45}" ssh -o BatchMode=yes -o ConnectTimeout=25 lgtv "$2"; }
@@ -63,7 +64,7 @@ want jsb && for r in $(seq 1 "$RUNS"); do
 done
 want pages && for url in $PAGES; do for r in $(seq 1 "$RUNS"); do
   tag="page-${url//[^a-z0-9]/_}-$r"
-  clean_launch "{\"target\":\"$url\"${PAGE_ENV:+,\"wpebEnv\":{$PAGE_ENV}}}"; peak=0; fin=""
+  clean_launch "{\"target\":\"$url\"$penv}"; peak=0; fin=""
   for i in $(seq 1 60); do sleep 1; rs=$(webrss); [ -n "$rs" ] && [ "$rs" -gt "$peak" ] && peak=$rs
     [ -z "$fin" ] && fin=$(tv 15 "grep -m1 'load finished after' /tmp/$APP/engine.log" 2>/dev/null | sed -n 's/.*after \([0-9]*\) ms.*/\1/p')
     [ -n "$fin" ] && [ "$i" -ge 25 ] && break; done
