@@ -373,6 +373,13 @@
                       ['border', '0'], ['box-sizing', 'border-box'], ['transform', 'none'], ['translate', 'none'], ['z-index', '2147483647'],
                       ['visibility', 'visible'], ['opacity', '1'], ['object-fit', 'contain']];
         const isFrame = n => n.tagName === 'IFRAME' || n.tagName === 'FRAME';
+        // While a container is fullscreen: a video the page puts into it (a player re-mounting its element, a new source element) is made
+        // to fill the screen like the ones that were there at enter().
+        let watch = null;
+        const fillNew = el => {
+            if (el instanceof HTMLVideoElement || isFrame(el)) return;
+            for (const v of videosIn(el)) if (v.isConnected && !saved.has(v)) { strip(v); put(v, FILL); }
+        };
         const enter = el => {
             const swap = !!emu.el;               // another element asks while one is fullscreen: switch, one change event, no exit
             if (swap) { restoreStyles(); emu.el = null; }
@@ -380,11 +387,15 @@
             if (!swap) emu.scroll = [scrollX, scrollY];
             emu.href = location.href;
             strip(el);
+            emu.parent = el.parentNode;
             // A container: the page's own CSS (:fullscreen video { ... }) cannot match an emulated fullscreen, so its video is made to fill
             // the screen here too, and freed from its own trapping ancestors.
             if (!(el instanceof HTMLVideoElement) && !isFrame(el))
                 for (const v of videosIn(el)) if (v.isConnected && v.__wrenPolicy === 'hw') { strip(v); put(v, FILL); }
             put(el, FILL.concat([['background-color', '#000']]));
+            if (watch) watch.disconnect();
+            watch = new MutationObserver(() => { if (emu.el === el) fillNew(el); });
+            watch.observe(el, { childList: true, subtree: true });
             for (const node of [document.documentElement, document.body]) if (node) put(node, [['overflow', 'hidden']]);
             document.documentElement.setAttribute('wren-emulated-fullscreen', '');
             log({ fullscreen: 'emulated enter', tag: el.tagName, swap });
@@ -397,6 +408,7 @@
             const el = emu.el;
             if (!el) return;
             emu.el = null;
+            if (watch) { watch.disconnect(); watch = null; }
             restoreStyles();
             document.documentElement.removeAttribute('wren-emulated-fullscreen');
             // Back to where the page was, unless the page went somewhere else meanwhile (single-page navigation), and without animating.
@@ -408,7 +420,12 @@
             if (window !== top) try { parent.postMessage({ wrenFullscreen: 'leave' }, '*'); } catch (e) {}
         }
         // The emulated fullscreen ends when its element is no longer in the document (the real one does too), or the page moves on.
-        setInterval(() => { if (emu.el && !emu.el.isConnected) leave(); }, 500);
+        // An element the page moved to another parent while fullscreen: the new ancestors can trap it (transform, filter, contain...) like the old ones.
+        setInterval(() => {
+            if (!emu.el) return;
+            if (!emu.el.isConnected) leave();
+            else if (emu.el.parentNode !== emu.parent) { emu.parent = emu.el.parentNode; strip(emu.el); }
+        }, 500);
         for (const name of ['pagehide', 'popstate', 'hashchange']) addEventListener(name, () => { if (emu.el) leave(); });
         addEventListener('message', e => {
             const d = e.data;
