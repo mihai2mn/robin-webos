@@ -692,7 +692,9 @@ void MediaServer::serve(int fd, uint64_t id) {
 
     for (;;) {
         pollfd pfd{fd, POLLIN, 0};
-        const int pr = ::poll(&pfd, 1, load_pending || retry_wanted.load() || recover_wanted.load() ? 100 : -1);
+        // While a stream plays through the LG pipeline the wait is bounded: the feeder thread sets retry_wanted/recover_wanted while this
+        // thread may already be blocked here, and nothing may arrive on the socket to wake it.
+        const int pr = ::poll(&pfd, 1, load_pending || retry_wanted.load() || recover_wanted.load() || use_lg_ ? 100 : -1);
         if (pr < 0 && errno == EINTR) continue;
         if (pr < 0) break;
         if (pr == 0) {
