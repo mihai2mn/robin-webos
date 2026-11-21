@@ -287,8 +287,21 @@ LgMediaPlayer::Feed LgMediaPlayer::feed(bool audio, const uint8_t *data, size_t 
             if (!sc4) break;
             const int type = data[i + 4] & 0x1f;
             if (type == 9 && lead > 0) {
-                data += i;
-                size -= i;
+                // Only when the unit carries its own parameter sets behind the delimiter: a stream from MP4 often has none in band, and the
+                // copies the sink put in front are then the only ones (dropping them left the decoder without SPS/PPS after a seek).
+                bool own_sps = false;
+                for (size_t k = i + 5; k + 3 < size; ++k) {
+                    if (data[k] == 0 && data[k + 1] == 0 && data[k + 2] == 1) {
+                        const int t = data[k + 3] & 0x1f;
+                        if (t == 7) { own_sps = true; break; }
+                        if (t >= 1 && t <= 5) break;  // the first slice: nothing more to look for
+                        k += 2;
+                    }
+                }
+                if (own_sps) {
+                    data += i;
+                    size -= i;
+                }
                 break;
             }
             if (type != 7 && type != 8) break;
