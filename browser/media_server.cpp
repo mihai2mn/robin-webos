@@ -337,6 +337,29 @@ void MediaServer::accept_loop() {
     }
 }
 
+// Does this access unit start a keyframe? (Annex-B; H.264 IDR slice or HEVC IRAP; a unit the scan cannot read counts as a keyframe,
+// so a feed is never held back for ever.)
+static bool is_keyframe(uint32_t codec, const std::vector<uint8_t> &d) {
+    bool saw_start = false;
+    for (size_t i = 0; i + 3 < d.size(); ++i) {
+        if (d[i] != 0 || d[i + 1] != 0 || d[i + 2] != 1) continue;
+        saw_start = true;
+        if (codec == WPEB_MEDIA_H264) {
+            const int t = d[i + 3] & 0x1f;
+            if (t == 5) return true;
+            if (t == 1) return false;
+        } else if (codec == WPEB_MEDIA_HEVC) {
+            const int t = (d[i + 3] >> 1) & 0x3f;
+            if (t >= 16 && t <= 21) return true;
+            if (t < 16) return false;
+        } else {
+            return true;
+        }
+        i += 2;
+    }
+    return !saw_start;
+}
+
 void MediaServer::serve(int fd, uint64_t id) {
     WNK_LOGI(kCat, "stream %llu connected", static_cast<unsigned long long>(id));
     using Clock = std::chrono::steady_clock;
@@ -361,6 +384,9 @@ void MediaServer::serve(int fd, uint64_t id) {
     std::deque<Unit> replay;  // qm; units fed since the Load while no picture has been presented yet (a Load that fails early is repeated with them)
     uint64_t replay_bytes = 0;
     bool replay_ok = false;   // qm; the replay is complete (nothing was dropped from it)
+    std::atomic<bool> recover_wanted{false};  // the LG pipeline failed after showing pictures: the reader thread loads it again at the current position
+    std::atomic<uint32_t> key_codec{0};       // the stream's codec (for finding keyframes)
+    std::atomic<bool> need_key{false};        // after such a reload the decoder is fed from the next keyframe on (a start in the middle of a GOP smears)
     std::atomic<bool> retry_wanted{false};  // the pipeline failed before its first picture: the reader thread loads it again
     std::atomic<bool> eos_pushed{false};  // the decoder was told the stream ended (cleared by a flush or load)
     constexpr uint64_t kReplayMax = 48u << 20;  // 4K at 40 Mbit/s: about 9 s
@@ -386,6 +412,14 @@ void MediaServer::serve(int fd, uint64_t id) {
             }
             Unit &u = queues[pick].front();
             const uint64_t g = u.generation;
+            if (need_key.load() && !u.eos) {
+                // Only video can say where a keyframe is; the audio before it goes too (it would play ahead of a picture that is not there).
+                if (pick == 1 || !is_keyframe(key_codec.load(), u.packet.data)) {
+                    queues[pick].pop_front();
+                    continue;
+                }
+                need_key = false;
+            }
             if (u.eos) {
                 queues[pick].pop_front();
                 if (eos_generation != g) ended[0] = ended[1] = pushed_eos = false, eos_generation = g;
@@ -430,6 +464,7 @@ void MediaServer::serve(int fd, uint64_t id) {
                 ++full_waits;
                 blocked_until[pick] = Clock::now() + std::chrono::milliseconds(10);
                 if (replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
+                if (use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
                 continue;
             }
             if (!queues[pick].empty() && queues[pick].front().generation == g) {
@@ -448,6 +483,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             }
             if (pick == 0) ++units;
             if (replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
+            if (use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
         }
     });
     const auto drop_queued = [&] {
@@ -501,6 +537,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!backend_) return;
         auto &b = *backend_;
+        key_codec = l.codec;
         wnk::media::StreamFormat f;
         wnk::media::VideoFormat v;
         v.codec = l.codec == WPEB_MEDIA_H264 ? wnk::media::CodecId::H264
@@ -606,6 +643,42 @@ void MediaServer::serve(int fd, uint64_t id) {
             qcv.notify_all();
         }
     };
+    // The LG pipeline failed after it had shown pictures (TV, 2026-11-21, a seek in a video app: smeared picture, "pipeline error 100",
+    // frames presented stop while units are still fed, and the decoder stayed held): unload it, load it again at the current position
+    // and feed it from the next keyframe. Not more than three times in a minute, then it is left to the page (its own recovery).
+    std::deque<Clock::time_point> recoveries;
+    const auto do_recover = [&] {
+        if (!recover_wanted.exchange(false)) return;
+        if (!pending_valid || !use_lg_) return;
+        const auto now = Clock::now();
+        while (!recoveries.empty() && now - recoveries.front() > std::chrono::seconds(60)) recoveries.pop_front();
+        const int code = lg_.error();
+        if (recoveries.size() >= 3) {
+            WNK_LOGW(kCat, "stream %llu: LG pipeline error %d again: not reloaded (3 in a minute)", static_cast<unsigned long long>(id), code);
+            return;
+        }
+        recoveries.push_back(now);
+        WNK_LOGW(kCat, "stream %llu: LG pipeline error %d mid-stream: reloading it at the current position", static_cast<unsigned long long>(id), code);
+        {
+            std::lock_guard<std::mutex> ql(qm);
+            ready = false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (owner_.load() == id) lg_.unload();
+            use_lg_ = false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        need_key = true;
+        do_load(pending);
+        {
+            std::lock_guard<std::mutex> ql(qm);
+            replay_ok = false;  // no replay for a stream that has shown pictures
+            replay.clear();
+            ready = use_lg_ || ndl_loaded_;
+            qcv.notify_all();
+        }
+    };
     const auto maybe_load = [&] {
         if (!load_pending) return;
         const bool waited = Clock::now() - load_at >= kAudioWait;
@@ -619,12 +692,13 @@ void MediaServer::serve(int fd, uint64_t id) {
 
     for (;;) {
         pollfd pfd{fd, POLLIN, 0};
-        const int pr = ::poll(&pfd, 1, load_pending || retry_wanted.load() ? 100 : -1);
+        const int pr = ::poll(&pfd, 1, load_pending || retry_wanted.load() || recover_wanted.load() ? 100 : -1);
         if (pr < 0 && errno == EINTR) continue;
         if (pr < 0) break;
         if (pr == 0) {
             maybe_load();
             do_retry();
+            do_recover();
             continue;
         }
         WpebMediaHeader h;
@@ -646,6 +720,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             // without pause (YouTube's TV app), and the Load waited forever (TV, 2026-11-14).
             if (load_pending) maybe_load();
             if (retry_wanted.load()) do_retry();
+            if (recover_wanted.load()) do_recover();
             const bool audio = h.type == WPEB_MEDIA_AUDIO;
             if (audio && audio_state != AudioState::Hardware) continue;
             Unit u;
@@ -668,6 +743,8 @@ void MediaServer::serve(int fd, uint64_t id) {
             retries = 0;
             force_ndl = false;
             retry_wanted = false;
+            recover_wanted = false;
+            need_key = false;
             pending.window_id[sizeof(pending.window_id) - 1] = '\0';
             load_pending = true;
             load_at = Clock::now();
