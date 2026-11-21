@@ -139,11 +139,11 @@ class SettingsScreen : public PageScreen {
         auto &look = section("Appearance");
         std::vector<std::string> zooms;
         for (int z : kZoomLevels) zooms.push_back(std::to_string(z / 10) + " %");
-        auto &zoom = look.add<wnk::ui::Choice>("Page zoom", zooms, s.zoom, [&s, changed](Ui &ui, int i) {
+        auto &zoom = look.add<wnk::ui::Choice>("Default page zoom", zooms, s.zoom, [&s, changed](Ui &ui, int i) {
             s.zoom = i;
             changed(ui);
         });
-        zoom.set_description("Makes text and pictures on every page larger");
+        zoom.set_description("Default size for sites without their own zoom");
         auto &sharp = look.add<wnk::ui::Toggle>("Sharp text", s.sharp_text, [&s, changed](Ui &ui, bool on) {
             s.sharp_text = on;
             changed(ui);

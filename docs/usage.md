@@ -10,6 +10,7 @@ Wren works with the arrows, OK and Back of any LG remote; colour keys are option
 | ▲ at the top of a page | the glass panel: the tab row above the toolbar; ◀ ▶ and OK switch tabs |
 | **Hold OK** | quick actions (new tab, bookmark, tabs, reload, close tab, home, settings, toolbar) and page zoom |
 | CH + / − | previous / next tab |
+| Play / Pause / Stop / Rewind / Fast-forward | control the page's main video (play/pause toggle, pause, stop, seek −10 s / +10 s) |
 | Back | back in the page's history, or to the panel; in the panel, back to the page |
 | Menu | side panel: bookmarks, history, zoom, settings, exit |
 | Red / Green / Yellow / Blue | all tabs / side panel / quick actions / new tab |

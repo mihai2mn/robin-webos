@@ -79,11 +79,19 @@ class Profile {
     const std::string &icon_for(const std::string &url) const;
     void set_icon(const std::string &page_url, const std::string &icon_url);
 
+    // Per-site page zoom, keyed by normalised host (site_host). Hosts without an entry use settings.zoom.
+    bool has_site_zoom(const std::string &url) const;
+    int zoom_for(const std::string &url) const;           // index into kZoomLevels
+    int zoom_permille_for(const std::string &url) const;  // e.g. 1000, 1250, 1500
+    void set_site_zoom(const std::string &url, int zoom_index);
+    void clear_site_zoom(const std::string &url);
+    const std::map<std::string, int> &site_zooms() const { return site_zooms_; }
+
     void flush(wnk::async::WorkerPool &pool, double now_ms);
     void flush_now();
 
  private:
-    enum : unsigned { kSettings = 1, kBookmarks = 2, kHistory = 4, kSession = 8, kIcons = 16 };
+    enum : unsigned { kSettings = 1, kBookmarks = 2, kHistory = 4, kSession = 8, kIcons = 16, kZooms = 32 };
     std::string serialize(unsigned part) const;
     std::string path(unsigned part) const;
 
@@ -93,9 +101,15 @@ class Profile {
     std::vector<SessionTab> session_;
     size_t session_active_ = 0;
     std::map<std::string, std::string> icons_;  // host -> icon URL
+    std::map<std::string, int> site_zooms_;     // host -> zoom permille
     unsigned dirty_ = 0;
     double last_flush_ms_ = 0;
 };
+
+// Normalised host for http(s) URLs (lowercased, port/path/userinfo stripped, leading "www." dropped); empty otherwise.
+std::string site_host(const std::string &url);
+// Index into kZoomLevels closest to `permille`.
+int zoom_index_for_permille(int permille);
 
 // "Today", "Yesterday" or a date like "Monday 10 November 2026" (local time).
 std::string day_label(int64_t unix_seconds);

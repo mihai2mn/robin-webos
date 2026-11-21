@@ -17,6 +17,7 @@
 #include "wren_ui.hpp"
 #include "direct_owner.hpp"
 #include "engine_client.hpp"
+#include "media_keys.hpp"
 #include "media_server.hpp"
 #include "keys.hpp"
 #include "log_export.hpp"
@@ -303,6 +304,7 @@ class App : public wnk::app::Delegate {
         if (changed && video_tab_ != 0 && video_tab_ != id) release_video_of(video_tab_, "its tab is not shown");
         active_ = id;
         t->last_shown_ms = ctx_->ui().now_ms();
+        apply_zoom();
         if (!t->url.empty() && !t->live) open_in_engine(*t, t->url);
         if (t->live) engine_.tab_activate(id);
         if (t->live && t->crashed) reload_crashed(*t);
@@ -325,8 +327,9 @@ class App : public wnk::app::Delegate {
         const std::string url = to_url(text, browser::kSearchEngines[static_cast<size_t>(profile_.settings.search_engine)].query_prefix);
         Tab *t = tab(active_);
         if (url.empty() || t == nullptr) return;
+        t->url = url;
+        apply_zoom();
         if (t->live) {
-            t->url = url;
             engine_.load_uri(t->id, url);
         } else {
             open_in_engine(*t, url);
@@ -369,6 +372,7 @@ class App : public wnk::app::Delegate {
         fresh.id = t->id;
         fresh.last_shown_ms = ctx_->ui().now_ms();
         *t = fresh;
+        apply_zoom();
         screen_->page_->show_tab(0);
         refresh_chrome();
         focus_content();
@@ -436,13 +440,25 @@ class App : public wnk::app::Delegate {
     }
 
     void zoom_step(int delta) {
-        auto &z = profile_.settings.zoom;
-        z = std::clamp(z + delta, 0, static_cast<int>(browser::kZoomLevels.size()) - 1);
-        profile_.settings_changed();
-        apply_settings();
+        const std::string url = active_url();
+        const std::string host = browser::site_host(url);
+        if (!host.empty()) {
+            const int cur = profile_.zoom_for(url);
+            const int next = std::clamp(cur + delta, 0, static_cast<int>(browser::kZoomLevels.size()) - 1);
+            profile_.set_site_zoom(url, next);
+        } else {
+            auto &z = profile_.settings.zoom;
+            z = std::clamp(z + delta, 0, static_cast<int>(browser::kZoomLevels.size()) - 1);
+            profile_.settings_changed();
+        }
+        apply_zoom();
     }
     std::string zoom_text() const {
-        return std::to_string(browser::kZoomLevels[static_cast<size_t>(profile_.settings.zoom)] / 10) + "%";
+        return std::to_string(profile_.zoom_permille_for(active_url()) / 10) + "%";
+    }
+    std::string zoom_scope() const {
+        const std::string host = browser::site_host(active_url());
+        return host.empty() ? "Default for sites without their own zoom" : "Remembered for " + host;
     }
 
     // Up at the page's top edge (and Back with no history): the panel, on the shown tab's chip.
@@ -817,6 +833,19 @@ class App : public wnk::app::Delegate {
         if (browsing && (action == A::ChannelUp || action == A::ChannelDown || action == A::Red || action == A::Green ||
                          action == A::Yellow || action == A::Blue))
             return true;  // handled on press
+        // Remote media keys (play, pause, stop, rewind, fast-forward): control the active page's main video.
+        if (browsing && !screen_->overlay_open()) {
+            const browser::MediaKeyAction media = browser::media_key_action(action, e.scancode, e.keycode);
+            if (media != browser::MediaKeyAction::None) {
+                const Tab *mt = tab(active_);
+                if (e.down && !e.repeat && mt != nullptr && mt->live && engine_.running()) {
+                    WNK_LOGI(kCat, "media key: %s (sc=%d kc=0x%x)", browser::media_key_label(media), e.scancode, e.keycode);
+                    engine_.run_js(mt->id, browser::media_key_script(media));
+                    ui.toast(browser::media_key_label(media), 900);
+                }
+                return true;
+            }
+        }
         // The page lies under the chrome, so spatial navigation never finds it "below": Down from the navigation row
         // goes back to the page, which hides the chrome again.
         if (action == A::Down && e.down && browsing && ui.focused() != nullptr && screen_->toolbar_->is_ancestor_of(ui.focused())) {
@@ -854,7 +883,11 @@ class App : public wnk::app::Delegate {
         default: break;
         }
         const browser::WebKey k = browser::web_key_from_sdl(e.keycode);
-        if (k.keyval == 0) return false;
+        if (k.keyval == 0) {
+            if (e.down && !e.repeat && action == A::Unknown && e.scancode >= 70)
+                WNK_LOGI(kCat, "unhandled key: sc=%d kc=0x%x", e.scancode, e.keycode);
+            return false;
+        }
         engine_.key(e.down, k.keyval, k.keycode, 0);
         return true;
     }
@@ -1003,6 +1036,14 @@ class App : public wnk::app::Delegate {
         auto it = find(id);
         return it == tabs_.end() ? nullptr : &*it;
     }
+    const Tab *tab(TabId id) const {
+        auto it = std::find_if(tabs_.begin(), tabs_.end(), [id](const Tab &t) { return t.id == id; });
+        return it == tabs_.end() ? nullptr : &*it;
+    }
+    std::string active_url() const {
+        const Tab *t = tab(active_);
+        return t != nullptr ? t->url : std::string();
+    }
 
     wnk::ui::TextField &omnibox_field() { return screen_->omnibox_->field(); }
 
@@ -1096,8 +1137,19 @@ class App : public wnk::app::Delegate {
         }
     }
 
+    void apply_zoom() {
+        if (!engine_.running()) return;
+        const std::string url = active_url();
+        const uint32_t permille = static_cast<uint32_t>(profile_.zoom_permille_for(url));
+        if (permille == applied_zoom_) return;
+        applied_zoom_ = permille;
+        engine_.set_zoom(permille);
+        const std::string host = browser::site_host(url);
+        WNK_LOGI(kCat, "zoom %u%% (%s)", permille / 10, host.empty() ? "default" : host.c_str());
+    }
+
     void apply_settings() {
-        engine_.set_zoom(static_cast<uint32_t>(browser::kZoomLevels[static_cast<size_t>(profile_.settings.zoom)]));
+        apply_zoom();
         // Pages lay out at 2/3 of the screen (kRenderScale); 1/kRenderScale renders them at full resolution.
         // Direct presentation always does: the page surface is shown 1:1, not scaled to the page area.
         const bool full = profile_.settings.sharp_text || screen_->page_->direct();
@@ -1229,6 +1281,7 @@ class App : public wnk::app::Delegate {
                               std::to_string(r.webkit_micro);
             WNK_LOGI(kCat, "engine ready: WPE WebKit %s", engine_version_.c_str());
             screen_->message_->set_visible(false);
+            applied_zoom_ = 0;
             apply_settings();
         };
         cb.uri = [this](TabId id, const std::string &uri) {
@@ -1237,7 +1290,10 @@ class App : public wnk::app::Delegate {
                 const bool tv = is_tv_app(uri);
                 if (tv != t->tv_mode) WNK_LOGI(kCat, "tab %u: %s TV mode", id, tv ? "entered" : "left");
                 t->tv_mode = tv;
-                if (id == active_) refresh_chrome();
+                if (id == active_) {
+                    apply_zoom();
+                    refresh_chrome();
+                }
             }
         };
         cb.title = [this](TabId id, const std::string &title) {
@@ -1255,6 +1311,7 @@ class App : public wnk::app::Delegate {
             if (t == nullptr) return;
             if (e == WPE_LOAD_FINISHED) profile_.add_visit(t->title, t->url);
             if (e == WPE_LOAD_STARTED) release_video_of(id, "navigation");
+            if (e == WPE_LOAD_COMMITTED && id == active_) apply_zoom();
             const bool loading = e == WPE_LOAD_STARTED || e == WPE_LOAD_COMMITTED;
             if (loading != t->loading) {
                 t->loading = loading;
@@ -1351,6 +1408,7 @@ class App : public wnk::app::Delegate {
             }
         };
         cb.exited = [this](const std::string &why) {
+            applied_zoom_ = 0;
             screen_->page_->ime(ctx_->ui(), false);
             for (Tab &t : tabs_) t.live = false, t.loading = false;
             screen_->page_->show_tab(0);
@@ -1571,6 +1629,7 @@ class App : public wnk::app::Delegate {
     TabId hole_tab_ = 0;
     TabId video_tab_ = 0;       // the tab whose page owns the hardware video (0: none)
     uint64_t owner_seen_ = 0;   // MediaServer::owner_id() last looked at
+    uint32_t applied_zoom_ = 0; // last zoom permille sent to the engine (0 = none sent yet)
 };
 
 BrowserScreen::BrowserScreen(App &app, browser::EngineClient &engine) : Screen("browser"), app_(app) {
@@ -1663,6 +1722,7 @@ BrowserScreen::BrowserScreen(App &app, browser::EngineClient &engine) : Screen("
     ph.exit = [&app](wnk::ui::Ui &) { app.quit(); };
     ph.zoom = [&app](int d) { app.zoom_step(d); };
     ph.zoom_text = [&app]() { return app.zoom_text(); };
+    ph.zoom_scope = [&app]() { return app.zoom_scope(); };
     side_ = &stack.add<browser::wren::SidePanel>(ph);
     browser::wren::QuickHandlers qh;
     qh.new_tab = [&app](wnk::ui::Ui &) { app.new_tab(); };
