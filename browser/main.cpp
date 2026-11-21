@@ -17,6 +17,7 @@
 #include "wren_ui.hpp"
 #include "direct_owner.hpp"
 #include "engine_client.hpp"
+#include "media_keys.hpp"
 #include "media_server.hpp"
 #include "keys.hpp"
 #include "log_export.hpp"
@@ -817,6 +818,19 @@ class App : public wnk::app::Delegate {
         if (browsing && (action == A::ChannelUp || action == A::ChannelDown || action == A::Red || action == A::Green ||
                          action == A::Yellow || action == A::Blue))
             return true;  // handled on press
+        // Remote media keys (play, pause, stop, rewind, fast-forward): control the active page's main video.
+        if (browsing && !screen_->overlay_open()) {
+            const browser::MediaKeyAction media = browser::media_key_action(action, e.scancode, e.keycode);
+            if (media != browser::MediaKeyAction::None) {
+                const Tab *mt = tab(active_);
+                if (e.down && !e.repeat && mt != nullptr && mt->live && engine_.running()) {
+                    WNK_LOGI(kCat, "media key: %s (sc=%d kc=0x%x)", browser::media_key_label(media), e.scancode, e.keycode);
+                    engine_.run_js(mt->id, browser::media_key_script(media));
+                    ui.toast(browser::media_key_label(media), 900);
+                }
+                return true;
+            }
+        }
         // The page lies under the chrome, so spatial navigation never finds it "below": Down from the navigation row
         // goes back to the page, which hides the chrome again.
         if (action == A::Down && e.down && browsing && ui.focused() != nullptr && screen_->toolbar_->is_ancestor_of(ui.focused())) {
@@ -854,7 +868,11 @@ class App : public wnk::app::Delegate {
         default: break;
         }
         const browser::WebKey k = browser::web_key_from_sdl(e.keycode);
-        if (k.keyval == 0) return false;
+        if (k.keyval == 0) {
+            if (e.down && !e.repeat && action == A::Unknown && e.scancode >= 70)
+                WNK_LOGI(kCat, "unhandled key: sc=%d kc=0x%x", e.scancode, e.keycode);
+            return false;
+        }
         engine_.key(e.down, k.keyval, k.keycode, 0);
         return true;
     }
