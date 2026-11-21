@@ -1228,13 +1228,6 @@ static void video_place(int sw, int sh, int x, int y, int w, int h, gboolean com
             if (ch < 2) ch = 2;
             dx = x0; dy = y0; dw = x1 - x0; dh = y1 - y0;
             crop = wl_proxy_get_version((struct wl_proxy *)t->video) >= 2 && !getenv("WPEB_NO_CROP");
-            // Without set_crop_region (this TV's compositor offers wl_webos_foreign version 1 only) the whole picture would be
-            // fitted into the visible part: shrunk, with side bars. A picture that cannot be cut is parked instead (a tiny
-            // rectangle in the corner, under the toolbar) until the video is fully on screen again: the page's black hole
-            // shows meanwhile. WPEB_CROP_FALLBACK=squash keeps the shrinking.
-            if (!crop && !(getenv("WPEB_CROP_FALLBACK") && !strcmp(getenv("WPEB_CROP_FALLBACK"), "squash"))) {
-                dx = 0; dy = 0; dw = 16; dh = 9;
-            }
         }
         struct wl_region *org = crop ? wl_compositor_create_region(t->renderer->compositor) : NULL;
         if (org) wl_region_add(org, 0, 0, picture_w, picture_h);
