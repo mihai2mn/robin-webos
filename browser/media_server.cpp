@@ -671,6 +671,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     // frames presented stop while units are still fed, and the decoder stayed held): unload it, load it again at the current position
     // and feed it from the next keyframe. Not more than three times in a minute, then it is left to the page (its own recovery).
     std::deque<Clock::time_point> recoveries;
+    bool close_stream = false;  // reader thread: the reload failed; the connection is closed (below) so the page gets a media error
     const auto do_recover = [&] {
         if (!recover_wanted.exchange(false)) return;
         if (!pending_valid || !use_lg_ || owner_.load() != id) return;  // as do_retry: only the stream that owns the pipeline reloads it
@@ -701,6 +702,15 @@ void MediaServer::serve(int fd, uint64_t id) {
             replay_ok = false;  // no replay for a stream that has shown pictures
             replay.clear();
             ready = use_lg_ || ndl_loaded_;
+            if (!ready) {
+                // No decoder any more: nothing will consume the queues, which are not capped. Closing the connection makes the web process's
+                // sink fail its next write ("Hardware video service lost"): the page gets a media error instead of a stall.
+                queues[0].clear();
+                queues[1].clear();
+                ++generation;
+                close_stream = true;
+                WNK_LOGW(kCat, "stream %llu: the reload failed: closing the stream", static_cast<unsigned long long>(id));
+            }
             qcv.notify_all();
         }
     };
@@ -716,6 +726,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     };
 
     for (;;) {
+        if (close_stream) break;
         pollfd pfd{fd, POLLIN, 0};
         // While a stream plays through the LG pipeline the wait is bounded: the feeder thread sets retry_wanted/recover_wanted while this
         // thread may already be blocked here, and nothing may arrive on the socket to wake it.
