@@ -8,14 +8,15 @@
 //! Strings cross the boundary as NUL-terminated UTF-8; strings returned to C go back through
 //! `wren_ubo_string_free`.
 use adblock::request::Request;
-use adblock::resources::Resource;
+use adblock::resources::{InMemoryResourceStorage, Resource, ResourceImpl, ResourceStorageBackend};
 use adblock::Engine;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
+use std::rc::Rc;
 
 pub struct WrenUbo {
-    resources: Vec<Resource>,
+    resources: Rc<InMemoryResourceStorage>,
     /// (name, engine); the core is first and is named "core".
     engines: Vec<(String, Engine)>,
 }
@@ -77,10 +78,20 @@ fn style_sheet<'a>(selectors: impl IntoIterator<Item = &'a String>) -> String {
     css
 }
 
-fn load_engine(dat: &[u8], resources: &[Resource]) -> Option<Engine> {
+/// One decoded copy of uBO's resources, shared by every engine (each engine's own `use_resources` would decode and hold
+/// its own: ~0.5 MB per engine, and one engine per extra list plus My filters).
+struct SharedResources(Rc<InMemoryResourceStorage>);
+
+impl ResourceStorageBackend for SharedResources {
+    fn get_resource(&self, resource_ident: &str) -> Option<ResourceImpl> {
+        self.0.get_resource(resource_ident)
+    }
+}
+
+fn load_engine(dat: &[u8], resources: &Rc<InMemoryResourceStorage>) -> Option<Engine> {
     let mut engine = Engine::default();
     engine.deserialize(dat).ok()?;
-    engine.use_resources(resources.iter().cloned());
+    engine.use_resource_storage(SharedResources(Rc::clone(resources)));
     Some(engine)
 }
 
@@ -95,6 +106,7 @@ pub extern "C" fn wren_ubo_new(dat: *const u8, dat_len: usize, resources_json: *
         Ok(r) => r,
         Err(_) => return ptr::null_mut(),
     };
+    let resources = Rc::new(InMemoryResourceStorage::from_resources(resources));
     let bytes = unsafe { std::slice::from_raw_parts(dat, dat_len) };
     match load_engine(bytes, &resources) {
         Some(core) => Box::into_raw(Box::new(WrenUbo { resources, engines: vec![("core".into(), core)] })),
@@ -147,7 +159,7 @@ pub extern "C" fn wren_ubo_add_text(ubo: *mut WrenUbo, name: *const c_char, text
     let count = rules.len() as i32;
     set.add_filter_list(rules.join("\n"), opts);
     let mut engine = Engine::new_with_filter_set(set);
-    engine.use_resources(ubo.resources.iter().cloned());
+    engine.use_resource_storage(SharedResources(Rc::clone(&ubo.resources)));
     ubo.engines.push((name.to_owned(), engine));
     count
 }
