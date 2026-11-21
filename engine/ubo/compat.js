@@ -276,13 +276,26 @@
     // that is, or contains, a video on the hardware plane; everything else (and software videos) keeps WebKit's own fullscreen.
     {
         const emu = { el: null, scroll: null, href: '' };
+        // The videos of an element, through shadow roots too (a player built as a custom element keeps its <video> in its own shadow tree).
+        const videosIn = el => {
+            if (el instanceof HTMLVideoElement) return [el];
+            const out = [];
+            const walk = root => {
+                if (!root || !root.querySelectorAll) return;
+                out.push(...root.querySelectorAll('video'));
+                for (const e of root.querySelectorAll('*')) if (e.shadowRoot) walk(e.shadowRoot);
+            };
+            walk(el);
+            if (el.shadowRoot) walk(el.shadowRoot);
+            return out;
+        };
         const hardwareVideoIn = el => {
             if (!policy.on || !el) return false;
-            const vs = el instanceof HTMLVideoElement ? [el] : (el.querySelectorAll ? [...el.querySelectorAll('video')] : []);
+            const vs = videosIn(el);
             return vs.some(v => v.isConnected && !v.hasAttribute('wren-software') && v.getAttribute('wren-policy') !== null && v.__wrenPolicy === 'hw');
         };
         const userGesture = () => !navigator.userActivation || navigator.userActivation.isActive;
-        const movesToHardware = el => policy.on && !!el.querySelectorAll && (el instanceof HTMLVideoElement ? [el] : [...el.querySelectorAll('video')]).some(v =>
+        const movesToHardware = el => policy.on && !!el.querySelectorAll && videosIn(el).some(v =>
             v.isConnected && v.getAttribute('wren-policy') !== 'page' && !String(v.currentSrc || v.src || '').startsWith('blob:'));
         // Tell the browser UI (engine: wpebFullscreen), which hides its toolbar while a page is fullscreen: WebKit's own
         // fullscreen reports itself, this emulated one has to.
@@ -356,7 +369,7 @@
             // A container: the page's own CSS (:fullscreen video { ... }) cannot match an emulated fullscreen, so its video is made to fill
             // the screen here too, and freed from its own trapping ancestors.
             if (!(el instanceof HTMLVideoElement) && !isFrame(el))
-                for (const v of el.querySelectorAll('video')) if (v.isConnected && v.__wrenPolicy === 'hw') { strip(v); put(v, FILL); }
+                for (const v of videosIn(el)) if (v.isConnected && v.__wrenPolicy === 'hw') { strip(v); put(v, FILL); }
             put(el, FILL.concat([['background-color', '#000']]));
             for (const node of [document.documentElement, document.body]) if (node) put(node, [['overflow', 'hidden']]);
             document.documentElement.setAttribute('wren-emulated-fullscreen', '');
