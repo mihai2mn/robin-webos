@@ -477,8 +477,8 @@ void MediaServer::serve(int fd, uint64_t id) {
             if (full && generation == g) {
                 ++full_waits;
                 blocked_until[pick] = Clock::now() + std::chrono::milliseconds(10);
-                if (replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
-                if (use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
+                if (owner_.load() == id && replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
+                if (owner_.load() == id && use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
                 continue;
             }
             if (!queues[pick].empty() && queues[pick].front().generation == g) {
@@ -496,8 +496,8 @@ void MediaServer::serve(int fd, uint64_t id) {
                 queues[pick].pop_front();
             }
             if (pick == 0) ++units;
-            if (replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
-            if (use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
+            if (owner_.load() == id && replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
+            if (owner_.load() == id && use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
         }
     });
     const auto drop_queued = [&] {
@@ -627,7 +627,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     // what it was fed, up to twice; the last attempt uses the other decoder (the Starfish backend). Generic: any early pipeline error.
     const auto do_retry = [&] {
         if (!retry_wanted.exchange(false)) return;
-        if (!pending_valid) return;
+        if (!pending_valid || owner_.load() != id) return;  // a stream the newest Load took the decoder from must not take it back
         const int code = lg_.error();
         ++retries;
         std::deque<Unit> again;
@@ -663,7 +663,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     std::deque<Clock::time_point> recoveries;
     const auto do_recover = [&] {
         if (!recover_wanted.exchange(false)) return;
-        if (!pending_valid || !use_lg_) return;
+        if (!pending_valid || !use_lg_ || owner_.load() != id) return;  // as do_retry: only the stream that owns the pipeline reloads it
         const auto now = Clock::now();
         while (!recoveries.empty() && now - recoveries.front() > std::chrono::seconds(60)) recoveries.pop_front();
         const int code = lg_.error();
@@ -708,7 +708,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         pollfd pfd{fd, POLLIN, 0};
         // While a stream plays through the LG pipeline the wait is bounded: the feeder thread sets retry_wanted/recover_wanted while this
         // thread may already be blocked here, and nothing may arrive on the socket to wake it.
-        const int pr = ::poll(&pfd, 1, load_pending || retry_wanted.load() || recover_wanted.load() || use_lg_ ? 100 : -1);
+        const int pr = ::poll(&pfd, 1, load_pending || retry_wanted.load() || recover_wanted.load() || (use_lg_ && owner_.load() == id) ? 100 : -1);
         if (pr < 0 && errno == EINTR) continue;
         if (pr < 0) break;
         if (pr == 0) {

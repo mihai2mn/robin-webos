@@ -85,7 +85,7 @@ private:
     std::unique_ptr<wnk::media::MediaBackend> backend_;
     wnk::media::StarfishBackend *starfish_ = nullptr;  // backend_ when it is the Starfish one
     LgMediaPlayer lg_;
-    bool use_lg_ = false;  // the owner's stream is on lg_ (else on NDL)
+    std::atomic<bool> use_lg_{false};  // the owner's stream is on lg_ (else on NDL); read by every stream's threads
     bool ndl_loaded_ = false;
     // Page -> screen transform for WPEB_MEDIA_AREA (guarded by mutex_).
     // Read by the media thread from the WPEB_MEDIA_AREA handler, written by the render thread each
