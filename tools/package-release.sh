@@ -87,13 +87,18 @@ do_engine32() {
     if [ ! -d "$inc/wpe-webkit-2.0" ]; then
         mkdir -p "$inc"; cp -a "$BR/br-out-aarch64/target/usr/include/wpe-webkit-2.0" "$inc/"
     fi
-    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/build -v "$src:/src" -v "$BR:/build" -w /build webos-browser-build:1 sh -c '
+    # Giving -DCMAKE_C(XX)_FLAGS REPLACES Buildroot's toolchain default ("-O2 -g0 -D_FORTIFY_SOURCE=1 ..."), and the Release
+    # type adds only -DNDEBUG: without these the wrapper and the video sink were built at -O0. ENGINE_OPT is that default.
+    local opt=${ENGINE_OPT:--O2 -g0 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=1 -ffunction-sections -fdata-sections}
+    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/build -e ENGINE_OPT="$opt" -v "$src:/src" -v "$BR:/build" -w /build webos-browser-build:1 sh -c '
         set -e
         cmake -S /src/engine -B /build/'"${WORK#$BR/}"'/engine-build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=/build/br-out/host/share/buildroot/toolchainfile.cmake -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-I/build/inc254/wpe-webkit-2.0 -I/build/inc254/wpe-webkit-2.0/wpe-platform" \
-            -DCMAKE_C_FLAGS="-I/build/inc254/wpe-webkit-2.0 -I/build/inc254/wpe-webkit-2.0/wpe-platform" > /build/'"${WORK#$BR/}"'/engine-cfg.log 2>&1
-        cmake --build /build/'"${WORK#$BR/}"'/engine-build 2>&1 | tail -3' | sed 's/^/   /'
+            -DCMAKE_CXX_FLAGS="$ENGINE_OPT -I/build/inc254/wpe-webkit-2.0 -I/build/inc254/wpe-webkit-2.0/wpe-platform" \
+            -DCMAKE_C_FLAGS="$ENGINE_OPT -I/build/inc254/wpe-webkit-2.0 -I/build/inc254/wpe-webkit-2.0/wpe-platform" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--gc-sections" -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--gc-sections" > /build/'"${WORK#$BR/}"'/engine-cfg.log 2>&1
+        cmake --build /build/'"${WORK#$BR/}"'/engine-build -v > /build/'"${WORK#$BR/}"'/engine-build.log 2>&1; tail -3 /build/'"${WORK#$BR/}"'/engine-build.log
+        grep -m1 -o " -O[0-3s]\b.*-c " /build/'"${WORK#$BR/}"'/engine-build.log | cut -c1-200 | sed "s/^/compile flags: /"' | sed 's/^/   /'
     ls -l "$WORK/engine-build/wpe-engine" "$WORK/engine-build/libgstwpebmedia.so" | sed 's/^/   /'
     # GStreamer's deinterleave element (WebKit's decodeAudioData needs it; the Buildroot tree does not build it)
     bash "$src/tools/build-gst-interleave.sh" "$BR" "$WORK/engine-build" | sed 's/^/   /'
