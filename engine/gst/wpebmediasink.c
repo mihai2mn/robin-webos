@@ -24,6 +24,8 @@
 #include <gst/pbutils/codec-utils.h>
 #include <gst/video/video.h>
 #include <gst/base/gstbasesink.h>
+#include <gst/base/gstpushsrc.h>
+#include <gio/gio.h>
 #include <gst/gst.h>
 
 #include <dlfcn.h>
@@ -1610,7 +1612,140 @@ static void wpeb_webaudio_sink_class_init(WpebWebAudioSinkClass *klass)
         "Web Audio played by PulseAudio", "wpebrowser");
 }
 
+/* ---- giostreamsrc ----------------------------------------------------------------------------------------- */
+
+/* WebKit's decodeAudioData (AudioFileReader) builds "giostreamsrc ! decodebin" over a GMemoryInputStream. GStreamer's
+ * gio plugin is not part of this build, and WebKit then went on with a null element: a page that decoded audio
+ * (a shop's home page, 20 s after load) crashed the web process in g_mutex_lock (2026-11-21). This is the part of
+ * that element WebKit uses: a source that reads the "stream" property (a GInputStream) until its end. */
+typedef struct {
+    GstPushSrc parent;
+    GInputStream *stream;
+} WpebGioStreamSrc;
+typedef struct {
+    GstPushSrcClass parent_class;
+} WpebGioStreamSrcClass;
+
+enum { GIOSRC_PROP_STREAM = 1 };
+
+G_DEFINE_TYPE(WpebGioStreamSrc, wpeb_giostreamsrc, GST_TYPE_PUSH_SRC)
+
+static GstStaticPadTemplate giosrc_template = GST_STATIC_PAD_TEMPLATE("src", GST_PAD_SRC, GST_PAD_ALWAYS, GST_STATIC_CAPS_ANY);
+
+static void giosrc_set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
+{
+    WpebGioStreamSrc *self = (WpebGioStreamSrc *)object;
+    if (id != GIOSRC_PROP_STREAM) {
+        G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
+        return;
+    }
+    GST_OBJECT_LOCK(self);
+    g_clear_object(&self->stream);
+    self->stream = g_value_dup_object(value);
+    GST_OBJECT_UNLOCK(self);
+}
+
+static void giosrc_get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
+{
+    WpebGioStreamSrc *self = (WpebGioStreamSrc *)object;
+    if (id != GIOSRC_PROP_STREAM) {
+        G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
+        return;
+    }
+    GST_OBJECT_LOCK(self);
+    g_value_set_object(value, self->stream);
+    GST_OBJECT_UNLOCK(self);
+}
+
+static void giosrc_finalize(GObject *object)
+{
+    g_clear_object(&((WpebGioStreamSrc *)object)->stream);
+    G_OBJECT_CLASS(wpeb_giostreamsrc_parent_class)->finalize(object);
+}
+
+static gboolean giosrc_start(GstBaseSrc *base)
+{
+    WpebGioStreamSrc *self = (WpebGioStreamSrc *)base;
+    if (!self->stream) {
+        GST_ELEMENT_ERROR(self, RESOURCE, NOT_FOUND, ("No stream set"), (NULL));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static gboolean giosrc_is_seekable(GstBaseSrc *base)
+{
+    return FALSE;
+}
+
+static GstFlowReturn giosrc_create(GstPushSrc *push, GstBuffer **out)
+{
+    WpebGioStreamSrc *self = (WpebGioStreamSrc *)push;
+    const gsize chunk = 32768;
+    GstBuffer *buffer = gst_buffer_new_allocate(NULL, chunk, NULL);
+    GstMapInfo map;
+    if (!buffer || !gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
+        if (buffer)
+            gst_buffer_unref(buffer);
+        return GST_FLOW_ERROR;
+    }
+    GError *error = NULL;
+    gssize got = g_input_stream_read(self->stream, map.data, chunk, NULL, &error);
+    gst_buffer_unmap(buffer, &map);
+    if (got < 0) {
+        GST_ELEMENT_ERROR(self, RESOURCE, READ, ("Reading the stream failed"), ("%s", error ? error->message : "?"));
+        g_clear_error(&error);
+        gst_buffer_unref(buffer);
+        return GST_FLOW_ERROR;
+    }
+    if (!got) {
+        gst_buffer_unref(buffer);
+        return GST_FLOW_EOS;
+    }
+    gst_buffer_set_size(buffer, got);
+    *out = buffer;
+    return GST_FLOW_OK;
+}
+
+static void wpeb_giostreamsrc_init(WpebGioStreamSrc *self)
+{
+    gst_base_src_set_format(GST_BASE_SRC(self), GST_FORMAT_BYTES);
+}
+
+static void wpeb_giostreamsrc_class_init(WpebGioStreamSrcClass *klass)
+{
+    GObjectClass *object_class = G_OBJECT_CLASS(klass);
+    GstElementClass *element_class = GST_ELEMENT_CLASS(klass);
+    object_class->set_property = giosrc_set_property;
+    object_class->get_property = giosrc_get_property;
+    object_class->finalize = giosrc_finalize;
+    g_object_class_install_property(object_class, GIOSRC_PROP_STREAM,
+        g_param_spec_object("stream", "Stream", "The GInputStream to read from", G_TYPE_INPUT_STREAM,
+            (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+    gst_element_class_add_static_pad_template(element_class, &giosrc_template);
+    gst_element_class_set_static_metadata(element_class, "GIO stream source", "Source/File",
+        "Reads from a GInputStream (WebKit's audio decoding)", "wpebrowser");
+    GST_BASE_SRC_CLASS(klass)->start = giosrc_start;
+    GST_BASE_SRC_CLASS(klass)->is_seekable = giosrc_is_seekable;
+    GST_PUSH_SRC_CLASS(klass)->create = giosrc_create;
+}
+
 /* ---- plugin ----------------------------------------------------------------------------------------------- */
+
+/* Only when the gio plugin is not there (its own element has this name). A registry read from the cache already lists
+ * this plugin's own giostreamsrc, so a factory of our own plugin does not count as "there". */
+static gboolean register_giostreamsrc(GstPlugin *plugin)
+{
+    GstElementFactory *existing = gst_element_factory_find("giostreamsrc");
+    if (existing) {
+        const gchar *owner = gst_plugin_feature_get_plugin_name(GST_PLUGIN_FEATURE(existing));
+        gboolean other = owner && strcmp(owner, "wpebmedia") != 0;
+        gst_object_unref(existing);
+        if (other)
+            return TRUE;
+    }
+    return gst_element_register(plugin, "giostreamsrc", GST_RANK_NONE, wpeb_giostreamsrc_get_type());
+}
 
 static gboolean plugin_init(GstPlugin *plugin)
 {
@@ -1619,7 +1754,8 @@ static gboolean plugin_init(GstPlugin *plugin)
      * is made by name only (rank none), so no autoaudiosink picks it. */
     return gst_element_register(plugin, "rialtomsevideosink", GST_RANK_SECONDARY, WPEB_TYPE_VIDEO_SINK)
         && gst_element_register(plugin, "rialtomseaudiosink", GST_RANK_SECONDARY, WPEB_TYPE_AUDIO_SINK)
-        && gst_element_register(plugin, "rialtowebaudiosink", GST_RANK_NONE, wpeb_webaudio_sink_get_type());
+        && gst_element_register(plugin, "rialtowebaudiosink", GST_RANK_NONE, wpeb_webaudio_sink_get_type())
+        && register_giostreamsrc(plugin);
 }
 
 #define PACKAGE "wpebrowser"

@@ -95,6 +95,8 @@ do_engine32() {
             -DCMAKE_C_FLAGS="-I/build/inc254/wpe-webkit-2.0 -I/build/inc254/wpe-webkit-2.0/wpe-platform" > /build/'"${WORK#$BR/}"'/engine-cfg.log 2>&1
         cmake --build /build/'"${WORK#$BR/}"'/engine-build 2>&1 | tail -3' | sed 's/^/   /'
     ls -l "$WORK/engine-build/wpe-engine" "$WORK/engine-build/libgstwpebmedia.so" | sed 's/^/   /'
+    # GStreamer's deinterleave element (WebKit's decodeAudioData needs it; the Buildroot tree does not build it)
+    bash "$src/tools/build-gst-interleave.sh" "$BR" "$WORK/engine-build" | sed 's/^/   /'
 }
 
 # ---- backend: direct GPU presentation libraries (NDK), built from the clone --------------------------------------
@@ -204,11 +206,12 @@ do_stage() {
         for h in WPEWebProcess WPENetworkProcess WPEGPUProcess; do install -m755 "$WK254/bin/$h" "$s/libexec/$h"; done
         install -m755 "$WK254/lib/libWPEInjectedBundle.so" "$s/lib/injected-bundle/libWPEInjectedBundle.so"
         install -m755 "$WORK/engine-build/libgstwpebmedia.so" "$s/lib/gstreamer-1.0/libgstwpebmedia.so"
+        install -m755 "$WORK/engine-build/libgstinterleave.so" "$s/lib/gstreamer-1.0/libgstinterleave.so"
         install -m755 "$src/build/webos-backend/libWPEBackend-webos.so" "$src/build/webos-backend/libwpeb-owner.so" "$s/lib/"
         install -m755 "$WORK/engine-build/wpe-engine" "$s/wpe-engine32"
         install -m755 "$WORK/launcher-$id/wpe-engine" "$s/wpe-engine"
         for f in "$s/lib/libWPEWebKit-2.0.so.1" "$s"/libexec/WPE*Process "$s/lib/injected-bundle/libWPEInjectedBundle.so" \
-                 "$s/lib/gstreamer-1.0/libgstwpebmedia.so" "$s/wpe-engine32" "$s/lib/libWPEBackend-webos.so" "$s/lib/libwpeb-owner.so"; do "$STRIP32" "$f"; done
+                 "$s/lib/gstreamer-1.0/libgstwpebmedia.so" "$s/lib/gstreamer-1.0/libgstinterleave.so" "$s/wpe-engine32" "$s/lib/libWPEBackend-webos.so" "$s/lib/libwpeb-owner.so"; do "$STRIP32" "$f"; done
         # PT_INTERP of everything that is exec'd: the app's own loader link
         for f in "$s/wpe-engine32" "$s"/libexec/*; do
             "$PATCHELF" --print-interpreter "$f" >/dev/null 2>&1 && "$PATCHELF" --set-interpreter "/tmp/$app/ld-linux.so.3" "$f"
