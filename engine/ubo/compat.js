@@ -268,6 +268,8 @@
         report(v, why ? 'hardware:' + why : 'software');
     };
     window.__wrenVideoPolicy.decide = decide;
+    // Every <video> of the document, through shadow roots (the fullscreen emulation below widens it).
+    let allVideos = () => [...document.querySelectorAll('video')];
     // Fullscreen for a video on the hardware plane. WebKit's real fullscreen leaves the page black and the plane where it was: once an
     // element is fullscreen, the video layer is no longer painted as a hole at all (no rectangle reaches the sink again), so the plane
     // stays at its old place under a black page (TV, 2026-11-20, a plain MP4 page and a player page alike). The same effect without the
@@ -276,6 +278,15 @@
     // that is, or contains, a video on the hardware plane; everything else (and software videos) keeps WebKit's own fullscreen.
     {
         const emu = { el: null, scroll: null, href: '' };
+        // Closed shadow roots hide themselves from el.shadowRoot: remember them when they are made (this file runs before the page's scripts).
+        const closedRoots = new WeakMap();
+        const attachShadow = Element.prototype.attachShadow;
+        if (attachShadow) Element.prototype.attachShadow = function (init) {
+            const root = attachShadow.apply(this, arguments);
+            if (init && init.mode === 'closed') closedRoots.set(this, root);
+            return root;
+        };
+        const shadowOf = e => e.shadowRoot || closedRoots.get(e) || null;
         // The videos of an element, through shadow roots too (a player built as a custom element keeps its <video> in its own shadow tree).
         const videosIn = el => {
             if (el instanceof HTMLVideoElement) return [el];
@@ -283,12 +294,15 @@
             const walk = root => {
                 if (!root || !root.querySelectorAll) return;
                 out.push(...root.querySelectorAll('video'));
-                for (const e of root.querySelectorAll('*')) if (e.shadowRoot) walk(e.shadowRoot);
+                for (const e of root.querySelectorAll('*')) { const s = shadowOf(e); if (s) walk(s); }
             };
             walk(el);
-            if (el.shadowRoot) walk(el.shadowRoot);
+            if (shadowOf(el)) walk(shadowOf(el));
             return out;
         };
+        allVideos = () => videosIn(document.documentElement);
+        // document.fullscreenElement is retargeted against the document, as WebKit's own: an element inside a shadow tree is answered as its host.
+        const retarget = n => { for (let r = n.getRootNode(); r instanceof ShadowRoot; r = n.getRootNode()) n = r.host; return n; };
         const hardwareVideoIn = el => {
             if (!policy.on || !el) return false;
             const vs = videosIn(el);
@@ -359,6 +373,13 @@
                       ['border', '0'], ['box-sizing', 'border-box'], ['transform', 'none'], ['translate', 'none'], ['z-index', '2147483647'],
                       ['visibility', 'visible'], ['opacity', '1'], ['object-fit', 'contain']];
         const isFrame = n => n.tagName === 'IFRAME' || n.tagName === 'FRAME';
+        // While a container is fullscreen: a video the page puts into it (a player re-mounting its element, a new source element) is made
+        // to fill the screen like the ones that were there at enter().
+        let watch = null;
+        const fillNew = el => {
+            if (el instanceof HTMLVideoElement || isFrame(el)) return;
+            for (const v of videosIn(el)) if (v.isConnected && !saved.has(v)) { strip(v); put(v, FILL); }
+        };
         const enter = el => {
             const swap = !!emu.el;               // another element asks while one is fullscreen: switch, one change event, no exit
             if (swap) { restoreStyles(); emu.el = null; }
@@ -366,11 +387,15 @@
             if (!swap) emu.scroll = [scrollX, scrollY];
             emu.href = location.href;
             strip(el);
+            emu.parent = el.parentNode;
             // A container: the page's own CSS (:fullscreen video { ... }) cannot match an emulated fullscreen, so its video is made to fill
             // the screen here too, and freed from its own trapping ancestors.
             if (!(el instanceof HTMLVideoElement) && !isFrame(el))
                 for (const v of videosIn(el)) if (v.isConnected && v.__wrenPolicy === 'hw') { strip(v); put(v, FILL); }
             put(el, FILL.concat([['background-color', '#000']]));
+            if (watch) watch.disconnect();
+            watch = new MutationObserver(() => { if (emu.el === el) fillNew(el); });
+            watch.observe(el, { childList: true, subtree: true });
             for (const node of [document.documentElement, document.body]) if (node) put(node, [['overflow', 'hidden']]);
             document.documentElement.setAttribute('wren-emulated-fullscreen', '');
             log({ fullscreen: 'emulated enter', tag: el.tagName, swap });
@@ -383,6 +408,7 @@
             const el = emu.el;
             if (!el) return;
             emu.el = null;
+            if (watch) { watch.disconnect(); watch = null; }
             restoreStyles();
             document.documentElement.removeAttribute('wren-emulated-fullscreen');
             // Back to where the page was, unless the page went somewhere else meanwhile (single-page navigation), and without animating.
@@ -394,7 +420,12 @@
             if (window !== top) try { parent.postMessage({ wrenFullscreen: 'leave' }, '*'); } catch (e) {}
         }
         // The emulated fullscreen ends when its element is no longer in the document (the real one does too), or the page moves on.
-        setInterval(() => { if (emu.el && !emu.el.isConnected) leave(); }, 500);
+        // An element the page moved to another parent while fullscreen: the new ancestors can trap it (transform, filter, contain...) like the old ones.
+        setInterval(() => {
+            if (!emu.el) return;
+            if (!emu.el.isConnected) leave();
+            else if (emu.el.parentNode !== emu.parent) { emu.parent = emu.el.parentNode; strip(emu.el); }
+        }, 500);
         for (const name of ['pagehide', 'popstate', 'hashchange']) addEventListener(name, () => { if (emu.el) leave(); });
         addEventListener('message', e => {
             const d = e.data;
@@ -407,8 +438,8 @@
             const allowed = frame.allowFullscreen || /\bfullscreen\b/.test(frame.getAttribute('allow') || '') || (() => { try { return !!frame.contentDocument; } catch (x) { return false; } })();
             if (allowed && (!navigator.userActivation || navigator.userActivation.isActive)) enter(frame);
         }, true);
-        for (const [name, value] of [['fullscreenElement', () => emu.el || null], ['webkitFullscreenElement', () => emu.el || null],
-                                     ['webkitCurrentFullScreenElement', () => emu.el || null], ['fullscreen', () => !!emu.el], ['webkitIsFullScreen', () => !!emu.el]]) {
+        for (const [name, value] of [['fullscreenElement', () => retarget(emu.el)], ['webkitFullscreenElement', () => retarget(emu.el)],
+                                     ['webkitCurrentFullScreenElement', () => retarget(emu.el)], ['fullscreen', () => !!emu.el], ['webkitIsFullScreen', () => !!emu.el]]) {
             try {
                 const original = Object.getOwnPropertyDescriptor(Document.prototype, name);
                 Object.defineProperty(document, name, { configurable: true, get() { return emu.el ? value() : (original && original.get ? original.get.call(document) : null); } });
@@ -421,7 +452,9 @@
                 // Like the real one, only inside a user gesture (an ad script must not take the screen). A software video that the
                 // fullscreen rule moves to the hardware plane (every one but an MSE stream, which cannot be reloaded) is emulated too:
                 // WebKit's real fullscreen would leave the plane behind once the reload puts it there.
-                if (userGesture() && (hardwareVideoIn(this) || movesToHardware(this))) { enter(this); return Promise.resolve(); }
+                // A frame the page itself asks for (iframe.requestFullscreen()) is emulated too: its player is not reachable from here, and WebKit's own
+                // fullscreen would leave the plane behind.
+                if (userGesture() && (hardwareVideoIn(this) || movesToHardware(this) || (policy.on && isFrame(this)))) { enter(this); return Promise.resolve(); }
                 return original.apply(this, arguments);
             };
         }
@@ -485,7 +518,7 @@
         // only because they were fullscreen). Each is decided afresh, then compared with what its player has, and the
         // player that no longer matches is reloaded once, at its media time.
         const work = [];
-        for (const v of document.querySelectorAll('video')) {
+        for (const v of allVideos()) {
             if (!v.isConnected || v.getAttribute('wren-policy') === 'page' || !policy.on) continue;
             // An MSE stream (blob: source) cannot be reloaded: load() detaches its MediaSource and the site's player breaks.
             // It keeps the player it started with; the new decision applies on its next natural load.

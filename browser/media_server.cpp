@@ -401,6 +401,8 @@ void MediaServer::serve(int fd, uint64_t id) {
     std::atomic<bool> recover_wanted{false};  // the LG pipeline failed after showing pictures: the reader thread loads it again at the current position
     std::atomic<uint32_t> key_codec{0};       // the stream's codec (for finding keyframes)
     std::atomic<bool> need_key{false};        // after such a reload the decoder is fed from the next keyframe on (a start in the middle of a GOP smears)
+    std::atomic<int64_t> need_key_at{0};      // when need_key was set (steady clock, ns): a stream with no keyframe in kKeyWait is fed as it comes
+    constexpr auto kKeyWait = std::chrono::seconds(15);
     std::atomic<bool> retry_wanted{false};  // the pipeline failed before its first picture: the reader thread loads it again
     std::atomic<bool> eos_pushed{false};  // the decoder was told the stream ended (cleared by a flush or load)
     constexpr uint64_t kReplayMax = 48u << 20;  // 4K at 40 Mbit/s: about 9 s
@@ -427,12 +429,20 @@ void MediaServer::serve(int fd, uint64_t id) {
             Unit &u = queues[pick].front();
             const uint64_t g = u.generation;
             if (need_key.load() && !u.eos) {
-                // Only video can say where a keyframe is; the audio before it goes too (it would play ahead of a picture that is not there).
-                if (pick == 1 || !is_keyframe(key_codec.load(), u.packet.data)) {
-                    queues[pick].pop_front();
-                    continue;
+                // A stream whose keyframes are not IDR/IRAP (gradual refresh) would be dropped for ever, picture and sound: after kKeyWait
+                // it is fed as it comes (a smeared start is better than a dead stream).
+                if (now - Clock::time_point(std::chrono::nanoseconds(need_key_at.load())) > kKeyWait) {
+                    WNK_LOGW(kCat, "stream %llu: no keyframe within %d s after the reload: feeding from here", static_cast<unsigned long long>(id),
+                             static_cast<int>(kKeyWait.count()));
+                    need_key = false;
+                } else {
+                    // Only video can say where a keyframe is; the audio before it goes too (it would play ahead of a picture that is not there).
+                    if (pick == 1 || !is_keyframe(key_codec.load(), u.packet.data)) {
+                        queues[pick].pop_front();
+                        continue;
+                    }
+                    need_key = false;
                 }
-                need_key = false;
             }
             if (u.eos) {
                 queues[pick].pop_front();
@@ -477,8 +487,8 @@ void MediaServer::serve(int fd, uint64_t id) {
             if (full && generation == g) {
                 ++full_waits;
                 blocked_until[pick] = Clock::now() + std::chrono::milliseconds(10);
-                if (replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
-                if (use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
+                if (owner_.load() == id && replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
+                if (owner_.load() == id && use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
                 continue;
             }
             if (!queues[pick].empty() && queues[pick].front().generation == g) {
@@ -496,8 +506,8 @@ void MediaServer::serve(int fd, uint64_t id) {
                 queues[pick].pop_front();
             }
             if (pick == 0) ++units;
-            if (replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
-            if (use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
+            if (owner_.load() == id && replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
+            if (owner_.load() == id && use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
         }
     });
     const auto drop_queued = [&] {
@@ -627,7 +637,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     // what it was fed, up to twice; the last attempt uses the other decoder (the Starfish backend). Generic: any early pipeline error.
     const auto do_retry = [&] {
         if (!retry_wanted.exchange(false)) return;
-        if (!pending_valid) return;
+        if (!pending_valid || owner_.load() != id) return;  // a stream the newest Load took the decoder from must not take it back
         const int code = lg_.error();
         ++retries;
         std::deque<Unit> again;
@@ -661,9 +671,10 @@ void MediaServer::serve(int fd, uint64_t id) {
     // frames presented stop while units are still fed, and the decoder stayed held): unload it, load it again at the current position
     // and feed it from the next keyframe. Not more than three times in a minute, then it is left to the page (its own recovery).
     std::deque<Clock::time_point> recoveries;
+    bool close_stream = false;  // reader thread: the reload failed; the connection is closed (below) so the page gets a media error
     const auto do_recover = [&] {
         if (!recover_wanted.exchange(false)) return;
-        if (!pending_valid || !use_lg_) return;
+        if (!pending_valid || !use_lg_ || owner_.load() != id) return;  // as do_retry: only the stream that owns the pipeline reloads it
         const auto now = Clock::now();
         while (!recoveries.empty() && now - recoveries.front() > std::chrono::seconds(60)) recoveries.pop_front();
         const int code = lg_.error();
@@ -683,6 +694,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             use_lg_ = false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        need_key_at = Clock::now().time_since_epoch().count();
         need_key = true;
         do_load(pending);
         {
@@ -690,6 +702,15 @@ void MediaServer::serve(int fd, uint64_t id) {
             replay_ok = false;  // no replay for a stream that has shown pictures
             replay.clear();
             ready = use_lg_ || ndl_loaded_;
+            if (!ready) {
+                // No decoder any more: nothing will consume the queues, which are not capped. Closing the connection makes the web process's
+                // sink fail its next write ("Hardware video service lost"): the page gets a media error instead of a stall.
+                queues[0].clear();
+                queues[1].clear();
+                ++generation;
+                close_stream = true;
+                WNK_LOGW(kCat, "stream %llu: the reload failed: closing the stream", static_cast<unsigned long long>(id));
+            }
             qcv.notify_all();
         }
     };
@@ -705,10 +726,11 @@ void MediaServer::serve(int fd, uint64_t id) {
     };
 
     for (;;) {
+        if (close_stream) break;
         pollfd pfd{fd, POLLIN, 0};
         // While a stream plays through the LG pipeline the wait is bounded: the feeder thread sets retry_wanted/recover_wanted while this
         // thread may already be blocked here, and nothing may arrive on the socket to wake it.
-        const int pr = ::poll(&pfd, 1, load_pending || retry_wanted.load() || recover_wanted.load() || use_lg_ ? 100 : -1);
+        const int pr = ::poll(&pfd, 1, load_pending || retry_wanted.load() || recover_wanted.load() || (use_lg_ && owner_.load() == id) ? 100 : -1);
         if (pr < 0 && errno == EINTR) continue;
         if (pr < 0) break;
         if (pr == 0) {
