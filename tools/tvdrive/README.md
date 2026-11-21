@@ -48,3 +48,11 @@ label on the timeline. `node motion.js engine.log [--svg out.svg] [--from ms] [-
 per element and property the holds, moves (duration, easing, speed) and one-frame jumps, direction reversals
 (three within a second is reported as FLICKER), and frame gaps with the long frames. It sees layout motion only:
 a picture that flickers without any element moving (a compositing fault) is not in it.
+
+## Screen traces (`tvdrive frames`)
+`tvdrive frames [seconds] [--fps N]` captures the real screen in a short burst (default 4 s at 10 per second, at most
+25; video plane and toolbar included) and prints what it did: static stretches, changing stretches (with how many
+different pictures), and FLICKER (the screen alternating among a few pictures), each with the screen region. It
+complements the motion trace: that one knows which element moved and how, this one sees faults no element explains.
+Cost on the TV while it runs (measured with the motion recorder on a 60 fps page): median and p95 frame gap unchanged
+(17 / 18 ms), worst gap 31-35 ms instead of 24 ms. A busy TV gives fewer captures than asked for.
