@@ -268,6 +268,8 @@
         report(v, why ? 'hardware:' + why : 'software');
     };
     window.__wrenVideoPolicy.decide = decide;
+    // Every <video> of the document, through shadow roots (the fullscreen emulation below widens it).
+    let allVideos = () => [...document.querySelectorAll('video')];
     // Fullscreen for a video on the hardware plane. WebKit's real fullscreen leaves the page black and the plane where it was: once an
     // element is fullscreen, the video layer is no longer painted as a hole at all (no rectangle reaches the sink again), so the plane
     // stays at its old place under a black page (TV, 2026-11-20, a plain MP4 page and a player page alike). The same effect without the
@@ -276,6 +278,15 @@
     // that is, or contains, a video on the hardware plane; everything else (and software videos) keeps WebKit's own fullscreen.
     {
         const emu = { el: null, scroll: null, href: '' };
+        // Closed shadow roots hide themselves from el.shadowRoot: remember them when they are made (this file runs before the page's scripts).
+        const closedRoots = new WeakMap();
+        const attachShadow = Element.prototype.attachShadow;
+        if (attachShadow) Element.prototype.attachShadow = function (init) {
+            const root = attachShadow.apply(this, arguments);
+            if (init && init.mode === 'closed') closedRoots.set(this, root);
+            return root;
+        };
+        const shadowOf = e => e.shadowRoot || closedRoots.get(e) || null;
         // The videos of an element, through shadow roots too (a player built as a custom element keeps its <video> in its own shadow tree).
         const videosIn = el => {
             if (el instanceof HTMLVideoElement) return [el];
@@ -283,12 +294,15 @@
             const walk = root => {
                 if (!root || !root.querySelectorAll) return;
                 out.push(...root.querySelectorAll('video'));
-                for (const e of root.querySelectorAll('*')) if (e.shadowRoot) walk(e.shadowRoot);
+                for (const e of root.querySelectorAll('*')) { const s = shadowOf(e); if (s) walk(s); }
             };
             walk(el);
-            if (el.shadowRoot) walk(el.shadowRoot);
+            if (shadowOf(el)) walk(shadowOf(el));
             return out;
         };
+        allVideos = () => videosIn(document.documentElement);
+        // document.fullscreenElement is retargeted against the document, as WebKit's own: an element inside a shadow tree is answered as its host.
+        const retarget = n => { for (let r = n.getRootNode(); r instanceof ShadowRoot; r = n.getRootNode()) n = r.host; return n; };
         const hardwareVideoIn = el => {
             if (!policy.on || !el) return false;
             const vs = videosIn(el);
@@ -407,8 +421,8 @@
             const allowed = frame.allowFullscreen || /\bfullscreen\b/.test(frame.getAttribute('allow') || '') || (() => { try { return !!frame.contentDocument; } catch (x) { return false; } })();
             if (allowed && (!navigator.userActivation || navigator.userActivation.isActive)) enter(frame);
         }, true);
-        for (const [name, value] of [['fullscreenElement', () => emu.el || null], ['webkitFullscreenElement', () => emu.el || null],
-                                     ['webkitCurrentFullScreenElement', () => emu.el || null], ['fullscreen', () => !!emu.el], ['webkitIsFullScreen', () => !!emu.el]]) {
+        for (const [name, value] of [['fullscreenElement', () => retarget(emu.el)], ['webkitFullscreenElement', () => retarget(emu.el)],
+                                     ['webkitCurrentFullScreenElement', () => retarget(emu.el)], ['fullscreen', () => !!emu.el], ['webkitIsFullScreen', () => !!emu.el]]) {
             try {
                 const original = Object.getOwnPropertyDescriptor(Document.prototype, name);
                 Object.defineProperty(document, name, { configurable: true, get() { return emu.el ? value() : (original && original.get ? original.get.call(document) : null); } });
@@ -485,7 +499,7 @@
         // only because they were fullscreen). Each is decided afresh, then compared with what its player has, and the
         // player that no longer matches is reloaded once, at its media time.
         const work = [];
-        for (const v of document.querySelectorAll('video')) {
+        for (const v of allVideos()) {
             if (!v.isConnected || v.getAttribute('wren-policy') === 'page' || !policy.on) continue;
             // An MSE stream (blob: source) cannot be reloaded: load() detaches its MediaSource and the site's player breaks.
             // It keeps the player it started with; the new decision applies on its next natural load.
