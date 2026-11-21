@@ -90,6 +90,12 @@ case "$cmd" in
     scp -q -o BatchMode=yes "$HOST:/tmp/tvdrive-frames.tar" "$d/frames.tar" || die "scp failed"
     tvsh "rm -f /tmp/tvdrive-frames.tar"
     tar xf "$d/frames.tar" -C "$d" && rm -f "$d/frames.tar"
+    if ! ls "$d"/f*.jpg >/dev/null 2>&1; then
+      echo "tvdrive frames: the TV's capture service wrote no frame file." >&2
+      [ -s "$d/errors.txt" ] && { echo "its answers:" >&2; sed 's/^/  /' "$d/errors.txt" >&2; }
+      echo "(screenshots may still work: try 'tvdrive shot'; see tools/tvdrive/README.md, Screen traces)" >&2
+      exit 1
+    fi
     "$ff" -y -loglevel error -start_number 0 -i "$d/f%05d.jpg" -vf scale=32:18:flags=area,format=gray -f rawvideo "$d/frames.raw" || die "ffmpeg failed"
     node "$DIR/frames.js" "$d/frames.raw" "$d/times.txt" | tee "$d/frames.txt"
     echo "captures: $d" ;;
