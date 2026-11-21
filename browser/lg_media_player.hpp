@@ -75,6 +75,7 @@ private:
     std::atomic<int64_t> frames_{0};  // from the pipeline's thread
     std::atomic<int64_t> dropped_{0};  // frames the pipeline dropped (event 0x30), from the pipeline's thread
     int64_t stats_at_ms_ = 0;
+    int trace_units_ = 0;  // video units still to describe in the log (the first ones after a load or flush)
 };
 
 }  // namespace browser

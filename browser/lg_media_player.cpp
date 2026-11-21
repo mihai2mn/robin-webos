@@ -234,6 +234,7 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
     load_completed_ = false;
     playing_ = paused_ = false;
     seek_pending_ = true;
+    trace_units_ = 4;
     fed_ = full_ = last_pts_us_ = audio_fed_ = 0;
     dropped_ = 0;
     has_audio_ = with_audio;
@@ -276,6 +277,27 @@ LgMediaPlayer::Feed LgMediaPlayer::feed(bool audio, const uint8_t *data, size_t 
         const bool ok = api_->Play();
         WNK_LOGI(kCat, "Play -> %d", ok ? 1 : 0);
     }
+    if (!audio) {
+        // A keyframe unit arrives as "SPS PPS | AUD SPS PPS IDR": the sink prepends the stream's parameter sets in front of the access
+        // unit delimiter, which must come first (the stream's own copies follow it). Start at the delimiter.
+        size_t i = 0;
+        int lead = 0;
+        while (i + 4 < size && lead < 4) {
+            const bool sc4 = data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1;
+            if (!sc4) break;
+            const int type = data[i + 4] & 0x1f;
+            if (type == 9 && lead > 0) {
+                data += i;
+                size -= i;
+                break;
+            }
+            if (type != 7 && type != 8) break;
+            ++lead;
+            size_t j = i + 4;
+            while (j + 3 < size && !(data[j] == 0 && data[j + 1] == 0 && (data[j + 2] == 1 || (data[j + 2] == 0 && data[j + 3] == 1)))) ++j;
+            i = j;
+        }
+    }
     char json[160];
     if (audio) pts_us += audio_lead_us_;
     std::snprintf(json, sizeof json, "{\"bufferAddr\":\"%p\",\"bufferSize\":%u,\"pts\":%lld,\"esData\":%d}",
@@ -303,6 +325,22 @@ LgMediaPlayer::Feed LgMediaPlayer::feed(bool audio, const uint8_t *data, size_t 
         if (++audio_fed_ == 1) WNK_LOGI(kCat, "first audio frame fed: pts %.3f s, %zu bytes", pts_us / 1e6, size);
         return Feed::Ok;
     }
+    if (trace_units_ > 0) {
+        // What the first units after a load or flush are (H.264 NAL types: 5 = IDR, 7/8 = SPS/PPS, 1 = non-IDR slice, 9 = delimiter):
+        // a decoder that is not started with an IDR smears until the next one.
+        --trace_units_;
+        char nals[96] = "";
+        size_t at = 0;
+        int n = 0;
+        for (size_t i = 0; i + 4 < size && n < 8; ++i) {
+            if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+                at += std::snprintf(nals + at, sizeof nals - at, "%d ", data[i + 3] & 0x1f);
+                ++n;
+                i += 2;
+            }
+        }
+        WNK_LOGI(kCat, "unit after %s: pts %.3f s, %zu bytes, NAL types: %s", fed_ == 0 ? "load" : "flush", pts_us / 1e6, size, nals);
+    }
     last_pts_us_ = pts_us;
     if (++fed_ == 1) WNK_LOGI(kCat, "first access unit fed: pts %.3f s, %zu bytes", pts_us / 1e6, size);
     return Feed::Ok;
@@ -320,6 +358,7 @@ void LgMediaPlayer::flush() {
     }
 #endif
     seek_pending_ = true;
+    trace_units_ = 4;
 }
 
 void LgMediaPlayer::end_of_stream() {
