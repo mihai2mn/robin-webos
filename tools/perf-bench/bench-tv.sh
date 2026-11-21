@@ -14,6 +14,8 @@ here=$(cd "$(dirname "$0")" && pwd); root=$(cd "$here/../.." && pwd)
 OUT=${OUT:-$root/build/plan/build/bench/$LABEL}; mkdir -p "$OUT"
 APP=org.sostk.wpebrowser.dev; LOCK=/tmp/wren-devapp.lock; OWNER=${OWNER:-wren-build}; PORT=18899
 IDLE_MIN=${IDLE_MIN:-85}; PAGES=${PAGES:-"https://en.wikipedia.org/wiki/Romania https://www.bbc.com/news https://www.theguardian.com/international"}
+ONLY=${ONLY:-"jsb pages scroll video"}  # which parts to run, e.g. ONLY=pages; PAGE_ENV='"WREN_UBO":"0"' adds wpebEnv entries to the page loads
+want() { case " $ONLY " in *" $1 "*) return 0 ;; esac; return 1; }
 SUM=$OUT/summary.txt; : > "$SUM"
 tv() { timeout "${1:-45}" ssh -o BatchMode=yes -o ConnectTimeout=25 lgtv "$2"; }
 say() { echo "$*" | tee -a "$SUM"; }
@@ -54,28 +56,28 @@ savelogs() {  # savelogs TAG
 }
 webrss() { tv 15 "for x in /proc/[0-9]*; do if grep -q WPEWebProcess \$x/comm 2>/dev/null; then awk '/VmRSS/{print \$2}' \$x/status; break; fi; done"; }
 
-for r in $(seq 1 "$RUNS"); do
+want jsb && for r in $(seq 1 "$RUNS"); do
   clean_launch "{\"target\":\"http://127.0.0.1:$PORT/jsb.html?run=$r\"}"
   res=""; for i in $(seq 1 40); do sleep 1; res=$(tv 15 "grep 'run=$r' /tmp/wrenbench/results.log | tail -1"); [ -n "$res" ] && break; done
   say "jsb run=$r $(echo "$res" | sed 's/.*\t//')"
 done
-for url in $PAGES; do for r in $(seq 1 "$RUNS"); do
+want pages && for url in $PAGES; do for r in $(seq 1 "$RUNS"); do
   tag="page-${url//[^a-z0-9]/_}-$r"
-  clean_launch "{\"target\":\"$url\"}"; peak=0; fin=""
+  clean_launch "{\"target\":\"$url\"${PAGE_ENV:+,\"wpebEnv\":{$PAGE_ENV}}}"; peak=0; fin=""
   for i in $(seq 1 60); do sleep 1; rs=$(webrss); [ -n "$rs" ] && [ "$rs" -gt "$peak" ] && peak=$rs
     [ -z "$fin" ] && fin=$(tv 15 "grep -m1 'load finished after' /tmp/$APP/engine.log" 2>/dev/null | sed -n 's/.*after \([0-9]*\) ms.*/\1/p')
     [ -n "$fin" ] && [ "$i" -ge 25 ] && break; done
   savelogs "$tag"
   say "page url=$url run=$r finish_ms=${fin:-NA} web_rss_peak_mb=$((peak/1024)) commit_ms=$(grep -m1 'load committed after' "$OUT/engine-$tag.log" | sed -n 's/.*after \([0-9]*\) ms.*/\1/p')"
 done; done
-for r in $(seq 1 "$RUNS"); do
+want scroll && for r in $(seq 1 "$RUNS"); do
   clean_launch "{\"target\":\"http://127.0.0.1:$PORT/scroll.html?px=6&s=60\",\"wpebEnv\":{\"WPE_BROWSER_DEBUG_SCRIPT\":\"/tmp/wrenbench/motion-recorder.js\",\"WPE_BROWSER_DEBUG_CONSOLE\":\"1\"}}"
   for i in $(seq 1 30); do sleep 3; tv 15 "grep -q 'scroll px' /tmp/wrenbench/results.log" && break; done
   savelogs "scroll-$r"; own=$(tv 15 "grep 'scroll px' /tmp/wrenbench/results.log | tail -1")
   node "$root/tools/tvdrive/motion.js" "$OUT/engine-scroll-$r.log" > "$OUT/motion-scroll-$r.txt" 2>&1
   say "scroll run=$r $(grep -m1 '^frame gap' "$OUT/motion-scroll-$r.txt") | page: $own"
 done
-for r in $(seq 1 "$RUNS"); do
+want video && for r in $(seq 1 "$RUNS"); do
   clean_launch "{\"target\":\"http://127.0.0.1:$PORT/fstest.html?autoplay=1\",\"wpebEnv\":{\"WPE_BROWSER_DEBUG_ENGINE\":\"32\",\"WPE_BROWSER_DEBUG_CONSOLE\":\"1\",\"WPE_BROWSER_DEBUG_AUTOPLAY\":\"allow\"}}"
   sleep 28; savelogs "video-$r"
   last=$(grep 'hybrid video: {"quality"' "$OUT/engine-video-$r.log" | tail -1 | sed 's/.*hybrid video: //')
