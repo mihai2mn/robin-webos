@@ -42,6 +42,9 @@ tvdrive <command> [args]   (screen is 1920x1080; x y are screenshot pixels)
   state                  foreground app, memory, swap, web process RSS, app pids
   lock <owner> | unlock <owner>   the shared dev-app lock (/tmp/wren-devapp.lock); hold it <= 25 min
   close                  close the dev app
+  frames [seconds] [--fps N] [dir]   what the SCREEN did, as text: a burst of small screen captures (default 4 s at
+                         10 per second; includes the video plane and the toolbar) reduced by frames.js to
+                         static / changing / FLICKER stretches. Captures stay in dir ($TVDRIVE_OUT/frames-HHMMSS)
 EOF
 }
 
@@ -71,6 +74,22 @@ case "$cmd" in
     sleep "$wait" ;;
 
   close) tvsh "tv close $APP" ;;
+
+  frames)
+    secs=4; fps=10; d=""
+    while [ $# -gt 0 ]; do case "$1" in --fps) fps=$2; shift;; ''|*[!0-9]*) d=$1;; *) secs=$1;; esac; shift; done
+    num "$secs"; num "$fps"; [ "$fps" -ge 1 ] && [ "$fps" -le 25 ] || die "--fps 1..25"
+    d=${d:-$OUT/frames-$(now)}; mkdir -p "$d"
+    ff=$(ffm); [ -n "$ff" ] || die "frames needs ffmpeg"
+    # One capture takes about 40 ms on the TV; the pause between captures keeps the rate (and the load) down.
+    gap=$(( 1000000 / fps - 40000 )); [ "$gap" -lt 0 ] && gap=0
+    tvssh "sh -s $secs $gap" < "$DIR/tvframes.sh" || die "capture failed"
+    scp -q -o BatchMode=yes "$HOST:/tmp/tvdrive-frames.tar" "$d/frames.tar" || die "scp failed"
+    tvsh "rm -f /tmp/tvdrive-frames.tar"
+    tar xf "$d/frames.tar" -C "$d" && rm -f "$d/frames.tar"
+    "$ff" -y -loglevel error -start_number 0 -i "$d/f%05d.jpg" -vf scale=32:18:flags=area,format=gray -f rawvideo "$d/frames.raw" || die "ffmpeg failed"
+    node "$DIR/frames.js" "$d/frames.raw" "$d/times.txt" | tee "$d/frames.txt"
+    echo "captures: $d" ;;
 
   move)   num "${1:-}"; num "${2:-}"; ti abs "$1" "$2" ;;
   nudge)  num "${1:-}"; num "${2:-}"; ti move "$1" "$2" ;;

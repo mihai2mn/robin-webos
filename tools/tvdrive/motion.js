@@ -74,6 +74,8 @@ const describe = (key, s) => {
   for (const g of segs) if (g.kind === 'move') {
     const mid = (g.ta + g.tb) / 2; let near = null; for (const p of full) if (p[0] >= g.ta && p[0] <= g.tb && (!near || Math.abs(p[0] - mid) < Math.abs(near[0] - mid))) near = p;
     g.prog = near ? (near[1] - g.va) / (g.vb - g.va) : 0.5;
+    const q = g.ta + (g.tb - g.ta) / 4; let nq = null; for (const p of full) if (p[0] >= g.ta && p[0] <= g.tb && (!nq || Math.abs(p[0] - q) < Math.abs(nq[0] - q))) nq = p;
+    g.quarter = nq ? (nq[1] - g.va) / (g.vb - g.va) : 0.25;
   }
   const moving = segs.filter(g => g.kind !== 'hold');
   let reversals = 0, flicker = false; const revTimes = [];
@@ -82,7 +84,7 @@ const describe = (key, s) => {
   const parts = segs.map(g => {
     if (g.kind === 'hold') return `hold ${fmt(g.va)} for ${sec(g.tb - g.ta)}s`;
     if (g.kind === 'jump') return `JUMP ${fmt(g.va)} -> ${fmt(g.vb)} at ${sec(g.ta)}s`;
-    const ease = g.prog > 0.62 ? 'ease-out' : g.prog < 0.38 ? 'ease-in' : 'linear';
+    const ease = g.prog > 0.62 ? 'ease-out' : g.prog < 0.38 ? 'ease-in' : g.quarter < 0.18 ? 'ease-in-out' : 'linear';
     const speed = isOp ? '' : `, ${Math.round(Math.abs(g.vb - g.va) / ((g.tb - g.ta) / 1000))} px/s`;
     return `move ${fmt(g.va)} -> ${fmt(g.vb)} in ${Math.round(g.tb - g.ta)} ms (${sec(g.ta)}-${sec(g.tb)}s, ${ease}${speed})`;
   });

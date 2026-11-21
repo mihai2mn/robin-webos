@@ -43,10 +43,16 @@
     if (frames.length >= 30) flush();
     requestAnimationFrame(tick);
   };
+  // Short lines: a browser's console log may cut long ones (the TV's engine log does at about 800 characters).
   const flush = () => {
     if (!frames.length) return;
-    console.log('MOTION ' + JSON.stringify({ vw: innerWidth, vh: innerHeight, els: newNames, f: frames }));
-    frames = []; newNames = {};
+    const head = { vw: innerWidth, vh: innerHeight };
+    if (Object.keys(newNames).length) { console.log('MOTION ' + JSON.stringify({ ...head, els: newNames, f: [] })); newNames = {}; }
+    let part = [], size = 0;
+    const emit = () => { if (part.length) console.log('MOTION {"f":[' + part.join(',') + ']}'); part = []; size = 0; };
+    for (const f of frames) { const j = JSON.stringify(f); if (size + j.length > 480) emit(); part.push(j); size += j.length + 1; }
+    emit();
+    frames = [];
   };
   setInterval(flush, 1000);
   addEventListener('pagehide', flush);
