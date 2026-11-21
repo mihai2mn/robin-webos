@@ -13,6 +13,7 @@
 #   CPU       extra CPU flags (default: none = the toolchain wrapper's Cortex-A9 defaults)
 #   OPT       optimisation (default -O2)
 #   EXTRA_CF  further compile flags (e.g. -ffunction-sections -fdata-sections)          EXTRA_LD  further link flags
+#   LTO=1     GCC whole-program LTO (LTO_JOBS=8 parallel LTRANS jobs); needs a lot of RAM at the final link
 #   JOBS      ninja jobs (default 22; WebKit wants about 2 GB RAM per job)
 #   WK_SHARED the existing build tree, VARIANTS where variants live (default ~/webos-browser-build/variants)
 set -euo pipefail
@@ -28,6 +29,14 @@ PATCHES=$repo/buildroot-external/patches/wpewebkit/2.54.3
 IMG=${IMAGE:-webos-browser-build:1}
 INCONT=/build/br-out/build/wpewebkit-2.54.3     # the tree is mounted here, so the absolute paths inside it stay valid
 BASE="-D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -g0 -D_FORTIFY_SOURCE=1 -mthumb"   # Buildroot's, -mthumb is the JIT's
+LTO=${LTO:-0}; LTO_JOBS=${LTO_JOBS:-8}; LTO_CMAKE=""
+if [ "$LTO" = 1 ]; then   # GCC whole-program LTO (WHOPR). The Buildroot toolchain wrapper puts its own Cortex-A9 defaults on the link line,
+    # where LTO generates the final code, so the link repeats OPT, -mthumb and CPU (checked by the Tag_CPU_arch line of the collect phase).
+    EXTRA_CF="$EXTRA_CF -flto=$LTO_JOBS -fno-fat-lto-objects"
+    EXTRA_LD="$EXTRA_LD $OPT -mthumb $CPU -flto=$LTO_JOBS -fuse-linker-plugin"
+    X=/build/x-tools/arm-webos-linux-gnueabi/bin/arm-webos-linux-gnueabi
+    LTO_CMAKE="-DCMAKE_AR=$X-gcc-ar -DCMAKE_RANLIB=$X-gcc-ranlib -DCMAKE_NM=$X-gcc-nm"
+fi
 FLAGS="$BASE $OPT $CPU $EXTRA_CF"
 LDF="$EXTRA_LD"
 say() { echo "== $(date +%T) $*"; }
@@ -54,12 +63,24 @@ do_tree() {
     echo "   $(wc -l < "$VARIANTS/$NAME-differing.txt") source files differ from pristine+series, brought to it"
     while read -r f; do cp "$PR/$f" "$T/$f"; done < "$VARIANTS/$NAME-differing.txt"
     rm -rf "$PR"
+    if [ "$LTO" = 1 ]; then   # LLIntOffsetsExtractor's machine code is parsed by offlineasm: it must stay real object code, not LTO bytecode
+        python3 - "$T/Source/JavaScriptCore/CMakeLists.txt" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+for t in ("LLIntOffsetsExtractor", "LLIntSettingsExtractor"):
+    n = "WEBKIT_EXECUTABLE(%s)" % t
+    if n in s and ("%s PRIVATE -fno-lto" % t) not in s:
+        s = s.replace(n, n + "\ntarget_compile_options(%s PRIVATE -fno-lto)\ntarget_link_options(%s PRIVATE -fno-lto)\n" % (t, t), 1)
+        print("no-lto:", t)
+open(p, "w").write(s)
+PY
+    fi
 }
 do_configure() {
     mkdir -p "$OUT"
     say "configure $NAME: $FLAGS | link: $LDF"
     dk "$IMG" bash -c "cd $INCONT && export PATH=/build/br-out/host/bin:\$PATH && cmake . -DCMAKE_C_FLAGS='$FLAGS' -DCMAKE_CXX_FLAGS='$FLAGS' \
-        -DCMAKE_EXE_LINKER_FLAGS='$LDF' -DCMAKE_SHARED_LINKER_FLAGS='$LDF' -DCMAKE_MODULE_LINKER_FLAGS='$LDF'" > "$OUT/configure.log" 2>&1 || { tail -20 "$OUT/configure.log"; exit 1; }
+        $LTO_CMAKE -DCMAKE_EXE_LINKER_FLAGS='$LDF' -DCMAKE_SHARED_LINKER_FLAGS='$LDF' -DCMAKE_MODULE_LINKER_FLAGS='$LDF'" > "$OUT/configure.log" 2>&1 || { tail -20 "$OUT/configure.log"; exit 1; }
     grep -m1 -o ' -O[0-3s] .*-mthumb[^ ]* [^ ]* [^ ]* [^ ]*' "$T/build.ninja" | sed 's/^/   first compile line: /' || true
 }
 do_build() {
