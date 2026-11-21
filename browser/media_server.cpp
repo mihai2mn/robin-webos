@@ -401,6 +401,8 @@ void MediaServer::serve(int fd, uint64_t id) {
     std::atomic<bool> recover_wanted{false};  // the LG pipeline failed after showing pictures: the reader thread loads it again at the current position
     std::atomic<uint32_t> key_codec{0};       // the stream's codec (for finding keyframes)
     std::atomic<bool> need_key{false};        // after such a reload the decoder is fed from the next keyframe on (a start in the middle of a GOP smears)
+    std::atomic<int64_t> need_key_at{0};      // when need_key was set (steady clock, ns): a stream with no keyframe in kKeyWait is fed as it comes
+    constexpr auto kKeyWait = std::chrono::seconds(15);
     std::atomic<bool> retry_wanted{false};  // the pipeline failed before its first picture: the reader thread loads it again
     std::atomic<bool> eos_pushed{false};  // the decoder was told the stream ended (cleared by a flush or load)
     constexpr uint64_t kReplayMax = 48u << 20;  // 4K at 40 Mbit/s: about 9 s
@@ -427,12 +429,20 @@ void MediaServer::serve(int fd, uint64_t id) {
             Unit &u = queues[pick].front();
             const uint64_t g = u.generation;
             if (need_key.load() && !u.eos) {
-                // Only video can say where a keyframe is; the audio before it goes too (it would play ahead of a picture that is not there).
-                if (pick == 1 || !is_keyframe(key_codec.load(), u.packet.data)) {
-                    queues[pick].pop_front();
-                    continue;
+                // A stream whose keyframes are not IDR/IRAP (gradual refresh) would be dropped for ever, picture and sound: after kKeyWait
+                // it is fed as it comes (a smeared start is better than a dead stream).
+                if (now - Clock::time_point(std::chrono::nanoseconds(need_key_at.load())) > kKeyWait) {
+                    WNK_LOGW(kCat, "stream %llu: no keyframe within %d s after the reload: feeding from here", static_cast<unsigned long long>(id),
+                             static_cast<int>(kKeyWait.count()));
+                    need_key = false;
+                } else {
+                    // Only video can say where a keyframe is; the audio before it goes too (it would play ahead of a picture that is not there).
+                    if (pick == 1 || !is_keyframe(key_codec.load(), u.packet.data)) {
+                        queues[pick].pop_front();
+                        continue;
+                    }
+                    need_key = false;
                 }
-                need_key = false;
             }
             if (u.eos) {
                 queues[pick].pop_front();
@@ -683,6 +693,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             use_lg_ = false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        need_key_at = Clock::now().time_since_epoch().count();
         need_key = true;
         do_load(pending);
         {
