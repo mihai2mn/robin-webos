@@ -1,0 +1,20 @@
+<!doctype html><meta charset=utf-8><title>jsb</title><body style="font:28px sans-serif"><pre id=o>running...</pre><script>
+function fib(n){return n<2?n:fib(n-1)+fib(n-2)}
+var K={
+ fib32:function(){return fib(32)},
+ sieve:function(){var n=3000000,a=new Uint8Array(n+1),c=0;for(var i=2;i<=n;i++){if(!a[i]){c++;for(var j=i*2;j<=n;j+=i)a[j]=1}}return c},
+ matmul:function(){var n=140,A=[],B=[],C=[],i,j,k,s;for(i=0;i<n;i++){A.push(new Float64Array(n).fill(i+1));B.push(new Float64Array(n).fill(2));C.push(new Float64Array(n))}
+   for(i=0;i<n;i++)for(j=0;j<n;j++){s=0;for(k=0;k<n;k++)s+=A[i][k]*B[k][j];C[i][j]=s}return C[5][5]},
+ sort:function(){var a=[],x=12345;for(var i=0;i<250000;i++){x=(x*1103515245+12345)&0x7fffffff;a.push(x)}a.sort(function(p,q){return p-q});return a[100]},
+ json:function(){var o=[];for(var i=0;i<30000;i++)o.push({id:i,name:"item"+i,tags:["a","b","c"],v:i*1.5});var s,r=0;for(var k=0;k<4;k++){s=JSON.stringify(o);r+=JSON.parse(s).length}return r},
+ string:function(){var s="",i;for(i=0;i<120000;i++)s+="x"+(i%10);var m=s.match(/x[0-4]/g).length;return m+s.replace(/x5/g,"y").length},
+ objects:function(){var l=null;for(var i=0;i<1500000;i++){l={next:i%7?l:null,v:i}}return l.v}
+};
+var res={},tot=0,name,t;
+setTimeout(function(){
+ for(name in K){t=performance.now();K[name]();t=performance.now()-t;res[name]=Math.round(t);tot+=t}
+ res.total=Math.round(tot);
+ var txt=JSON.stringify(res);document.getElementById("o").textContent=txt;document.title="JSB total="+res.total;
+ var q=new Image();q.src="/result?ua="+encodeURIComponent(location.search)+"&r="+encodeURIComponent(txt)+"&t="+Date.now();
+},1500);
+</script>

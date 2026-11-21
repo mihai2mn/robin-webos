@@ -1,0 +1,46 @@
+<!doctype html>
+<!-- Scroll smoothness: scrolls a long page by itself (requestAnimationFrame) for a few seconds and reports frame
+     intervals to the report file. Serve with tools/eme-test/minihttpd, open http://127.0.0.1:8099/scroll.html
+     (?px=N per frame, ?s=seconds). Measures what the page's main thread and compositor can keep up with; it does
+     not include remote-key latency. -->
+<html><head><meta charset="utf-8"><title>Scroll benchmark</title>
+<style>
+  body { margin: 0; font: 26px/1.5 sans-serif; background: #fafafa; color: #222; }
+  article { max-width: 1100px; margin: 0 auto; padding: 20px 40px; }
+  .card { display: flex; gap: 24px; margin: 18px 0; padding: 18px; background: #fff; border-radius: 14px;
+          box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+  .thumb { flex: 0 0 220px; height: 140px; border-radius: 10px;
+           background: linear-gradient(135deg, hsl(var(--h),70%,55%), hsl(calc(var(--h) + 60),70%,40%)); }
+  h2 { margin: 0 0 8px; font-size: 30px; }
+</style></head>
+<body><article id="a"></article>
+<script>
+function log(m){ try{ new Image().src='/log?'+encodeURIComponent(m); }catch(e){} }
+var q = new URLSearchParams(location.search), PX = +(q.get('px')||12), SECS = +(q.get('s')||6);
+var words = 'the quick brown wren sings a loud and complex song from low dense cover in the old world forest'.split(' ');
+var a = document.getElementById('a'), html = '';
+for (var i = 0; i < 400; i++) {
+  var t = ''; for (var j = 0; j < 60; j++) t += words[(i * 7 + j * 3) % words.length] + ' ';
+  html += '<div class="card"><div class="thumb" style="--h:' + (i * 37 % 360) + '"></div><div><h2>Item ' + i + '</h2><p>' + t + '</p></div></div>';
+}
+a.innerHTML = html;
+setTimeout(function () {
+  var ivs = [], last = 0, start = 0;
+  function step(ts) {
+    if (!start) { start = last = ts; }
+    else { ivs.push(ts - last); last = ts; }
+    window.scrollBy(0, PX);
+    if (ts - start < SECS * 1000) requestAnimationFrame(step); else done();
+  }
+  function done() {
+    ivs.sort(function (x, y) { return x - y; });
+    var n = ivs.length, sum = ivs.reduce(function (s, v) { return s + v; }, 0);
+    var p = function (f) { return ivs[Math.min(n - 1, Math.floor(n * f))].toFixed(1); };
+    var long = ivs.filter(function (v) { return v > 33.4; }).length;
+    log('scroll px=' + PX + ' frames=' + n + ' avg=' + (sum / n).toFixed(1) + 'ms fps=' + (1000 * n / sum).toFixed(1) +
+        ' median=' + p(0.5) + ' p95=' + p(0.95) + ' max=' + ivs[n - 1].toFixed(1) + ' over33ms=' + long);
+    log('ended');
+  }
+  requestAnimationFrame(step);
+}, 2500);
+</script></body></html>

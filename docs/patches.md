@@ -31,6 +31,7 @@ own README with more detail.
 | 0022 gstreamer-no-segment-loop-seek-with-hardware-video | a looping video with the hardware sink stalled a tab switch for 6 to 10 s and rewound early |
 | 0023 jsc-armv7-regexp-jit-off | the RegExp JIT crashed one site's web process on the TV: it stays off (64-bit only) |
 | 0024 webcore-gstreamer-webcodecs-int-varargs-32bit | a 64-bit value was passed as an int vararg: crash in WebCodecs decoder set-up on 32-bit |
+| 0025 upstream-2.54.3-to-2.54-head | `webkitglib/2.54` queue after 2.54.3 (`c01fbd906..9715f4680`, 21 commits, 58 tarball `Source/` files) carried as one patch until upstream cuts `wpewebkit-2.54.4.tar.xz` |
 
 Details of 0015 to 0021 and how they were checked: [jit-armv7.md](jit-armv7.md).
 
