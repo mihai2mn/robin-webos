@@ -270,51 +270,125 @@
     // (fullscreenElement, fullscreenchange), and the video's layer keeps painting its hole where the element now is. Only for an element
     // that is, or contains, a video on the hardware plane; everything else (and software videos) keeps WebKit's own fullscreen.
     {
-        const emu = { el: null, style: null };
+        const emu = { el: null, scroll: null, href: '' };
         const hardwareVideoIn = el => {
             if (!policy.on || !el) return false;
             const vs = el instanceof HTMLVideoElement ? [el] : (el.querySelectorAll ? [...el.querySelectorAll('video')] : []);
             return vs.some(v => v.isConnected && !v.hasAttribute('wren-software') && v.getAttribute('wren-policy') !== null && v.__wrenPolicy === 'hw');
         };
+        const userGesture = () => !navigator.userActivation || navigator.userActivation.isActive;
+        const movesToHardware = el => policy.on && !!el.querySelectorAll && (el instanceof HTMLVideoElement ? [el] : [...el.querySelectorAll('video')]).some(v =>
+            v.isConnected && v.getAttribute('wren-policy') !== 'page' && !String(v.currentSrc || v.src || '').startsWith('blob:'));
         // Tell the browser UI (engine: wpebFullscreen), which hides its toolbar while a page is fullscreen: WebKit's own
         // fullscreen reports itself, this emulated one has to.
         const tellUi = on => {
             try { window.webkit.messageHandlers.wpebFullscreen.postMessage(on ? '1' : '0'); } catch (e) {}
         };
+        // As WebKit's own: one event of each name at the element (it bubbles to the document); at the document when the element is gone.
         const fire = el => {
             for (const name of ['fullscreenchange', 'webkitfullscreenchange']) {
-                try { el.dispatchEvent(new Event(name, { bubbles: true })); } catch (e) {}
-                try { document.dispatchEvent(new Event(name, { bubbles: true })); } catch (e) {}
+                try { (el.isConnected ? el : document).dispatchEvent(new Event(name, { bubbles: true, composed: true })); } catch (e) {}
             }
         };
+        // Inline properties this emulation wrote, put back one by one on leave. node -> Map(property -> what it was, and what we wrote).
+        // Not a snapshot of the style attribute: a page that changes its own inline style while fullscreen keeps its change, and a
+        // page whose CSP forbids inline styles (setAttribute('style') is blocked, CSSOM is not) gets its CSSOM-set styles back.
+        const saved = new Map();
+        const put = (node, props) => {
+            let m = saved.get(node);
+            if (!m) saved.set(node, m = new Map());
+            for (const [k, v] of props) {
+                if (!m.has(k)) m.set(k, { orig: node.style.getPropertyValue(k), prio: node.style.getPropertyPriority(k) });
+                node.style.setProperty(k, v, 'important');
+                m.get(k).ours = node.style.getPropertyValue(k);
+            }
+        };
+        const restoreStyles = () => {
+            for (const [node, m] of saved) for (const [k, o] of m) {
+                // The page rewrote this property meanwhile (or replaced the whole style): its value stays.
+                if (node.style.getPropertyPriority(k) !== 'important' || node.style.getPropertyValue(k) !== o.ours) continue;
+                if (o.orig) node.style.setProperty(k, o.orig, o.prio); else node.style.removeProperty(k);
+            }
+            for (const node of saved.keys()) if (node.getAttribute('style') === '') node.removeAttribute('style');
+            saved.clear();
+        };
+        // The element's parent in the flattened tree: out of a shadow root into its host, out of a slot's content into the slot.
+        const flatParent = n => n.assignedSlot || n.parentElement || ((r => (r instanceof ShadowRoot ? r.host : null))(n.getRootNode()));
+        // Every ancestor that traps a fixed element (containing block, clip) or that holds it under something else (stacking context).
+        const strip = start => {
+            for (let a = flatParent(start); a; a = flatParent(a)) {
+                const cs = getComputedStyle(a);
+                const props = [];
+                const not = (v, none) => v && v !== none;
+                if (not(cs.transform, 'none')) props.push(['transform', 'none']);
+                for (const p of ['translate', 'rotate', 'scale', 'filter', 'perspective', 'clip-path', 'backdrop-filter', '-webkit-backdrop-filter'])
+                    if (not(cs.getPropertyValue(p), 'none')) props.push([p, 'none']);
+                if (not(cs.contain, 'none')) props.push(['contain', 'none']);
+                if (not(cs.containerType, 'normal')) props.push(['container-type', 'normal']);
+                if (not(cs.contentVisibility, 'visible')) props.push(['content-visibility', 'visible']);
+                if (not(cs.willChange, 'auto')) props.push(['will-change', 'auto']);
+                if (not(cs.isolation, 'auto')) props.push(['isolation', 'auto']);
+                if (not(cs.mixBlendMode, 'normal')) props.push(['mix-blend-mode', 'normal']);
+                if ((cs.maskImage || cs.webkitMaskImage || 'none') !== 'none') props.push(['mask', 'none'], ['-webkit-mask', 'none']);
+                if (+cs.opacity < 1) props.push(['opacity', '1']);
+                if (cs.zIndex !== 'auto' || cs.position === 'fixed' || cs.position === 'sticky') props.push(['z-index', '2147483647']);
+                // Without this, setting transform: none starts the page's own "transition: transform" and the element rides the animation.
+                if (props.length) put(a, props.concat([['transition', 'none']]));
+            }
+        };
+        const FILL = [['position', 'fixed'], ['top', '0'], ['left', '0'], ['right', '0'], ['bottom', '0'], ['width', '100%'], ['height', '100%'],
+                      ['max-width', 'none'], ['max-height', 'none'], ['min-width', '0'], ['min-height', '0'], ['margin', '0'], ['padding', '0'],
+                      ['border', '0'], ['box-sizing', 'border-box'], ['transform', 'none'], ['translate', 'none'], ['z-index', '2147483647'],
+                      ['visibility', 'visible'], ['opacity', '1'], ['object-fit', 'contain']];
+        const isFrame = n => n.tagName === 'IFRAME' || n.tagName === 'FRAME';
         const enter = el => {
-            if (emu.el) leave();
+            const swap = !!emu.el;               // another element asks while one is fullscreen: switch, one change event, no exit
+            if (swap) { restoreStyles(); emu.el = null; }
             emu.el = el;
-            emu.style = el.getAttribute('style');
-            el.style.setProperty('position', 'fixed', 'important');
-            for (const side of ['top', 'left']) el.style.setProperty(side, '0', 'important');
-            el.style.setProperty('width', '100vw', 'important');
-            el.style.setProperty('height', '100vh', 'important');
-            el.style.setProperty('max-width', 'none', 'important');
-            el.style.setProperty('max-height', 'none', 'important');
-            el.style.setProperty('margin', '0', 'important');
-            el.style.setProperty('z-index', '2147483647', 'important');
-            el.style.setProperty('background-color', 'rgba(0,0,0,0)', 'important');  // the hole must show the plane: nothing opaque behind the video
+            if (!swap) emu.scroll = [scrollX, scrollY];
+            emu.href = location.href;
+            strip(el);
+            // A container: the page's own CSS (:fullscreen video { ... }) cannot match an emulated fullscreen, so its video is made to fill
+            // the screen here too, and freed from its own trapping ancestors.
+            if (!(el instanceof HTMLVideoElement) && !isFrame(el))
+                for (const v of el.querySelectorAll('video')) if (v.isConnected && v.__wrenPolicy === 'hw') { strip(v); put(v, FILL); }
+            put(el, FILL.concat([['background-color', '#000']]));
+            for (const node of [document.documentElement, document.body]) if (node) put(node, [['overflow', 'hidden']]);
             document.documentElement.setAttribute('wren-emulated-fullscreen', '');
-            log({ fullscreen: 'emulated enter', tag: el.tagName });
+            log({ fullscreen: 'emulated enter', tag: el.tagName, swap });
             tellUi(true);
             fire(el);
+            // The player inside an iframe cannot reach past its own frame: the parent makes the frame element cover the screen.
+            if (window !== top) try { parent.postMessage({ wrenFullscreen: 'enter' }, '*'); } catch (e) {}
         };
         function leave() {
             const el = emu.el;
             if (!el) return;
             emu.el = null;
-            if (emu.style === null) el.removeAttribute('style'); else el.setAttribute('style', emu.style);
+            restoreStyles();
             document.documentElement.removeAttribute('wren-emulated-fullscreen');
+            // Back to where the page was, unless the page went somewhere else meanwhile (single-page navigation), and without animating.
+            if (emu.scroll && emu.href === location.href) scrollTo({ left: emu.scroll[0], top: emu.scroll[1], behavior: 'instant' });
             log({ fullscreen: 'emulated leave', tag: el.tagName });
             tellUi(false);
             fire(el);
+            if (isFrame(el)) try { el.contentWindow.postMessage({ wrenFullscreen: 'exit' }, '*'); } catch (e) {}
+            if (window !== top) try { parent.postMessage({ wrenFullscreen: 'leave' }, '*'); } catch (e) {}
         }
+        // The emulated fullscreen ends when its element is no longer in the document (the real one does too), or the page moves on.
+        setInterval(() => { if (emu.el && !emu.el.isConnected) leave(); }, 500);
+        for (const name of ['pagehide', 'popstate', 'hashchange']) addEventListener(name, () => { if (emu.el) leave(); });
+        addEventListener('message', e => {
+            const d = e.data;
+            if (!d || typeof d !== 'object' || !d.wrenFullscreen || e.source === window) return;
+            if (d.wrenFullscreen === 'exit') { if (e.source === parent && emu.el) leave(); return; }
+            const frame = [...document.querySelectorAll('iframe, frame')].find(f => f.contentWindow === e.source);
+            if (!frame) return;
+            if (d.wrenFullscreen === 'leave') { if (emu.el === frame) leave(); return; }
+            // 'enter': only with the user's activation, and only for a frame the page allowed to go fullscreen.
+            const allowed = frame.allowFullscreen || /\bfullscreen\b/.test(frame.getAttribute('allow') || '') || (() => { try { return !!frame.contentDocument; } catch (x) { return false; } })();
+            if (allowed && (!navigator.userActivation || navigator.userActivation.isActive)) enter(frame);
+        }, true);
         for (const [name, value] of [['fullscreenElement', () => emu.el || null], ['webkitFullscreenElement', () => emu.el || null],
                                      ['webkitCurrentFullScreenElement', () => emu.el || null], ['fullscreen', () => !!emu.el], ['webkitIsFullScreen', () => !!emu.el]]) {
             try {
@@ -326,7 +400,10 @@
             const original = Element.prototype[name];
             if (!original) continue;
             Element.prototype[name] = function () {
-                if (hardwareVideoIn(this)) { enter(this); return Promise.resolve(); }
+                // Like the real one, only inside a user gesture (an ad script must not take the screen). A software video that the
+                // fullscreen rule moves to the hardware plane (every one but an MSE stream, which cannot be reloaded) is emulated too:
+                // WebKit's real fullscreen would leave the plane behind once the reload puts it there.
+                if (userGesture() && (hardwareVideoIn(this) || movesToHardware(this))) { enter(this); return Promise.resolve(); }
                 return original.apply(this, arguments);
             };
         }
@@ -397,6 +474,8 @@
             if (String(v.currentSrc || v.src || '').startsWith('blob:')) { log({ reload: false, reason: 'mse' }); continue; }
             const was = v.getAttribute('wren-policy'), running = v.__wrenPolicy;
             decide(v);
+            // An element without a source (a page's spare players) has nothing to reload: its decision applies when it gets one.
+            if (!v.currentSrc && !v.getAttribute('src') && !v.querySelector('source')) continue;
             if (v.__wrenPolicy !== running && (FULLSCREEN_WHY.has(was) || FULLSCREEN_WHY.has(v.getAttribute('wren-policy'))))
                 work.push(v);
         }
