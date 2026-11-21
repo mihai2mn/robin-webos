@@ -24,7 +24,7 @@ __attribute__((noinline)) static double round_(double x) { return round(x); }
 __attribute__((noinline)) static float sqrt_(float x) { return sqrtf(x); }
 int main(void) {
     volatile int32_t a = -1000003, b = 977; volatile uint32_t ua = 4000000007u, ub = 65537u;
-    CHECK("sdiv", sdiv_(a, b) == -1024 && a % b == -1000003 + 1024 * 977);
+    CHECK("sdiv", sdiv_(a, b) == -1023 && a % b == -1000003 + 1023 * 977);
     CHECK("udiv", udiv_(ua, ub) == 61034 && ua - 61034u * ub == 4000000007u - 61034u * 65537u);
     int ok = 1;
     for (int32_t i = -50; i <= 50; i++) for (int32_t j = 1; j < 40; j++) if (sdiv_(i * 7919, j) != (int32_t)((i * 7919) / j)) ok = 0;
