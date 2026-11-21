@@ -30,6 +30,7 @@
 #include "wnk/log.hpp"
 #include "wnk/async/async.hpp"
 #include "wnk/platform/files.hpp"
+#include "wnk/platform/luna.hpp"
 #include "wnk/platform/probe.hpp"
 #include "wnk/ui/navigation.hpp"
 #include "wnk/ui/ui.hpp"
@@ -40,6 +41,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -954,9 +957,26 @@ class App : public wnk::app::Delegate {
         return true;
     }
 
+    // A page surface drawn to after it was detached is shown by webOS as a window of its own (appId "<app>.page") in front of
+    // the browser, which it then minimises: a black screen with the page hidden (engine/webos-backend, TV 2026-11-21: after
+    // a tab switch or a discarded tab, about one time in ten). When the browser goes to the background and the foreground
+    // app is our own page window, nobody asked for it: bring the browser back.
+    static void recover_from_page_window() {
+        std::thread([] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            const std::string app = WPEB_APP_ID_STRING;
+            const auto fg = wnk::platform::luna_call_sync("luna://com.webos.applicationManager/getForegroundAppInfo", "{}", 2000);
+            if (fg.status != wnk::platform::LunaStatus::Ok || fg.payload.find("\"" + app + ".page\"") == std::string::npos) return;
+            WNK_LOGW(kCat, "the browser was minimised by its own page window: bringing it back");
+            const auto r = wnk::platform::luna_call_sync("luna://com.webos.applicationManager/launch", "{\"id\":\"" + app + "\"}", 3000);
+            if (r.status != wnk::platform::LunaStatus::Ok) WNK_LOGW(kCat, "could not bring it back: %s", r.detail.c_str());
+        }).detach();
+    }
+
     void on_lifecycle(wnk::app::Context &, const wnk::app::Lifecycle::Transition &t) override {
         using S = wnk::app::State;
         if (t.to == S::Suspended) {
+            recover_from_page_window();
             browser::MediaServer::set_foreground(false);
             engine_.set_visible(false);
             save_session();
