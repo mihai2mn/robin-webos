@@ -141,10 +141,18 @@ do_webkit32() {
     ( cd "$pr" && diff -rq . "$WK_TREE" 2>/dev/null | grep -E '^Files .* differ$' | sed -E 's/^Files \.\/(.*) and .* differ$/\1/' ) > "$WORK/wk-differing.txt" || true
     echo "   $(wc -l < "$WORK/wk-differing.txt") differing source files"; sed 's/^/     /' "$WORK/wk-differing.txt" | head -20
     while read -r f; do cp "$pr/$f" "$WK_TREE/$f"; done < "$WORK/wk-differing.txt"
+    # Cortex-A55 code generation is the default (measured: JS -12%, nothing slower; tools/a55-probe ran every flag set on the TV).
+    # WK_CPU="" builds for the toolchain's Cortex-A9 default again. Re-configuring the cache changes every compile line: a full rebuild.
+    local cpu=${WK_CPU-"-march=armv8-a+crc -mfpu=neon-fp-armv8 -mtune=cortex-a55"} fl
+    fl="-D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -g0 -D_FORTIFY_SOURCE=1 -mthumb -O2 $cpu"
+    say "configure the copy with: $fl"
+    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/build -v "$BR:/build" -v "$WK_TREE:/build/br-out/build/wpewebkit-2.54.3" -w /build webos-browser-build:1 \
+        bash -c "cd /build/br-out/build/wpewebkit-2.54.3 && export PATH=/build/br-out/host/bin:\$PATH && cmake . -DCMAKE_C_FLAGS='$fl' -DCMAKE_CXX_FLAGS='$fl'" > "$WORK/webkit32-cfg.log" 2>&1 \
+        || { tail -20 "$WORK/webkit32-cfg.log"; exit 1; }
     say "ninja in the private copy${FULL:+ (FULL=1: clean first, hours)}"
     docker run --rm --user "$(id -u):$(id -g)" -e HOME=/build -v "$BR:/build" -v "$WK_TREE:/build/br-out/build/wpewebkit-2.54.3" -w /build \
-        --cpu-shares 256 webos-browser-build:1 nice -n 10 \
-        bash -c 'cd /build/br-out/build/wpewebkit-2.54.3 && export PATH=/build/br-out/host/bin:$PATH && if [ -n "$FULL" ]; then ninja -t clean >/dev/null; fi && ninja -j12' > "$WORK/webkit32-ninja.log" 2>&1 \
+        --cpu-shares 512 webos-browser-build:1 nice -n 5 \
+        bash -c 'cd /build/br-out/build/wpewebkit-2.54.3 && export PATH=/build/br-out/host/bin:$PATH && if [ -n "$FULL" ]; then ninja -t clean >/dev/null; fi && ninja -j${JOBS_WK:-24}' > "$WORK/webkit32-ninja.log" 2>&1 \
         || { tail -25 "$WORK/webkit32-ninja.log"; exit 1; }
     tail -1 "$WORK/webkit32-ninja.log" | cut -c1-120
     ( cd "$pr" && diff -rq . "$WK_TREE" 2>/dev/null | grep -cE '^Files .* differ$' || true ) | sed 's/^/   differing files after the sync: /'
