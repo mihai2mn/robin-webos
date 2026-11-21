@@ -839,7 +839,7 @@ class App : public wnk::app::Delegate {
             if (media != browser::MediaKeyAction::None) {
                 const Tab *mt = tab(active_);
                 if (e.down && !e.repeat && mt != nullptr && mt->live && engine_.running()) {
-                    WNK_LOGI(kCat, "media key: %s (sc=%d kc=0x%x)", browser::media_key_label(media), e.scancode, e.keycode);
+                    WNK_LOGI(kCat, "media key: %s (sc=%d kc=0x%x)", browser::media_key_label(media), e.scancode, static_cast<unsigned>(e.keycode));
                     engine_.run_js(mt->id, browser::media_key_script(media));
                     ui.toast(browser::media_key_label(media), 900);
                 }
@@ -885,7 +885,7 @@ class App : public wnk::app::Delegate {
         const browser::WebKey k = browser::web_key_from_sdl(e.keycode);
         if (k.keyval == 0) {
             if (e.down && !e.repeat && action == A::Unknown && e.scancode >= 70)
-                WNK_LOGI(kCat, "unhandled key: sc=%d kc=0x%x", e.scancode, e.keycode);
+                WNK_LOGI(kCat, "unhandled key: sc=%d kc=0x%x", e.scancode, static_cast<unsigned>(e.keycode));
             return false;
         }
         engine_.key(e.down, k.keyval, k.keycode, 0);
