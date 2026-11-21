@@ -8,7 +8,9 @@
 #include <signal.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 static void urldecode(char *s){char *o=s;while(*s){if(*s=='%'&&s[1]&&s[2]){char h[3]={s[1],s[2],0};*o++=(char)strtol(h,0,16);s+=3;}else if(*s=='+'){*o++=' ';s++;}else *o++=*s++;}*o=0;}
+static int write_all(int fd,const char *p,size_t n){while(n){ssize_t w=write(fd,p,n);if(w<=0)return -1;p+=w;n-=(size_t)w;}return 0;}
 int main(int argc,char**argv){
   if(argc<4){fprintf(stderr,"usage: port dir logfile\n");return 1;}
   signal(SIGPIPE,SIG_IGN);
@@ -18,11 +20,14 @@ int main(int argc,char**argv){
   for(;;){int c=accept(s,0,0);if(c<0)continue;char buf[16384];int n=read(c,buf,sizeof buf-1);if(n<=0){close(c);continue;}buf[n]=0;
     char path[8192]={0};sscanf(buf,"GET %8191s",path);
     if(!strncmp(path,"/log?",5)){urldecode(path+5);FILE*f=fopen(argv[3],"a");if(f){fprintf(f,"%s\n",path+5);fclose(f);}
-      const char*r="HTTP/1.0 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";write(c,r,strlen(r));}
-    else{char fp[9000];if(strstr(path,".."))path[0]=0;char*q=strchr(path,'?');if(q)*q=0;snprintf(fp,sizeof fp,"%s%s",argv[2],path);
-      FILE*f=fopen(fp,"rb");if(!f){const char*r="HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n";write(c,r,strlen(r));}
+      const char*r="HTTP/1.0 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";write_all(c,r,strlen(r));}
+    else{char fp[9000];char*q=strchr(path,'?');if(q)*q=0;
+      FILE*f=NULL;struct stat st;
+      if(path[0]=='/'&&!strstr(path,"..")&&snprintf(fp,sizeof fp,"%s%s",argv[2],path)<(int)sizeof fp){
+        f=fopen(fp,"rb");if(f&&(fstat(fileno(f),&st)!=0||!S_ISREG(st.st_mode))){fclose(f);f=NULL;}}
+      if(!f){const char*r="HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n";write_all(c,r,strlen(r));}
       else{const char*ct=strstr(fp,".html")?"text/html; charset=utf-8":strstr(fp,".js")?"text/javascript":"application/octet-stream";
-        char h[256];int hl=snprintf(h,sizeof h,"HTTP/1.0 200 OK\r\nContent-Type: %s\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",ct);write(c,h,hl);
-        char b[65536];size_t k;while((k=fread(b,1,sizeof b,f))>0)if(write(c,b,k)<0)break;fclose(f);}}
+        char h[256];int hl=snprintf(h,sizeof h,"HTTP/1.0 200 OK\r\nContent-Type: %s\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",ct);write_all(c,h,(size_t)hl);
+        char b[65536];size_t k;while((k=fread(b,1,sizeof b,f))>0)if(write_all(c,b,k)<0)break;fclose(f);}}
     close(c);}
 }
