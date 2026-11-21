@@ -177,7 +177,8 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
     if (codec == Codec::H264 && width > 0 && width <= 1920 && height <= 1088) max_w = 1920, max_h = 1080;
     const int max_fps = codec != Codec::H264 || fps > 30.5 ? 60 : 30;
     // With audio, as the kit's StarfishBackend loads it (verified on this TV): the pipeline syncs the video to the
-    // audio (audioSync), with a larger audio buffer and without low-delay mode.
+    // audio (audioSync), with a larger audio buffer. Low-delay mode is never asked for: its decoder shows streams with
+    // B-frames out of order (flicker, smeared macroblocks every GOP), with or without audio (kit patch 0006 does the same).
     const bool with_audio = audio != nullptr;
     const bool opus = with_audio && audio->codec == Audio::Codec::Opus;
     const bool pcm = with_audio && audio->codec == Audio::Codec::Pcm;
@@ -224,7 +225,7 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
                   app_id.c_str(), window_id.c_str(), codec_name(codec),
                   !with_audio ? "" : opus ? ",\"audio\":\"OPUS\"" : pcm ? ",\"audio\":\"PCM\"" : ",\"audio\":\"AAC\"", fps_info.c_str(), audio_info.c_str(),
                   with_audio ? "true" : "false", with_audio ? 1048576 : 32768, with_audio ? "true" : "false",
-                  with_audio ? "false" : "true", max_w, max_h, max_fps);
+                  "false", max_w, max_h, max_fps);
     api_ = new_api();
     if (api_ == nullptr) {
         *error = "out of memory";
