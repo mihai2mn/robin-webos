@@ -115,7 +115,8 @@ case "$cmd" in
 
   type)
     [ $# -gt 0 ] || die 'type "text"'
-    txt=$(printf '%b' "$1")
+    # A trailing \n is the text's last character (Enter): command substitution would strip it, so a sentinel goes round it.
+    txt=$(printf '%b.' "$1"); txt=${txt%.}
     b=$(printf '%s' "$txt" | base64 | tr -d '\n')
     ti type "$b" ;;
 
