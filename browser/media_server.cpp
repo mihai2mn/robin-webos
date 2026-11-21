@@ -671,6 +671,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     // frames presented stop while units are still fed, and the decoder stayed held): unload it, load it again at the current position
     // and feed it from the next keyframe. Not more than three times in a minute, then it is left to the page (its own recovery).
     std::deque<Clock::time_point> recoveries;
+    bool cap_logged = false;     // reader thread: the "not reloaded" line is printed once per error episode (a Load or a reload starts a new one)
     bool close_stream = false;  // reader thread: the reload failed; the connection is closed (below) so the page gets a media error
     const auto do_recover = [&] {
         if (!recover_wanted.exchange(false)) return;
@@ -679,9 +680,11 @@ void MediaServer::serve(int fd, uint64_t id) {
         while (!recoveries.empty() && now - recoveries.front() > std::chrono::seconds(60)) recoveries.pop_front();
         const int code = lg_.error();
         if (recoveries.size() >= 3) {
-            WNK_LOGW(kCat, "stream %llu: LG pipeline error %d again: not reloaded (3 in a minute)", static_cast<unsigned long long>(id), code);
+            if (!cap_logged) WNK_LOGW(kCat, "stream %llu: LG pipeline error %d again: not reloaded (3 in a minute; not logged again for this error)", static_cast<unsigned long long>(id), code);
+            cap_logged = true;
             return;
         }
+        cap_logged = false;
         recoveries.push_back(now);
         WNK_LOGW(kCat, "stream %llu: LG pipeline error %d mid-stream: reloading it at the current position", static_cast<unsigned long long>(id), code);
         {
@@ -783,6 +786,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             retry_wanted = false;
             recover_wanted = false;
             need_key = false;
+            cap_logged = false;
             pending.window_id[sizeof(pending.window_id) - 1] = '\0';
             load_pending = true;
             load_at = Clock::now();
