@@ -1,0 +1,138 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] WebCore MSE: keep a bounded amount of played media behind the playhead (plain MediaSource, GStreamer)
+
+For a plain MediaSource WebKit evicts only when an append would exceed the maximum buffer size (hundreds of MB on this
+port), and the memory-pressure eviction (MediaSource::memoryPressure) is for ManagedMediaSource only, which Wren hides
+from pages. A long 4K MSE playback therefore keeps all the media it has played: on the TV the web process grew about
+2.5 MB/s and was killed at the memory limit after 80 s.
+
+SourceBufferPrivate::evictCodedFrames() (run before every append) now also queues evictBackBufferInternal() on the
+dispatcher when the append fits: it removes the buffered media from the start up to min(currentTime - keep, the last
+sync sample before currentTime), the same range rule as the first phase of evictFrames(), so the GOP being played and
+everything ahead stay; computeEvictionData() follows. No updating/updateend events, no change to the byte limits, so
+players see only a smaller buffered range behind the playhead (seeking back past it re-fetches).
+
+keep comes from SourceBufferPrivate::platformMaximumBackBufferDuration(): invalid (off) in WebCore, and on the GStreamer
+port MSE_MAX_BACK_BUFFER_SECONDS (default 30, minimum 3 when set, 0 = off).
+---
+--- a/Source/WebCore/platform/graphics/SourceBufferPrivate.h
++++ b/Source/WebCore/platform/graphics/SourceBufferPrivate.h
+@@ -111,6 +111,8 @@
+     bool evictCodedFrames(uint64_t newDataSize, const MediaTime& currentTime);
+     void asyncEvictCodedFrames(uint64_t newDataSize, const MediaTime& currentTime);
+     WEBCORE_EXPORT virtual size_t platformEvictionThreshold() const;
++    // How much already played media a port keeps behind the playhead; invalid = no limit (the default).
++    WEBCORE_EXPORT virtual MediaTime platformMaximumBackBufferDuration() const;
+     WEBCORE_EXPORT uint64_t contentSize() const;
+     void resetTimestampOffsetInTrackBuffers();
+     virtual void startChangingType();
+@@ -251,6 +253,7 @@
+     void trySignalAllSamplesInTrackEnqueued(TrackBuffer&, TrackID);
+     MediaTime findPreviousSyncSamplePresentationTime(const MediaTime&);
+     bool evictCodedFramesInternal(uint64_t newDataSize, const MediaTime& currentTime);
++    void evictBackBufferInternal(const MediaTime& currentTime);
+     void removeCodedFramesInternal(const MediaTime& start, const MediaTime& end, const MediaTime& currentMediaTime);
+     bool evictFrames(uint64_t newDataSize, const MediaTime& currentTime);
+     bool hasTooManySamples() const;
+--- a/Source/WebCore/platform/graphics/SourceBufferPrivate.cpp
++++ b/Source/WebCore/platform/graphics/SourceBufferPrivate.cpp
+@@ -595,6 +595,11 @@
+     return 0;
+ }
+ 
++MediaTime SourceBufferPrivate::platformMaximumBackBufferDuration() const
++{
++    return MediaTime::invalidTime();
++}
++
+ Ref<GenericPromise> SourceBufferPrivate::setMaximumBufferSize(size_t size)
+ {
+     if (m_maximumBufferSize.exchange(size) == size)
+@@ -712,8 +717,16 @@
+         return true;
+ 
+     if (canAppend(newDataSize)) {
+-        if (!isBufferFullFor(newDataSize))
++        if (!isBufferFullFor(newDataSize)) {
++            // Room for the new data: still drop media that is far enough behind the playhead (see
++            // platformMaximumBackBufferDuration), on the dispatcher like the eviction below.
++            if (platformMaximumBackBufferDuration().isFinite()) {
++                ensureWeakOnDispatcher([currentTime](auto& buffer) {
++                    buffer.evictBackBufferInternal(currentTime);
++                });
++            }
+             return false;
++        }
+         // The buffer is full, but we will be able to evict the content prior appending.
+         ensureWeakOnDispatcher([newDataSize, currentTime](auto& buffer) {
+             buffer.evictCodedFramesInternal(newDataSize, currentTime);
+@@ -729,6 +742,33 @@
+     return returnValue;
+ }
+ 
++void SourceBufferPrivate::evictBackBufferInternal(const MediaTime& currentTime)
++{
++    assertIsCurrent(m_dispatcher.get());
++
++    // Same removal as the first phase of evictFrames(): from the start of the buffered media up to the last
++    // sync sample before currentTime (never into the GOP being played), here also at most currentTime - keep.
++    MediaTime keep = platformMaximumBackBufferDuration();
++    if (!keep.isValid() || !keep.isFinite() || !currentTime.isFinite() || currentTime <= keep)
++        return;
++
++    MediaTime rangeStart = minimumBufferedTime();
++    if (!rangeStart.isValid() || !rangeStart.isFinite())
++        return;
++    MediaTime rangeEnd = std::min(currentTime - keep, findPreviousSyncSamplePresentationTime(currentTime));
++    if (rangeStart >= rangeEnd)
++        return;
++
++#if !RELEASE_LOG_DISABLED
++    uint64_t initialBufferedSize = evictionData().contentSize;
++#endif
++    removeCodedFramesInternal(rangeStart, rangeEnd, currentTime);
++    computeEvictionData();
++#if !RELEASE_LOG_DISABLED
++    DEBUG_LOG(LOGIDENTIFIER, "back buffer: removed [", rangeStart, ", ", rangeEnd, "), ", initialBufferedSize - evictionData().contentSize, " bytes, currentTime = ", currentTime);
++#endif
++}
++
+ bool SourceBufferPrivate::evictCodedFramesInternal(uint64_t newDataSize, const MediaTime& currentTime)
+ {
+     // If the algorithm here is modified, computeEvictionData() must be updated accordingly.
+--- a/Source/WebCore/platform/graphics/gstreamer/mse/SourceBufferPrivateGStreamer.h
++++ b/Source/WebCore/platform/graphics/gstreamer/mse/SourceBufferPrivateGStreamer.h
+@@ -101,6 +101,7 @@
+ 
+     size_t platformMaximumBufferSize() const override;
+     size_t platformEvictionThreshold() const final;
++    MediaTime platformMaximumBackBufferDuration() const final;
+ 
+ private:
+     friend class AppendPipeline;
+--- a/Source/WebCore/platform/graphics/gstreamer/mse/SourceBufferPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/mse/SourceBufferPrivateGStreamer.cpp
+@@ -464,6 +464,23 @@
+     return evictionThreshold;
+ }
+ 
++MediaTime SourceBufferPrivateGStreamer::platformMaximumBackBufferDuration() const
++{
++    // Seconds of played media kept behind the playhead: MSE_MAX_BACK_BUFFER_SECONDS (default 30, at least 3,
++    // 0 = no limit). Without it plain MediaSource keeps everything played until the byte limit is reached.
++    static const MediaTime duration = [] {
++        int64_t seconds = 30;
++        if (const char* value = getenv("MSE_MAX_BACK_BUFFER_SECONDS")) {
++            if (auto parsed = parseInteger<int64_t>(StringView::fromLatin1(value), 10))
++                seconds = *parsed;
++        }
++        if (seconds <= 0)
++            return MediaTime::invalidTime();
++        return MediaTime(std::clamp<int64_t>(seconds, 3, 86400), 1);
++    }();
++    return duration;
++}
++
+ RefPtr<MediaPlayerPrivateGStreamerMSE> SourceBufferPrivateGStreamer::player() const
+ {
+     if (RefPtr mediaSource = m_mediaSource.get())
