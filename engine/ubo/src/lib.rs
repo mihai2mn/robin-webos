@@ -228,6 +228,68 @@ pub extern "C" fn wren_ubo_check(
     }
 }
 
+const TRY_OPEN: &str = "try {\n";
+const TRY_CLOSE: &str = "\n} catch ( e ) { }\n";
+
+/// Appends one engine's `injected_script` to the combined document script.
+///
+/// Wrapping each engine in its own IIFE keeps lexically scoped helper definitions (`class` helpers
+/// such as `jsonpath.fn` / `arglist-parser.fn` / `range-parser.fn`, `const`, `let`) isolated per
+/// engine while still sharing the outer `scriptletGlobals` created by `extension.c`.
+///
+/// Extra-list engines are compiled with shared quick-fix / unbreak lists alongside `core`, so
+/// identical single-line `try {\n...\n} catch ( e ) { }\n` scriptlet invocations already emitted
+/// by an earlier engine are skipped, and an engine with no remaining new invocations is omitted.
+fn append_engine_script(out: &mut String, raw: &str, seen_calls: &mut HashSet<String>) {
+    let mut end = raw.len();
+    let mut calls: Vec<&str> = Vec::new();
+    let mut clean = true;
+    while raw[..end].ends_with(TRY_CLOSE) {
+        let body_end = end - TRY_CLOSE.len();
+        let line_start = raw[..body_end].rfind('\n').map_or(0, |i| i + 1);
+        let prefix = &raw[..line_start];
+        if !prefix.ends_with(TRY_OPEN) {
+            clean = false;
+            break;
+        }
+        let open_start = line_start - TRY_OPEN.len();
+        if open_start > 0 && raw.as_bytes()[open_start - 1] != b'\n' {
+            clean = false;
+            break;
+        }
+        calls.push(&raw[line_start..body_end]);
+        end = open_start;
+    }
+
+    if clean && !calls.is_empty() {
+        calls.reverse();
+        let mut kept: Vec<&str> = Vec::new();
+        for call in calls {
+            if seen_calls.insert(call.to_owned()) {
+                kept.push(call);
+            }
+        }
+        if kept.is_empty() {
+            return;
+        }
+        out.push_str("(function() {\n");
+        out.push_str(&raw[..end]);
+        for call in kept {
+            out.push_str(TRY_OPEN);
+            out.push_str(call);
+            out.push_str(TRY_CLOSE);
+        }
+        out.push_str("})();\n");
+    } else {
+        out.push_str("(function() {\n");
+        out.push_str(raw);
+        if !raw.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("})();\n");
+    }
+}
+
 /// The cosmetic resources (site-specific hiding, scriptlets, procedural filters) for a document at `url`.
 #[no_mangle]
 pub extern "C" fn wren_ubo_cosmetic(ubo: *const WrenUbo, url: *const c_char) -> WrenUboCosmetic {
@@ -242,6 +304,7 @@ pub extern "C" fn wren_ubo_cosmetic(ubo: *const WrenUbo, url: *const c_char) -> 
     let mut hide: HashSet<String> = HashSet::new();
     let mut procedural: HashSet<String> = HashSet::new();
     let mut script = String::new();
+    let mut seen_calls: HashSet<String> = HashSet::new();
     let mut exceptions: HashMap<&str, Option<Vec<String>>> = HashMap::new();
     let mut all_generichide = true;
     for (name, engine) in &ubo.engines {
@@ -249,8 +312,7 @@ pub extern "C" fn wren_ubo_cosmetic(ubo: *const WrenUbo, url: *const c_char) -> 
         hide.extend(r.hide_selectors);
         procedural.extend(r.procedural_actions);
         if !r.injected_script.is_empty() {
-            script.push_str(&r.injected_script);
-            script.push('\n');
+            append_engine_script(&mut script, &r.injected_script, &mut seen_calls);
         }
         all_generichide &= r.generichide;
         exceptions.insert(name, if r.generichide { None } else { Some(r.exceptions.into_iter().collect()) });
@@ -300,4 +362,40 @@ pub extern "C" fn wren_ubo_hidden(
         selectors.extend(engine.hidden_class_id_selectors(&classes, &ids, &exc));
     }
     c_string(style_sheet(selectors.iter()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolates_class_helpers_and_deduplicates_invocations_across_engines() {
+        let mut out = String::new();
+        let mut seen = HashSet::new();
+        let engine1 = "class JSONPath {}\nfunction f(x) {}\ntry {\nf(\"a\")\n} catch ( e ) { }\ntry {\nf(\"b\")\n} catch ( e ) { }\n";
+        let engine2_dup = "class JSONPath {}\nfunction f(x) {}\ntry {\nf(\"a\")\n} catch ( e ) { }\n";
+        let engine3_mixed = "class JSONPath {}\nfunction f(x) {}\ntry {\nf(\"b\")\n} catch ( e ) { }\ntry {\nf(\"c\")\n} catch ( e ) { }\n";
+
+        append_engine_script(&mut out, engine1, &mut seen);
+        append_engine_script(&mut out, engine2_dup, &mut seen);
+        append_engine_script(&mut out, engine3_mixed, &mut seen);
+
+        // Engine 2 had only duplicate invocations and must be omitted completely.
+        assert_eq!(out.matches("(function() {\n").count(), 2);
+        assert_eq!(out.matches("class JSONPath {}").count(), 2);
+        assert_eq!(out.matches("f(\"a\")").count(), 1);
+        assert_eq!(out.matches("f(\"b\")").count(), 1);
+        assert_eq!(out.matches("f(\"c\")").count(), 1);
+    }
+
+    #[test]
+    fn multiline_fallback_still_wraps_in_iife() {
+        let mut out = String::new();
+        let mut seen = HashSet::new();
+        let legacy = "class Helper {}\ntry {\nconst x = 1;\nconst y = 2;\n} catch ( e ) { }\n";
+        append_engine_script(&mut out, legacy, &mut seen);
+        append_engine_script(&mut out, legacy, &mut seen);
+        assert_eq!(out.matches("(function() {\n").count(), 2);
+        assert_eq!(out.matches("const x = 1;").count(), 2);
+    }
 }
