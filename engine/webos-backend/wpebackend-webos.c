@@ -27,6 +27,7 @@
 #include "wayland-webos-shell-client-protocol.h"
 #include "webos-surface-group-client-protocol.h"
 #include "webos-foreign-client-protocol.h"
+#include "video_crop.h"
 #include <pthread.h>
 #include <time.h>
 
@@ -324,6 +325,8 @@ struct renderer {
     struct wl_webos_surface_group_compositor *groups;
     struct wl_seat *seat;
     struct wl_webos_foreign *foreign;
+    uint32_t foreign_version;
+    int webos_major; // from /var/run/nyx/os_info.json (0 if unknown)
     // Page surfaces of closed pages, unmapped, with their window role (see target_pool_surface).
     pthread_mutex_t pool_lock;
     GPtrArray *pool; // struct pooled_surface *
@@ -347,10 +350,12 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
         r->webos_shell = wpeb_registry_bind(registry, name, &wl_webos_shell_interface, 1);
     else if (!strcmp(interface, "wl_webos_surface_group_compositor"))
         r->groups = wpeb_registry_bind(registry, name, &wl_webos_surface_group_compositor_interface, 1);
-    else if (!strcmp(interface, "wl_webos_foreign") && !r->foreign)
-        // Version 2 (when the compositor has it) adds wl_webos_exported.set_crop_region; the exported object takes its version from this one.
-        r->foreign = wpeb_registry_bind(registry, name, &wl_webos_foreign_interface, version >= 2 ? 2 : 1);
-    else if (!strcmp(interface, "wl_seat") && !r->seat)
+    else if (!strcmp(interface, "wl_webos_foreign") && !r->foreign) {
+        // The factory global is version 1 on the tested TV (webOS 5.3), yet the wl_webos_exported object it makes accepts
+        // set_crop_region (checked on the TV, see docs/video.md). Bind at 1, the version of wl_webos_foreign_interface.
+        r->foreign_version = version;
+        r->foreign = wpeb_registry_bind(registry, name, &wl_webos_foreign_interface, 1);
+    } else if (!strcmp(interface, "wl_seat") && !r->seat)
         r->seat = wpeb_registry_bind(registry, name, &wl_seat_interface, 1);
 }
 static void registry_global_remove(void *data, struct wl_registry *registry, uint32_t name) { (void)data; (void)registry; (void)name; }
@@ -383,6 +388,18 @@ static struct wl_display *connect_display(void)
     return display;
 }
 
+static int detect_webos_major(void)
+{
+    FILE *f = fopen("/var/run/nyx/os_info.json", "r");
+    if (!f)
+        return 0;
+    char buf[1024];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return wpeb_webos_major_from_os_info(buf);
+}
+
 static void *renderer_create(int host_fd)
 {
     if (host_fd >= 0)
@@ -390,6 +407,7 @@ static void *renderer_create(int host_fd)
     struct renderer *r = g_new0(struct renderer, 1);
     pthread_mutex_init(&r->pool_lock, NULL);
     r->pool = g_ptr_array_new();
+    r->webos_major = detect_webos_major();
     r->display = connect_display();
     if (!r->display) {
         LOG("cannot connect to the compositor (WPEB_WAYLAND_SOCKET=%s)", getenv("WPEB_WAYLAND_SOCKET"));
@@ -401,8 +419,9 @@ static void *renderer_create(int host_fd)
     wl_registry_add_listener(registry, &registry_listener, r);
     wl_display_roundtrip_queue(r->display, r->queue);
     wl_registry_destroy(registry);
-    LOG("connected: compositor=%d shell=%d webos shell=%d surface groups=%d", !!r->compositor, !!r->shell,
-        !!r->webos_shell, !!r->groups);
+    LOG("connected: compositor=%d shell=%d webos shell=%d surface groups=%d foreign=%d(v%u) webos=%d",
+        !!r->compositor, !!r->shell, !!r->webos_shell, !!r->groups, !!r->foreign, r->foreign_version,
+        r->webos_major);
     return r;
 }
 
@@ -520,6 +539,9 @@ struct target {
     struct wl_webos_surface_group *group;
     struct wl_keyboard *keyboard;
     struct wl_webos_exported *video; // the page's video window (wpeb_webos_video_open), NULL without one
+    enum wpeb_crop_mode video_crop_mode;
+    int video_place_state; // 0=none, 1=window, 2=crop, 3=squash, 4=park (for transition logging)
+    struct wpeb_video_plan video_last_plan;
     struct wl_callback *frame;
     uint32_t width, height;
     bool attached, waiting_first_frame, failed, swap_interval_set;
@@ -1160,6 +1182,8 @@ static void target_close_video(struct target *t)
     if (t->video) {
         wl_webos_exported_destroy(t->video);
         t->video = NULL;
+        t->video_place_state = 0;
+        memset(&t->video_last_plan, 0, sizeof(t->video_last_plan));
         if (t->renderer && t->renderer->display)
             wl_display_flush(t->renderer->display);
         LOG("video window closed");
@@ -1177,6 +1201,11 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
         return 0;
     }
     target_close_video(t);
+    const char *crop_env = getenv("WPE_BROWSER_DEBUG_VIDEO_CROP");
+    t->video_crop_mode = wpeb_crop_mode_resolve(crop_env, getenv("WPEB_NO_CROP"), getenv("WPEB_CROP_FALLBACK"),
+                                                t->renderer->webos_major);
+    t->video_place_state = 0;
+    memset(&t->video_last_plan, 0, sizeof(t->video_last_plan));
     g_video_id[0] = '\0';
     t->video = wl_webos_foreign_export_element(t->renderer->foreign, t->surface, WL_WEBOS_FOREIGN_WEBOS_EXPORTED_TYPE_VIDEO_OBJECT);
     // The event arrives on the target's queue, which WebKit's compositing thread dispatches.
@@ -1190,10 +1219,14 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
     if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
     while (!g_video_id[0] && pthread_cond_timedwait(&g_video_cond, &g_video_lock, &until) == 0) { }
     int ok = g_video_id[0] != '\0';
-    if (ok)
+    if (ok) {
         snprintf(id, size, "%s", g_video_id);
-    else
+        LOG("video window ready: id=%s foreign=v%u webos=%d crop_mode=%s (env=%s)",
+            g_video_id, t->renderer->foreign_version, t->renderer->webos_major,
+            wpeb_crop_mode_name(t->video_crop_mode), crop_env && *crop_env ? crop_env : "auto");
+    } else {
         LOG("video window: no id within %u ms", timeout_ms);
+    }
     pthread_mutex_unlock(&g_video_lock);
     return ok;
 }
@@ -1207,39 +1240,39 @@ static void video_place(int sw, int sh, int x, int y, int w, int h, gboolean com
     pthread_mutex_lock(&g_video_lock);
     struct target *t = g_shown_target;
     if (t && t->video && w > 0 && h > 0) {
-        const int picture_w = sw > 0 ? sw : w, picture_h = sh > 0 ? sh : h;
         const int surface_h = surface_height(t->width, t->height);
-        int dx = x, dy = y + (surface_h - (int)t->height), dw = w, dh = h;
-        int cx = 0, cy = 0, cw = picture_w, ch = picture_h;  // the part of the picture that is shown
-        // A destination that reaches past the surface's edge (the page scrolled the video partly out) is drawn wrongly by the compositor
-        // (TV, 2026-11-20: the rest of the box stays black), and set_exported_window ignores its source rectangle: the whole picture is
-        // fitted into the destination. So the destination is cut to the surface and, with wl_webos_exported v2, set_crop_region shows
-        // just the matching part of the picture (the original size, the part shown, where). Without v2 the picture is shrunk into the
-        // visible part instead. Entirely outside: left as it was (the video is gone from sight).
-        const int x0 = dx < 0 ? 0 : dx, y0 = dy < 0 ? 0 : dy;
-        const int x1 = dx + dw > (int)t->width ? (int)t->width : dx + dw, y1 = dy + dh > surface_h ? surface_h : dy + dh;
-        gboolean crop = FALSE;
-        if ((x0 != dx || y0 != dy || x1 != dx + dw || y1 != dy + dh) && x1 > x0 && y1 > y0 && dw > 0 && dh > 0) {
-            cx = (int)(((int64_t)(x0 - dx) * picture_w) / dw);
-            cy = (int)(((int64_t)(y0 - dy) * picture_h) / dh);
-            cw = (int)(((int64_t)(x1 - x0) * picture_w) / dw);
-            ch = (int)(((int64_t)(y1 - y0) * picture_h) / dh);
-            if (cw < 2) cw = 2;
-            if (ch < 2) ch = 2;
-            dx = x0; dy = y0; dw = x1 - x0; dh = y1 - y0;
-            crop = wl_proxy_get_version((struct wl_proxy *)t->video) >= 2 && !getenv("WPEB_NO_CROP");
+        // The compositor advertises wl_webos_foreign at version 1 on webOS 5.3, so the proxy version of t->video is 1 and
+        // cannot tell whether set_crop_region is understood (libwayland-client does not check "since" either). The TV
+        // accepts the request regardless, so the mode comes from the webOS major version (squash on <= 4, where the
+        // request is not known) and WPE_BROWSER_DEBUG_VIDEO_CROP (crop|squash|park|auto; legacy WPEB_NO_CROP=1 -> squash).
+        const struct wpeb_video_plan plan =
+            wpeb_video_plan_compute(sw, sh, x, y, w, h, (int)t->width, (int)t->height, surface_h, t->video_crop_mode);
+        const int state = plan.action == WPEB_VIDEO_ACTION_CROP   ? 2
+                          : plan.action == WPEB_VIDEO_ACTION_PARK ? 4
+                          : plan.clipped                          ? 3
+                                                                  : 1;
+        const bool area_debug = getenv("WPE_BROWSER_DEBUG_MEDIA_AREA") != NULL;
+        const bool plan_changed = memcmp(&plan, &t->video_last_plan, sizeof(plan)) != 0;
+        if (state != t->video_place_state || (area_debug && plan_changed)) {
+            LOG("video place [%s]: req=(%d,%d %dx%d) surf=%ux%d(inset=%d) pic=%dx%d -> src=(%d,%d %dx%d) dst=(%d,%d %dx%d)",
+                wpeb_video_plan_label(&plan), x, y, w, h, t->width, surface_h,
+                surface_h > (int)t->height ? surface_h - (int)t->height : 0, plan.ow, plan.oh,
+                plan.sx, plan.sy, plan.sw, plan.sh, plan.dx, plan.dy, plan.dw, plan.dh);
+            t->video_place_state = state;
+            t->video_last_plan = plan;
         }
-        struct wl_region *org = crop ? wl_compositor_create_region(t->renderer->compositor) : NULL;
-        if (org) wl_region_add(org, 0, 0, picture_w, picture_h);
         struct wl_region *src = wl_compositor_create_region(t->renderer->compositor);
-        wl_region_add(src, crop ? cx : 0, crop ? cy : 0, crop ? cw : picture_w, crop ? ch : picture_h);
+        wl_region_add(src, plan.sx, plan.sy, plan.sw, plan.sh);
         struct wl_region *dst = wl_compositor_create_region(t->renderer->compositor);
-        wl_region_add(dst, dx, dy, dw, dh);
-        if (crop) {
+        wl_region_add(dst, plan.dx, plan.dy, plan.dw, plan.dh);
+        if (plan.action == WPEB_VIDEO_ACTION_CROP) {
+            struct wl_region *org = wl_compositor_create_region(t->renderer->compositor);
+            wl_region_add(org, 0, 0, plan.ow, plan.oh);
             wl_webos_exported_set_crop_region(t->video, org, src, dst);
             wl_region_destroy(org);
-        } else
-        wl_webos_exported_set_exported_window(t->video, src, dst);
+        } else {
+            wl_webos_exported_set_exported_window(t->video, src, dst);
+        }
         wl_region_destroy(src);
         wl_region_destroy(dst);
         clock_gettime(CLOCK_MONOTONIC, &g_video_commit_at);
