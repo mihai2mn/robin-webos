@@ -75,6 +75,13 @@ int main() {
         check(p.icon_for("https://a.example/page") == "https://a.example/icon.png", "https icon URL accepted");
         p.clear_history(0);
         check(p.icon_for("https://a.example/page").empty(), "clearing all history clears saved site icons");
+        p.add_bookmark("B", "https://www.b.example/home");
+        p.set_icon("https://b.example/x", "https://b.example/icon.png");
+        p.set_icon("https://c.example/x", "https://c.example/icon.png");
+        p.clear_history(0);
+        check(p.icon_for("https://b.example/y") == "https://b.example/icon.png", "a bookmarked site keeps its icon when history is cleared");
+        check(p.icon_for("https://c.example/x").empty(), "an unbookmarked site's icon is cleared with the history");
+        p.remove_bookmark("https://www.b.example/home");
         p.set_site_zoom("https://www.a.example/one", 3);  // restore zoom for persistence test below
         p.flush_now();
     }

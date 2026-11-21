@@ -70,6 +70,8 @@ bool is_http_url(const std::string &url) {
     return scheme == "http" || scheme == "https";
 }
 
+std::string icon_host(const std::string &url);  // defined with the icon lookups below
+
 }  // namespace
 
 const std::vector<SearchEngine> kSearchEngines = {
@@ -241,7 +243,11 @@ size_t Profile::clear_history(uint32_t seconds) {
         history_.clear();
         // The remembered zooms and icons name sites too: clearing all history forgets them (a time range cannot: they carry no time).
         if (!site_zooms_.empty()) { site_zooms_.clear(); dirty_ |= kZooms; }
-        if (!icons_.empty()) { icons_.clear(); dirty_ |= kIcons; }
+        // Bookmarked sites keep theirs: the bookmark tiles draw them, and they are not history.
+        for (auto it = icons_.begin(); it != icons_.end();) {
+            const bool marked = std::any_of(bookmarks_.begin(), bookmarks_.end(), [&](const Bookmark &b) { return icon_host(b.url) == it->first; });
+            if (marked) ++it; else { it = icons_.erase(it); dirty_ |= kIcons; }
+        }
     } else {
         const int64_t since = now_s() - seconds;
         history_.erase(std::remove_if(history_.begin(), history_.end(), [&](const HistoryEntry &h) { return h.time >= since; }),
