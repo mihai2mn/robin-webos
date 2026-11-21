@@ -744,11 +744,8 @@ void MediaServer::serve(int fd, uint64_t id) {
             u.packet.pts_us = h.pts_us;
             u.packet.data.assign(payload.begin(), payload.end());
             std::lock_guard<std::mutex> ql(qm);
-            constexpr size_t kMaxQueuedUnits = 512;
             u.generation = generation;
-            auto &q = queues[audio ? 1 : 0];
-            if (q.size() >= kMaxQueuedUnits) q.pop_front();
-            q.push_back(std::move(u));
+            queues[audio ? 1 : 0].push_back(std::move(u));
             qcv.notify_all();
             continue;
         }
@@ -792,11 +789,8 @@ void MediaServer::serve(int fd, uint64_t id) {
             u.packet.pts_us = INT64_MAX;
             u.eos = true;
             std::lock_guard<std::mutex> ql(qm);
-            constexpr size_t kMaxQueuedUnits = 512;
             u.generation = generation;
-            auto &q = queues[audio ? 1 : 0];
-            if (q.size() >= kMaxQueuedUnits) q.pop_front();
-            q.push_back(std::move(u));
+            queues[audio ? 1 : 0].push_back(std::move(u));
             qcv.notify_all();
             break;
         }
