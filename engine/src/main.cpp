@@ -617,7 +617,7 @@ constexpr const char *kScrollScript = R"JS((function () {
         var links = document.querySelectorAll('link[rel]');
         for (var i = 0; i < links.length; i++) {
             var l = links[i], rel = (l.getAttribute('rel') || '').toLowerCase(), href = l.href || '';
-            if (!href || href.indexOf('data:') === 0) continue;
+            if (!href || !/^https?:\/\//i.test(href)) continue;
             var touch = rel.indexOf('apple-touch-icon') >= 0, icon = /(^|\s)icon(\s|$)/.test(rel);
             if (!touch && !icon) continue;
             var type = (l.getAttribute('type') || '').toLowerCase(), path = href.split(/[?#]/)[0].toLowerCase();
@@ -791,7 +791,11 @@ gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision, W
 void on_icon_message(WebKitUserContentManager *, JSCValue *value, gpointer data)
 {
     gchar *url = jsc_value_to_string(value);
-    send_text(WPE_ENGINE_ICON, GPOINTER_TO_UINT(data), url ? url : "");
+    const char *safe = (url && (*url == '\0' || g_ascii_strncasecmp(url, "http://", 7) == 0 ||
+                                g_ascii_strncasecmp(url, "https://", 8) == 0))
+                           ? url
+                           : "";
+    send_text(WPE_ENGINE_ICON, GPOINTER_TO_UINT(data), safe);
     g_free(url);
 }
 

@@ -62,6 +62,14 @@ int64_t num(const nlohmann::json &j, const char *key) {
     return it != j.end() && it->is_number_integer() ? it->get<int64_t>() : 0;
 }
 
+bool is_http_url(const std::string &url) {
+    const size_t sep = url.find("://");
+    if (sep == std::string::npos || (sep != 4 && sep != 5)) return false;
+    std::string scheme = url.substr(0, sep);
+    for (char &c : scheme) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return scheme == "http" || scheme == "https";
+}
+
 }  // namespace
 
 const std::vector<SearchEngine> kSearchEngines = {
@@ -107,7 +115,7 @@ void Profile::load(const std::string &dir) {
     }
     if (auto j = parse(read_file(path(kIcons))); j.is_object()) {
         for (const auto &[host, url] : j.items())
-            if (url.is_string()) icons_[host] = url.get<std::string>();
+            if (url.is_string() && is_http_url(url.get<std::string>())) icons_[host] = url.get<std::string>();
     }
     if (auto j = parse(read_file(path(kZooms))); j.is_object()) {
         for (const auto &[raw_host, val] : j.items()) {
@@ -267,9 +275,9 @@ const std::string &Profile::icon_for(const std::string &url) const {
 
 void Profile::set_icon(const std::string &page_url, const std::string &icon_url) {
     const std::string host = icon_host(page_url);
-    if (host.empty() || page_url.rfind("http", 0) != 0) return;
+    if (host.empty() || !is_http_url(page_url)) return;
     auto it = icons_.find(host);
-    if (icon_url.empty()) return;  // a page without an icon link keeps what the site's other pages declared
+    if (icon_url.empty() || !is_http_url(icon_url)) return;  // only http(s) icons (prevents file:// reads)
     if (it != icons_.end() && it->second == icon_url) return;
     if (icons_.size() >= 500 && it == icons_.end()) icons_.erase(icons_.begin());
     icons_[host] = icon_url;
