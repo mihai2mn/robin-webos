@@ -84,11 +84,52 @@ def fetch(url):
 
 def condition(expr):
     """Evaluates a `!#if` expression: tokens, !, &&, ||, parentheses. Unknown tokens are false, as in uBO."""
-    py = re.sub(r"[A-Za-z_][\w]*", lambda m: str(TOKENS.get(m.group(0), False)), expr)
-    py = py.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
+    tokens = re.findall(r"&&|\|\||[()!]|[A-Za-z_]\w*|\S", expr)
+    pos = [0]
+
+    def peek():
+        return tokens[pos[0]] if pos[0] < len(tokens) else None
+
+    def parse_or():
+        val = parse_and()
+        while peek() == "||":
+            pos[0] += 1
+            rhs = parse_and()
+            val = val or rhs
+        return val
+
+    def parse_and():
+        val = parse_not()
+        while peek() == "&&":
+            pos[0] += 1
+            rhs = parse_not()
+            val = val and rhs
+        return val
+
+    def parse_not():
+        if peek() == "!":
+            pos[0] += 1
+            return not parse_not()
+        return parse_atom()
+
+    def parse_atom():
+        tok = peek()
+        if tok == "(":
+            pos[0] += 1
+            val = parse_or()
+            if peek() != ")":
+                raise ValueError("missing )")
+            pos[0] += 1
+            return val
+        if tok is not None and re.fullmatch(r"[A-Za-z_]\w*", tok):
+            pos[0] += 1
+            return bool(TOKENS.get(tok, False))
+        raise ValueError(f"unexpected token: {tok!r}")
+
     try:
-        return bool(eval(py, {"__builtins__": {}}, {}))
-    except Exception:
+        result = parse_or()
+        return result if pos[0] == len(tokens) else False
+    except ValueError:
         return False
 
 
@@ -145,6 +186,8 @@ def update_ubo(commit):
     tgz = fetch(f"https://codeload.github.com/gorhill/uBlock/tar.gz/{commit}")
     d = HERE / "ubo"
     shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True, exist_ok=True)
+    d_root = d.resolve()
     # All of src/js: the scriptlet modules import helpers from it (urlskip.js, ...).
     wanted = ("src/web_accessible_resources/", "src/js/", "LICENSE.txt")
     with tarfile.open(fileobj=io.BytesIO(tgz)) as tar:
@@ -152,7 +195,9 @@ def update_ubo(commit):
             rel = m.name.split("/", 1)[1] if "/" in m.name else ""
             if not m.isfile() or not rel.startswith(wanted):
                 continue
-            target = d / rel.removeprefix("src/")
+            target = (d / rel.removeprefix("src/")).resolve()
+            if not target.is_relative_to(d_root):
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(tar.extractfile(m).read())
     (d / "COMMIT").write_text(commit + "\n")
