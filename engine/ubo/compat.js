@@ -8,6 +8,11 @@
 // @media rules the page can read are rewritten, and the touch event API is hidden.
 (function wrenCompat(envelope) {
     'use strict';
+    // ManagedMediaSource: desktop Chrome has none, WebKit has it next to MediaSource, and players that prefer it (hls.js since 1.5) then attach\
+    // through a <source> CHILD of the video (and remove the page's own <source>) instead of video.src. Players written against Chrome keep\
+    // a reference to their first <source>, find it detached, and every seek that reloads the source (a click on a progress bar) ends on a\
+    // stale MediaSource with nothing feeding it (TV, 2026-11-21, a site's own player). MediaSource works as well, so the managed one is not offered.\
+    try { delete window.ManagedMediaSource; delete window.ManagedSourceBuffer; delete window.BufferedChangeEvent; } catch (e) {}
     // The engine (engine/src/main.cpp, add_hybrid_video) tells us where it keeps this file, so the same code also runs
     // in a build whose engine predates the hybrid video design (build/video/hybrid/DESIGN.md).
     const base = (window.__wrenCompatBase || '/adblock/').replace(/\/?$/, '/');
