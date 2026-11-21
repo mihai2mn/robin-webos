@@ -7,7 +7,9 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -22,6 +24,7 @@ namespace {
 constexpr const char *kCat = "profile";
 constexpr size_t kMaxHistory = 5000;
 constexpr size_t kMaxBookmarks = 1000;
+constexpr size_t kMaxSiteZooms = 500;
 constexpr double kFlushIntervalMs = 2000;
 
 int64_t now_s() { return static_cast<int64_t>(std::time(nullptr)); }
@@ -106,8 +109,18 @@ void Profile::load(const std::string &dir) {
         for (const auto &[host, url] : j.items())
             if (url.is_string()) icons_[host] = url.get<std::string>();
     }
-    WNK_LOGI(kCat, "profile %s: %zu bookmarks, %zu history entries, %zu session tabs", dir_.c_str(), bookmarks_.size(),
-             history_.size(), session_.size());
+    if (auto j = parse(read_file(path(kZooms))); j.is_object()) {
+        for (const auto &[raw_host, val] : j.items()) {
+            if (!val.is_number_integer()) continue;
+            const int permille = val.get<int>();
+            if (permille < 250 || permille > 5000) continue;
+            std::string host = site_host("https://" + raw_host);
+            if (host.empty()) continue;
+            site_zooms_[host] = kZoomLevels[static_cast<size_t>(zoom_index_for_permille(permille))];
+        }
+    }
+    WNK_LOGI(kCat, "profile %s: %zu bookmarks, %zu history entries, %zu session tabs, %zu site zooms", dir_.c_str(),
+             bookmarks_.size(), history_.size(), session_.size(), site_zooms_.size());
 }
 
 std::string Profile::path(unsigned part) const {
@@ -116,6 +129,7 @@ std::string Profile::path(unsigned part) const {
     case kBookmarks: return dir_ + "/bookmarks.json";
     case kHistory: return dir_ + "/history.json";
     case kIcons: return dir_ + "/icons.json";
+    case kZooms: return dir_ + "/zooms.json";
     default: return dir_ + "/session.json";
     }
 }
@@ -141,6 +155,10 @@ std::string Profile::serialize(unsigned part) const {
     case kIcons:
         j = nlohmann::json::object();
         for (const auto &[host, url] : icons_) j[host] = url;
+        break;
+    case kZooms:
+        j = nlohmann::json::object();
+        for (const auto &[host, permille] : site_zooms_) j[host] = permille;
         break;
     default:
         j = {{"active", session_active_}, {"tabs", nlohmann::json::array()}};
@@ -256,12 +274,90 @@ void Profile::set_icon(const std::string &page_url, const std::string &icon_url)
     dirty_ |= kIcons;
 }
 
+std::string site_host(const std::string &url) {
+    const size_t sep = url.find("://");
+    if (sep == std::string::npos) return {};
+    std::string scheme = url.substr(0, sep);
+    for (char &c : scheme) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (scheme != "http" && scheme != "https") return {};
+    const size_t auth_start = sep + 3;
+    const size_t auth_end = url.find_first_of("/?#", auth_start);
+    std::string auth = url.substr(auth_start, auth_end == std::string::npos ? std::string::npos : auth_end - auth_start);
+    if (const size_t at = auth.rfind('@'); at != std::string::npos) auth.erase(0, at + 1);
+    if (auth.empty()) return {};
+    std::string host;
+    if (auth.front() == '[') {
+        const size_t close = auth.find(']');
+        if (close == std::string::npos || close <= 1) return {};
+        host = auth.substr(0, close + 1);
+    } else {
+        const size_t colon = auth.find(':');
+        host = colon == std::string::npos ? auth : auth.substr(0, colon);
+    }
+    for (char &c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (host.rfind("www.", 0) == 0 && host.size() > 4) host.erase(0, 4);
+    return host;
+}
+
+int zoom_index_for_permille(int permille) {
+    int best = 0;
+    int best_diff = std::abs(kZoomLevels[0] - permille);
+    for (size_t i = 1; i < kZoomLevels.size(); ++i) {
+        const int diff = std::abs(kZoomLevels[i] - permille);
+        if (diff < best_diff) {
+            best_diff = diff;
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
+}
+
+bool Profile::has_site_zoom(const std::string &url) const {
+    const std::string host = site_host(url);
+    return !host.empty() && site_zooms_.find(host) != site_zooms_.end();
+}
+
+int Profile::zoom_for(const std::string &url) const {
+    const std::string host = site_host(url);
+    if (!host.empty()) {
+        if (const auto it = site_zooms_.find(host); it != site_zooms_.end())
+            return zoom_index_for_permille(it->second);
+    }
+    return std::clamp(settings.zoom, 0, static_cast<int>(kZoomLevels.size()) - 1);
+}
+
+int Profile::zoom_permille_for(const std::string &url) const {
+    return kZoomLevels[static_cast<size_t>(zoom_for(url))];
+}
+
+void Profile::set_site_zoom(const std::string &url, int zoom_index) {
+    const std::string host = site_host(url);
+    if (host.empty()) return;
+    const int idx = std::clamp(zoom_index, 0, static_cast<int>(kZoomLevels.size()) - 1);
+    const int def_idx = std::clamp(settings.zoom, 0, static_cast<int>(kZoomLevels.size()) - 1);
+    if (idx == def_idx) {
+        if (site_zooms_.erase(host) > 0) dirty_ |= kZooms;
+        return;
+    }
+    const int permille = kZoomLevels[static_cast<size_t>(idx)];
+    auto it = site_zooms_.find(host);
+    if (it != site_zooms_.end() && it->second == permille) return;
+    if (site_zooms_.size() >= kMaxSiteZooms && it == site_zooms_.end()) site_zooms_.erase(site_zooms_.begin());
+    site_zooms_[host] = permille;
+    dirty_ |= kZooms;
+}
+
+void Profile::clear_site_zoom(const std::string &url) {
+    const std::string host = site_host(url);
+    if (!host.empty() && site_zooms_.erase(host) > 0) dirty_ |= kZooms;
+}
+
 void Profile::flush(wnk::async::WorkerPool &pool, double now_ms) {
     if (dirty_ == 0 || dir_.empty() || now_ms - last_flush_ms_ < kFlushIntervalMs) return;
     last_flush_ms_ = now_ms;
     // Serialise here (main thread owns the data), write on a worker.
     std::vector<std::pair<std::string, std::string>> files;
-    for (unsigned part : {kSettings, kBookmarks, kHistory, kSession, kIcons}) {
+    for (unsigned part : {kSettings, kBookmarks, kHistory, kSession, kIcons, kZooms}) {
         if (dirty_ & part) files.emplace_back(path(part), serialize(part));
     }
     dirty_ = 0;
@@ -274,7 +370,7 @@ void Profile::flush(wnk::async::WorkerPool &pool, double now_ms) {
 
 void Profile::flush_now() {
     if (dir_.empty()) return;
-    for (unsigned part : {kSettings, kBookmarks, kHistory, kSession, kIcons}) {
+    for (unsigned part : {kSettings, kBookmarks, kHistory, kSession, kIcons, kZooms}) {
         if ((dirty_ & part) && !write_atomic(path(part), serialize(part)))
             WNK_LOGW(kCat, "could not save %s", path(part).c_str());
     }

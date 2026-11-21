@@ -948,7 +948,7 @@ void SidePanel::fill(Ui &ui) {
         break;
     }
     case Section::Zoom: {
-        caption("PAGE", "Zoom", "Makes every page larger or smaller");
+        caption("PAGE", "Zoom", h_.zoom_scope ? h_.zoom_scope() : "Remembered per site");
         auto &row = body_->add<wnk::ui::Row>(18);
         row.set_padding({0, 12, 0, 0});
         row.add<GlassButton>("", "−", [this](Ui &) { h_.zoom(-1); refresh_zoom(); }, 84).accessible_label = "Zoom out";
@@ -1052,7 +1052,10 @@ void QuickActions::draw(Ui &ui) {
     r.fill_rect(zoom, ui.fade(kWhite.with_alpha(0.06f)), 30);
     r.stroke_rect(zoom, ui.fade(kWhite.with_alpha(0.10f)), 1.5f, 30);
     const TextStyle cap = style(fonts().semibold, 18, ui.fade(kSoft));
-    r.draw_text(cap, {zoom.x + 30, baseline(r, cap, zoom)}, "PAGE ZOOM");
+    const std::string host = url_.empty() ? std::string() : host_of(url_);
+    const std::string zlabel = host.empty() ? "DEFAULT ZOOM" : "SITE ZOOM · " + host;
+    const float max_zw = std::max(0.0f, zoom_row_->frame().x - (zoom.x + 30) - 24);
+    r.draw_text(cap, {zoom.x + 30, baseline(r, cap, zoom)}, ellipsize(r, cap, zlabel, max_zw));
 }
 
 }  // namespace browser::wren

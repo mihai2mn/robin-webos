@@ -223,6 +223,7 @@ struct PanelHandlers {
     std::function<void(wnk::ui::Ui &)> history_page, bookmarks_page, settings, exit;
     std::function<void(int delta)> zoom;        // -1 / +1 step
     std::function<std::string()> zoom_text;     // "110%"
+    std::function<std::string()> zoom_scope;    // "Remembered for example.org" or default
 };
 
 class SidePanel : public Overlay {
