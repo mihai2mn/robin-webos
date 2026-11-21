@@ -246,17 +246,16 @@ static void exec_engine64(const char *app, int argc, char **argv)
         const char *slash = strrchr(app, '/');
         char dir[PATHBUF], link[PATHBUF], cur[PATHBUF];
         if (slash && join(dir, sizeof dir, "/tmp/", slash + 1) == 0 && join(link, sizeof link, dir, "/ld-linux-aarch64.so.1") == 0) {
-            mkdir(dir, 0755);
+            mkdir(dir, 0700);
             ssize_t n = readlink(link, cur, sizeof cur - 1);
             /* A link that names the right file but whose target is gone (the app folder was reinstalled elsewhere)
              * is dangling: access() follows it, so it counts as wrong too. */
             if (n < 0 || (size_t)n != strlen(loader) || strncmp(cur, loader, (size_t)n) != 0 || access(link, X_OK) != 0) {
                 unlink(link);
                 if (symlink(loader, link) != 0) {
-                    /* The folder belongs to another user (a root shell once ran the app), so it cannot be fixed from here. */
-                    note(access(link, X_OK) == 0 ? "warning: cannot update the aarch64 loader link (the folder is not ours), keeping it"
-                                                 : "warning: cannot link the aarch64 loader, using the 32-bit engine", link);
-                    if (access(link, X_OK) != 0) return;
+                    /* Refuse to execute helpers through an unverified foreign loader symlink. */
+                    note("warning: cannot link the aarch64 loader, using the 32-bit engine", link);
+                    return;
                 }
             }
         }
