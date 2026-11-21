@@ -1,0 +1,1865 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] upstream: carry webkitglib/2.54 queue after 2.54.3 (c01fbd906..9715f4680)
+
+Upstream has not cut a wpewebkit-2.54.4.tar.xz release tarball yet, so the
+Buildroot recipe stays on wpewebkit-2.54.3.tar.xz and carries the 21 commits
+queued on origin/webkitglib/2.54 (c01fbd906b1f..9715f4680a3e, 2026-11-17 to
+2026-11-21) filtered to the 58 Source/ files present in the WPE tarball
+(excluding GTK-only files and LayoutTests/TestWebKitAPI not shipped in the
+tarball). Key fixes included: SharedWorker top-origin validation (b/323227),
+JSON module MIME-type security check (b/322522), CSP embed/object redirect
+checks (b/311521), WebFrameProxy/WebProcessProxy fixes (b/328933), accelerated
+opacity transition in RenderLayer (b/329736), WebGL context creation error
+re-entrancy (b/324896), WritableStreamSink/TransformStream fixes (b/320102,
+b/323097, b/323098), GLFenceEGL/GLFenceGL already-signaled fast path (b/332147),
+WPEWebViewPlatform gamepad focus lookup (b/330905), RemoteInspectorClient
+assertion removal (b/331126), and WebKitWebContext automation-session detach on
+dispose (b/332446). Drop this patch when moving the series to an official
+wpewebkit-2.54.4.tar.xz release.
+---
+diff --git a/Source/WebCore/Modules/compression/CompressionStream.js b/Source/WebCore/Modules/compression/CompressionStream.js
+index d25c2d62..8ab18361 100644
+--- a/Source/WebCore/Modules/compression/CompressionStream.js
++++ b/Source/WebCore/Modules/compression/CompressionStream.js
+@@ -84,7 +84,10 @@ function initializeCompressionStream(format)
+         return @promiseResolve(@Promise, @undefined);
+     };
+ 
+-    const [transform, readable, writable] = @createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm);
++    const streams = @createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm);
++    const transform = streams[0];
++    const readable = streams[1];
++    const writable = streams[2];
+     @putByIdDirectPrivate(this, "CompressionStreamTransform", transform);
+     @putByIdDirectPrivate(this, "readable", readable);
+     @putByIdDirectPrivate(this, "writable", writable);
+diff --git a/Source/WebCore/Modules/compression/DecompressionStream.js b/Source/WebCore/Modules/compression/DecompressionStream.js
+index 13d899f8..e088a2aa 100644
+--- a/Source/WebCore/Modules/compression/DecompressionStream.js
++++ b/Source/WebCore/Modules/compression/DecompressionStream.js
+@@ -86,7 +86,10 @@ function initializeDecompressionStream(format)
+         return @promiseResolve(@Promise, @undefined);
+     };
+ 
+-    const [transform, readable, writable] = @createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm);
++    const streams = @createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm);
++    const transform = streams[0];
++    const readable = streams[1];
++    const writable = streams[2];
+     @putByIdDirectPrivate(this, "DecompressionStreamTransform", transform);
+     @putByIdDirectPrivate(this, "readable", readable);
+     @putByIdDirectPrivate(this, "writable", writable);
+diff --git a/Source/WebCore/Modules/filesystem/FileSystemFileHandle.cpp b/Source/WebCore/Modules/filesystem/FileSystemFileHandle.cpp
+index bc6e78f2..afc78bd4 100644
+--- a/Source/WebCore/Modules/filesystem/FileSystemFileHandle.cpp
++++ b/Source/WebCore/Modules/filesystem/FileSystemFileHandle.cpp
+@@ -193,11 +193,14 @@ void FileSystemFileHandle::createWritable(const CreateWritableOptions& options,
+     });
+ }
+ 
+-void FileSystemFileHandle::closeWritable(FileSystemWritableFileStreamIdentifier streamIdentifier, FileSystemWriteCloseReason reason)
++void FileSystemFileHandle::closeWritable(FileSystemWritableFileStreamIdentifier streamIdentifier, FileSystemWriteCloseReason reason, FileSystemStorageConnection::VoidCallback&& completionHandler)
+ {
+-    connection().unregisterFileSystemWritable(streamIdentifier);
+-    if (!isClosed())
+-        connection().closeWritable(identifier(), streamIdentifier, reason, [](auto) { });
++    Ref connection = this->connection();
++    connection->unregisterFileSystemWritable(streamIdentifier);
++    if (isClosed())
++        return completionHandler(Exception { ExceptionCode::InvalidStateError, "Handle is closed"_s });
++
++    connection->closeWritable(identifier(), streamIdentifier, reason, WTF::move(completionHandler));
+ }
+ 
+ void FileSystemFileHandle::executeCommandForWritable(FileSystemWritableFileStreamIdentifier streamIdentifier, FileSystemWriteCommandType type, std::optional<uint64_t> position, std::optional<uint64_t> size, std::span<const uint8_t> dataBytes, bool hasDataError, DOMPromiseDeferred<void>&& promise)
+diff --git a/Source/WebCore/Modules/filesystem/FileSystemFileHandle.h b/Source/WebCore/Modules/filesystem/FileSystemFileHandle.h
+index 0f7b3db7..e291c600 100644
+--- a/Source/WebCore/Modules/filesystem/FileSystemFileHandle.h
++++ b/Source/WebCore/Modules/filesystem/FileSystemFileHandle.h
+@@ -56,7 +56,7 @@ public:
+     };
+     void createWritable(const CreateWritableOptions&, DOMPromiseDeferred<IDLInterface<FileSystemWritableFileStream>>&&);
+ 
+-    void closeWritable(FileSystemWritableFileStreamIdentifier, FileSystemWriteCloseReason);
++    void closeWritable(FileSystemWritableFileStreamIdentifier, FileSystemWriteCloseReason, FileSystemStorageConnection::VoidCallback&& = [](auto&&) { });
+     void executeCommandForWritable(FileSystemWritableFileStreamIdentifier, FileSystemWriteCommandType, std::optional<uint64_t> position, std::optional<uint64_t> size, std::span<const uint8_t> dataBytes, bool hasDataError, DOMPromiseDeferred<void>&&);
+ 
+ private:
+diff --git a/Source/WebCore/Modules/filesystem/FileSystemWritableFileStreamSink.cpp b/Source/WebCore/Modules/filesystem/FileSystemWritableFileStreamSink.cpp
+index 2fed46c0..1779435f 100644
+--- a/Source/WebCore/Modules/filesystem/FileSystemWritableFileStreamSink.cpp
++++ b/Source/WebCore/Modules/filesystem/FileSystemWritableFileStreamSink.cpp
+@@ -183,12 +183,14 @@ void FileSystemWritableFileStreamSink::write(ScriptExecutionContext& context, JS
+     }
+ }
+ 
+-void FileSystemWritableFileStreamSink::close(JSDOMGlobalObject&)
++void FileSystemWritableFileStreamSink::close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&& promise)
+ {
+     ASSERT(!m_isClosed);
+ 
+     m_isClosed = true;
+-    protect(m_source)->closeWritable(m_identifier, FileSystemWriteCloseReason::Completed);
++    protect(m_source)->closeWritable(m_identifier, FileSystemWriteCloseReason::Completed, [promise = WTF::move(promise)](auto&& result) mutable {
++        promise.settle(WTF::move(result));
++    });
+ }
+ 
+ void FileSystemWritableFileStreamSink::abort(JSDOMGlobalObject&, JSC::JSValue, DOMPromiseDeferred<void>&& promise)
+diff --git a/Source/WebCore/Modules/filesystem/FileSystemWritableFileStreamSink.h b/Source/WebCore/Modules/filesystem/FileSystemWritableFileStreamSink.h
+index 4a398b93..a86e9ac7 100644
+--- a/Source/WebCore/Modules/filesystem/FileSystemWritableFileStreamSink.h
++++ b/Source/WebCore/Modules/filesystem/FileSystemWritableFileStreamSink.h
+@@ -41,7 +41,7 @@ private:
+ 
+     // WritableStreamSink
+     void write(ScriptExecutionContext&, JSC::JSValue, DOMPromiseDeferred<void>&&) final;
+-    void close(JSDOMGlobalObject&) final;
++    void close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&&) final;
+     void abort(JSDOMGlobalObject&, JSC::JSValue, DOMPromiseDeferred<void>&&) final;
+ 
+     FileSystemWritableFileStreamIdentifier m_identifier;
+diff --git a/Source/WebCore/Modules/mediastream/VideoTrackGenerator.cpp b/Source/WebCore/Modules/mediastream/VideoTrackGenerator.cpp
+index e4c26b0c..9d417034 100644
+--- a/Source/WebCore/Modules/mediastream/VideoTrackGenerator.cpp
++++ b/Source/WebCore/Modules/mediastream/VideoTrackGenerator.cpp
+@@ -209,17 +209,17 @@ void VideoTrackGenerator::Sink::write(ScriptExecutionContext&, JSC::JSValue valu
+     promise.resolve();
+ }
+ 
+-void VideoTrackGenerator::Sink::close(JSDOMGlobalObject&)
++void VideoTrackGenerator::Sink::close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&& promise)
+ {
+     callOnMainThread([source = m_source] {
+         source->endImmediatly();
+     });
++    promise.resolve();
+ }
+ 
+ void VideoTrackGenerator::Sink::abort(JSDOMGlobalObject& globalObject, JSC::JSValue, DOMPromiseDeferred<void>&& promise)
+ {
+-    close(globalObject);
+-    promise.resolve();
++    close(globalObject, WTF::move(promise));
+ }
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/Modules/mediastream/VideoTrackGenerator.h b/Source/WebCore/Modules/mediastream/VideoTrackGenerator.h
+index 513496df..eb953d30 100644
+--- a/Source/WebCore/Modules/mediastream/VideoTrackGenerator.h
++++ b/Source/WebCore/Modules/mediastream/VideoTrackGenerator.h
+@@ -90,7 +90,7 @@ private:
+         explicit Sink(Ref<Source>&&);
+ 
+         void write(ScriptExecutionContext&, JSC::JSValue, DOMPromiseDeferred<void>&&) final;
+-        void close(JSDOMGlobalObject&) final;
++        void close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&&) final;
+         void abort(JSDOMGlobalObject&, JSC::JSValue, DOMPromiseDeferred<void>&&) final;
+ 
+         bool m_muted { false };
+diff --git a/Source/WebCore/Modules/streams/ReadableStreamInternals.js b/Source/WebCore/Modules/streams/ReadableStreamInternals.js
+index 37d0f866..d8c3db11 100644
+--- a/Source/WebCore/Modules/streams/ReadableStreamInternals.js
++++ b/Source/WebCore/Modules/streams/ReadableStreamInternals.js
+@@ -249,7 +249,9 @@ function readableStreamTee(stream, shouldClone)
+ 
+     const reader = @acquireReadableStreamDefaultReader(stream);
+ 
++    // We set __proto__ to null so property assignments can never hit an Object.prototype setter installed by page script.
+     const teeState = {
++        __proto__: null,
+         stream: stream,
+         canceled1: false,
+         canceled2: false,
+diff --git a/Source/WebCore/Modules/streams/StreamTransferUtilities.cpp b/Source/WebCore/Modules/streams/StreamTransferUtilities.cpp
+index bd9cec40..c1592341 100644
+--- a/Source/WebCore/Modules/streams/StreamTransferUtilities.cpp
++++ b/Source/WebCore/Modules/streams/StreamTransferUtilities.cpp
+@@ -342,10 +342,11 @@ private:
+             promise.resolve();
+         });
+     }
+-    void close(JSDOMGlobalObject& globalObject) final
++    void close(JSDOMGlobalObject& globalObject, DOMPromiseDeferred<void>&& promise) final
+     {
+         packAndPostMessage(globalObject, m_port, "close"_s, JSC::jsUndefined());
+         m_port->close();
++        promise.resolve();
+     }
+     void abort(JSDOMGlobalObject& globalObject, JSC::JSValue reason, DOMPromiseDeferred<void>&& promise) final
+     {
+diff --git a/Source/WebCore/Modules/streams/TransformStream.cpp b/Source/WebCore/Modules/streams/TransformStream.cpp
+index 3694d6c2..0ee9b292 100644
+--- a/Source/WebCore/Modules/streams/TransformStream.cpp
++++ b/Source/WebCore/Modules/streams/TransformStream.cpp
+@@ -27,7 +27,7 @@
+ #include "TransformStream.h"
+ 
+ #include "JSDOMConvertObject.h"
+-#include "JSDOMConvertSequences.h"
++#include "JSDOMBindingFacade.h"
+ #include "JSReadableStream.h"
+ #include "JSTransformStream.h"
+ #include "JSValueInWrappedObjectInlines.h"
+@@ -161,14 +161,13 @@ ExceptionOr<CreateInternalTransformStreamResult> createInternalTransformStream(J
+     JSC::VM& vm = globalObject.vm();
+     auto scope = DECLARE_THROW_SCOPE(vm);
+ 
+-    auto resultsConversionResult = convert<IDLSequence<IDLObject>>(globalObject, result.returnValue());
+-    if (resultsConversionResult.hasException(scope)) [[unlikely]]
+-        return Exception { ExceptionCode::ExistingExceptionError };
+-
+-    auto results = resultsConversionResult.releaseReturnValue();
+-    if (results.size() != 3) [[unlikely]]
+-        return Exception { ExceptionCode::TypeError, "Internal TransformStream creation returned an unexpected number of values"_s };
++    // convert<IDLSequence> is using Array.prototype[Symbol.iterator], which the page script can override.
++    auto resultArray = getInternalBuiltinResultObjects<3>(globalObject, result.returnValue());
++    RETURN_IF_EXCEPTION(scope, Exception { ExceptionCode::ExistingExceptionError });
++    if (!resultArray) [[unlikely]]
++        return Exception { ExceptionCode::TypeError, "Internal TransformStream creation returned an unexpected result"_s };
+ 
++    auto results = *resultArray;
+     auto* readable = dynamicDowncast<JSReadableStream>(results[1].get());
+     auto* writable = dynamicDowncast<JSWritableStream>(results[2].get());
+     if (!readable || !writable) [[unlikely]]
+diff --git a/Source/WebCore/Modules/streams/TransformStreamInternals.js b/Source/WebCore/Modules/streams/TransformStreamInternals.js
+index 35f7d519..b20d51d6 100644
+--- a/Source/WebCore/Modules/streams/TransformStreamInternals.js
++++ b/Source/WebCore/Modules/streams/TransformStreamInternals.js
+@@ -50,7 +50,8 @@ function createInternalTransformStreamFromTransformer(transformer, writableStrat
+     if (writableStrategy === @undefined)
+         writableStrategy = { };
+ 
+-    let transformerDict = { };
++    // We set __proto__ to null so property assignments can never hit an Object.prototype setter installed by page script.
++    let transformerDict = { __proto__: null };
+     if (transformer !== null) {
+         if ("start" in transformer) {
+             transformerDict["start"] = transformer["start"];
+@@ -82,7 +83,7 @@ function createInternalTransformStreamFromTransformer(transformer, writableStrat
+ 
+     const internalTransformStream = {};
+     const startPromiseCapability = @newPromiseCapability(@Promise);
+-    const [readable, writable] = @initializeTransformStream(internalTransformStream, startPromiseCapability.promise, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm);
++    const streams = @initializeTransformStream(internalTransformStream, startPromiseCapability.promise, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm);
+     @setUpTransformStreamDefaultControllerFromTransformer(internalTransformStream, transformer, transformerDict);
+ 
+     if ("start" in transformerDict) {
+@@ -97,7 +98,7 @@ function createInternalTransformStreamFromTransformer(transformer, writableStrat
+     } else
+         startPromiseCapability.resolve.@call();
+ 
+-    return [internalTransformStream, readable, writable];
++    return [internalTransformStream, streams[0], streams[1]];
+ }
+ 
+ function createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm)
+@@ -115,7 +116,7 @@ function createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorith
+ 
+     const stream = {};
+     const startPromiseCapability = @newPromiseCapability(@Promise);
+-    const [readable, writable] = @initializeTransformStream(stream, startPromiseCapability.promise, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm);
++    const streams = @initializeTransformStream(stream, startPromiseCapability.promise, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm);
+ 
+     const controller = new @TransformStreamDefaultController(@isTransformStream);
+     @setUpTransformStreamDefaultController(stream, controller, transformAlgorithm, flushAlgorithm);
+@@ -126,7 +127,7 @@ function createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorith
+         startPromiseCapability.reject.@call(@undefined, error);
+     });
+ 
+-    return [stream, readable, writable];
++    return [stream, streams[0], streams[1]];
+ }
+ 
+ function initializeTransformStream(stream, startPromise, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm)
+diff --git a/Source/WebCore/Modules/streams/WritableStreamInternals.js b/Source/WebCore/Modules/streams/WritableStreamInternals.js
+index 3aef55f8..e69400f3 100644
+--- a/Source/WebCore/Modules/streams/WritableStreamInternals.js
++++ b/Source/WebCore/Modules/streams/WritableStreamInternals.js
+@@ -80,7 +80,8 @@ function createInternalWritableStreamFromUnderlyingSink(underlyingSink, strategy
+     const sizeAlgorithm = @extractSizeAlgorithm(strategy);
+     const highWaterMark = @extractHighWaterMark(strategy, 1);
+ 
+-    const underlyingSinkDict = { };
++    // We set __proto__ to null so property assignments can never hit an Object.prototype setter installed by page script.
++    const underlyingSinkDict = { __proto__: null };
+     if ("start" in underlyingSink) {
+         underlyingSinkDict["start"] = underlyingSink["start"];
+         if (typeof underlyingSinkDict["start"] !== "function")
+diff --git a/Source/WebCore/Modules/streams/WritableStreamSink.cpp b/Source/WebCore/Modules/streams/WritableStreamSink.cpp
+index b57ab49c..125bba09 100644
+--- a/Source/WebCore/Modules/streams/WritableStreamSink.cpp
++++ b/Source/WebCore/Modules/streams/WritableStreamSink.cpp
+@@ -27,6 +27,8 @@
+ #include "config.h"
+ #include "WritableStreamSink.h"
+ 
++#include "AbortSignal.h"
++#include "JSAbortSignal.h"
+ #include "JSDOMPromiseDeferred.h"
+ #include "JSWritableStreamDefaultController.h"
+ #include "JSWritableStreamSink.h"
+@@ -52,12 +54,25 @@ public:
+ 
+     void errorIfNeeded(JSC::JSGlobalObject&, JSC::JSValue);
+     JSWritableStreamDefaultController* NODELETE jsController() { return m_jsController; }
++    RefPtr<AbortSignal> signal() const;
+ 
+ private:
+     // The owner of WritableStreamDefaultController is responsible to keep uncollected the JSWritableStreamDefaultController.
+     JSWritableStreamDefaultController* m_jsController { nullptr };
+ };
+ 
++RefPtr<AbortSignal> WritableStreamDefaultController::signal() const
++{
++    if (!m_jsController)
++        return nullptr;
++
++    Ref vm = m_jsController->vm();
++    JSC::JSLockHolder lock(vm.get());
++    auto signalValue = m_jsController->getDirect(vm, builtinNames(vm.get()).signalPrivateName());
++    auto* jsSignal = dynamicDowncast<JSAbortSignal>(signalValue);
++    return jsSignal ? RefPtr { &jsSignal->wrapped() } : nullptr;
++}
++
+ static bool invokeWritableStreamDefaultControllerFunction(JSC::JSGlobalObject& lexicalGlobalObject, const JSC::Identifier& identifier, const JSC::MarkedArgumentBuffer& arguments)
+ {
+     JSC::VM& vm = lexicalGlobalObject.vm();
+@@ -87,6 +102,11 @@ void WritableStreamSink::start(std::unique_ptr<WritableStreamDefaultController>&
+     m_controller = WTF::move(controller);
+ }
+ 
++RefPtr<AbortSignal> WritableStreamSink::abortSignal() const
++{
++    return m_controller ? m_controller->signal() : nullptr;
++}
++
+ void WritableStreamSink::errorIfNeeded(JSC::JSGlobalObject& globalObject, JSC::JSValue error)
+ {
+     Ref vm = globalObject.vm();
+@@ -113,6 +133,11 @@ void SimpleWritableStreamSink::write(ScriptExecutionContext& context, JSC::JSVal
+     promise.settle(m_writeCallback(context, value));
+ }
+ 
++void SimpleWritableStreamSink::close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&& promise)
++{
++    promise.resolve();
++}
++
+ JSC::JSValue JSWritableStreamSink::start(JSC::JSGlobalObject& globalObject, JSC::CallFrame& callFrame)
+ {
+     Ref vm = globalObject.vm();
+diff --git a/Source/WebCore/Modules/streams/WritableStreamSink.h b/Source/WebCore/Modules/streams/WritableStreamSink.h
+index b960d6a8..d1e2e40e 100644
+--- a/Source/WebCore/Modules/streams/WritableStreamSink.h
++++ b/Source/WebCore/Modules/streams/WritableStreamSink.h
+@@ -39,6 +39,7 @@ class JSGlobalObject;
+ 
+ namespace WebCore {
+ 
++class AbortSignal;
+ class JSDOMGlobalObject;
+ class ScriptExecutionContext;
+ template<typename> class ExceptionOr;
+@@ -49,9 +50,9 @@ class WritableStreamSink : public RefCounted<WritableStreamSink> {
+ public:
+     virtual ~WritableStreamSink();
+ 
+-    void start(std::unique_ptr<WritableStreamDefaultController>&&);
++    virtual void start(std::unique_ptr<WritableStreamDefaultController>&&);
+     virtual void write(ScriptExecutionContext&, JSC::JSValue, DOMPromiseDeferred<void>&&) = 0;
+-    virtual void close(JSDOMGlobalObject&) = 0;
++    virtual void close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&&) = 0;
+     virtual void abort(JSDOMGlobalObject&, JSC::JSValue, DOMPromiseDeferred<void>&&);
+ 
+     void errorIfNeeded(JSC::JSGlobalObject&, JSC::JSValue);
+@@ -59,6 +60,10 @@ public:
+ protected:
+     WritableStreamSink();
+ 
++    // The AbortSignal owned by the associated WritableStreamDefaultController, if any.
++    // Fired synchronously when the stream is aborted, before the abort algorithm runs.
++    RefPtr<AbortSignal> abortSignal() const;
++
+ private:
+     std::unique_ptr<WritableStreamDefaultController> m_controller;
+ };
+@@ -72,7 +77,7 @@ private:
+     explicit SimpleWritableStreamSink(WriteCallback&&);
+ 
+     void write(ScriptExecutionContext&, JSC::JSValue, DOMPromiseDeferred<void>&&) final;
+-    void close(JSDOMGlobalObject&) final { }
++    void close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&&) final;
+ 
+     WriteCallback m_writeCallback;
+ };
+diff --git a/Source/WebCore/Modules/streams/WritableStreamSink.idl b/Source/WebCore/Modules/streams/WritableStreamSink.idl
+index 6a13d470..bea83d94 100644
+--- a/Source/WebCore/Modules/streams/WritableStreamSink.idl
++++ b/Source/WebCore/Modules/streams/WritableStreamSink.idl
+@@ -30,7 +30,7 @@
+ ] interface WritableStreamSink {
+     [Custom] undefined start(WritableStreamDefaultController controller);
+     [CallWith=CurrentScriptExecutionContext] Promise<undefined> write(any value);
+-    [CallWith=CurrentGlobalObject] undefined close();
++    [CallWith=CurrentGlobalObject] Promise<undefined> close();
+     [CallWith=CurrentGlobalObject] Promise<undefined> abort(any reason);
+ 
+     // Place holder to keep the controller linked to the source.
+diff --git a/Source/WebCore/Modules/webtransport/DatagramSink.cpp b/Source/WebCore/Modules/webtransport/DatagramSink.cpp
+index fb3a700e..6412441d 100644
+--- a/Source/WebCore/Modules/webtransport/DatagramSink.cpp
++++ b/Source/WebCore/Modules/webtransport/DatagramSink.cpp
+@@ -85,4 +85,10 @@ void DatagramSink::write(ScriptExecutionContext& context, JSC::JSValue value, DO
+     });
+ }
+ 
++void DatagramSink::close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&& promise)
++{
++    m_isClosed = true;
++    promise.resolve();
++}
++
+ }
+diff --git a/Source/WebCore/Modules/webtransport/DatagramSink.h b/Source/WebCore/Modules/webtransport/DatagramSink.h
+index 9e1ef077..b475d2ff 100644
+--- a/Source/WebCore/Modules/webtransport/DatagramSink.h
++++ b/Source/WebCore/Modules/webtransport/DatagramSink.h
+@@ -45,7 +45,7 @@ private:
+     DatagramSink(WebTransportSession*);
+ 
+     void write(ScriptExecutionContext&, JSC::JSValue, DOMPromiseDeferred<void>&&) final;
+-    void close(JSDOMGlobalObject&) final { m_isClosed = true; }
++    void close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&&) final;
+ 
+     ThreadSafeWeakPtr<WebTransportSession> m_session;
+     WeakPtr<WebTransportDatagramsWritable> m_datagrams;
+diff --git a/Source/WebCore/Modules/webtransport/WebTransportSendStreamSink.cpp b/Source/WebCore/Modules/webtransport/WebTransportSendStreamSink.cpp
+index bd122061..1210e742 100644
+--- a/Source/WebCore/Modules/webtransport/WebTransportSendStreamSink.cpp
++++ b/Source/WebCore/Modules/webtransport/WebTransportSendStreamSink.cpp
+@@ -26,6 +26,8 @@
+ #include "config.h"
+ #include "WebTransportSendStreamSink.h"
+ 
++#include "AbortSignal.h"
++#include "EventLoop.h"
+ #include "Exception.h"
+ #include "IDLTypes.h"
+ #include "JSDOMConvertBufferSource.h"
+@@ -50,7 +52,26 @@ WebTransportSendStreamSink::WebTransportSendStreamSink(WebTransport& transport,
+ {
+ }
+ 
+-WebTransportSendStreamSink::~WebTransportSendStreamSink() = default;
++WebTransportSendStreamSink::~WebTransportSendStreamSink()
++{
++    if (m_abortSignal && m_abortAlgorithmIdentifier)
++        protect(m_abortSignal)->removeAlgorithm(*m_abortAlgorithmIdentifier);
++}
++
++void WebTransportSendStreamSink::start(std::unique_ptr<WritableStreamDefaultController>&& controller)
++{
++    WritableStreamSink::start(WTF::move(controller));
++
++    // The abort signal fires synchronously during writer.abort(), before the abort() algorithm runs,
++    // so observing it is the only way to cancel an in-flight close().
++    if (RefPtr signal = abortSignal()) {
++        m_abortAlgorithmIdentifier = signal->addAlgorithm([weakThis = WeakPtr { *this }](JSC::JSValue reason) {
++            if (RefPtr protectedThis = weakThis.get())
++                protectedThis->cancel(reason);
++        });
++        m_abortSignal = WTF::move(signal);
++    }
++}
+ 
+ RefPtr<WritableStream> WebTransportSendStreamSink::stream() const
+ {
+@@ -108,32 +129,72 @@ void WebTransportSendStreamSink::write(ScriptExecutionContext& context, JSC::JSV
+     });
+ }
+ 
+-void WebTransportSendStreamSink::close(JSDOMGlobalObject&)
++// https://w3c.github.io/webtransport/#webtransportsendstream-close
++void WebTransportSendStreamSink::close(JSDOMGlobalObject& globalObject, DOMPromiseDeferred<void>&& promise)
+ {
+-    if (m_isClosed)
+-        return;
++    if (m_isClosed || m_isCancelled)
++        return promise.reject(Exception { ExceptionCode::InvalidStateError });
+     m_isClosed = true;
+ 
+-    if (RefPtr transport = m_transport.get()) {
+-        if (RefPtr session = transport->session())
+-            session->streamSendBytes(m_identifier, { }, true);
+-        transport->sendStreamClosed(m_identifier);
+-    }
++    RefPtr context = globalObject.scriptExecutionContext();
++    if (!context)
++        return promise.reject(Exception { ExceptionCode::InvalidStateError });
++
++    m_closeDeferred = makeUnique<DOMPromiseDeferred<void>>(WTF::move(promise));
++
++    // Defer the FIN so a racing abort() can suppress it and reset the stream instead.
++    // FIXME: Validate this abort-after-close behavior. https://bugs.webkit.org/show_bug.cgi?id=320232
++    protect(context->eventLoop())->queueTask(TaskSource::Networking, [protectedThis = Ref { *this }, context = Ref { *context }] {
++        protectedThis->sendFin(context.get());
++    });
+ }
+ 
+-void WebTransportSendStreamSink::abort(JSDOMGlobalObject&, JSC::JSValue value, DOMPromiseDeferred<void>&& promise)
++void WebTransportSendStreamSink::sendFin(ScriptExecutionContext& context)
+ {
+-    auto scope = makeScopeExit([&promise] {
+-        promise.resolve();
++    if (m_isCancelled || !m_closeDeferred)
++        return;
++
++    RefPtr transport = m_transport.get();
++    RefPtr session = transport ? transport->session() : nullptr;
++    if (!transport || !session)
++        return std::exchange(m_closeDeferred, nullptr)->reject(Exception { ExceptionCode::InvalidStateError });
++
++    transport->sendStreamClosed(m_identifier);
++    context.enqueueTaskWhenSettled(session->streamSendBytes(m_identifier, { }, true), TaskSource::Networking, [protectedThis = Ref { *this }] (auto&& exception) mutable {
++        auto deferred = std::exchange(protectedThis->m_closeDeferred, nullptr);
++        if (!deferred)
++            return;
++        if (!exception)
++            return deferred->reject(Exception { ExceptionCode::NetworkError });
++        if (*exception)
++            return deferred->reject(WTF::move(**exception));
++        deferred->resolve();
+     });
++}
+ 
++void WebTransportSendStreamSink::abort(JSDOMGlobalObject&, JSC::JSValue reason, DOMPromiseDeferred<void>&& promise)
++{
++    cancel(reason);
++    promise.resolve();
++}
++
++void WebTransportSendStreamSink::cancel(JSC::JSValue reason)
++{
+     if (m_isCancelled)
+         return;
+     m_isCancelled = true;
+ 
++    // Reject an in-flight close() so its promise rejects rather than resolving after the FIN.
++    if (auto deferred = std::exchange(m_closeDeferred, nullptr)) {
++        deferred->rejectWithCallback([reason](JSDOMGlobalObject&) {
++            return reason;
++        });
++    }
++
+     RefPtr transport = m_transport.get();
+     if (!transport)
+         return;
++
+     transport->sendStreamClosed(m_identifier);
+ 
+     RefPtr session = transport->session();
+@@ -141,7 +202,7 @@ void WebTransportSendStreamSink::abort(JSDOMGlobalObject&, JSC::JSValue value, D
+         return;
+ 
+     std::optional<uint64_t> errorCode;
+-    if (auto* jsWebTransportError = dynamicDowncast<JSWebTransportError>(value)) {
++    if (auto* jsWebTransportError = dynamicDowncast<JSWebTransportError>(reason)) {
+         auto& webTransportError = jsWebTransportError->wrapped();
+         if (auto webTransportErrorCode = webTransportError.streamErrorCode())
+             errorCode = static_cast<uint64_t>(*webTransportErrorCode);
+diff --git a/Source/WebCore/Modules/webtransport/WebTransportSendStreamSink.h b/Source/WebCore/Modules/webtransport/WebTransportSendStreamSink.h
+index 6fb3d21f..24037a08 100644
+--- a/Source/WebCore/Modules/webtransport/WebTransportSendStreamSink.h
++++ b/Source/WebCore/Modules/webtransport/WebTransportSendStreamSink.h
+@@ -35,10 +35,11 @@ namespace WebCore {
+ struct WebTransportStreamIdentifierType;
+ using WebTransportStreamIdentifier = ObjectIdentifier<WebTransportStreamIdentifierType>;
+ 
++class AbortSignal;
+ class WebTransport;
+ class WritableStream;
+ 
+-class WebTransportSendStreamSink : public WritableStreamSink {
++class WebTransportSendStreamSink : public WritableStreamSink, public CanMakeWeakPtr<WebTransportSendStreamSink> {
+ public:
+     static Ref<WebTransportSendStreamSink> create(WebTransport& transport, WebTransportStreamIdentifier identifier) { return adoptRef(*new WebTransportSendStreamSink(transport, identifier)); }
+     ~WebTransportSendStreamSink();
+@@ -51,13 +52,20 @@ public:
+ private:
+     WEBCORE_EXPORT WebTransportSendStreamSink(WebTransport&, WebTransportStreamIdentifier);
+ 
++    void start(std::unique_ptr<WritableStreamDefaultController>&&) final;
+     void write(ScriptExecutionContext&, JSC::JSValue, DOMPromiseDeferred<void>&&) final;
+-    void close(JSDOMGlobalObject&) final;
++    void close(JSDOMGlobalObject&, DOMPromiseDeferred<void>&&) final;
+     void abort(JSDOMGlobalObject&, JSC::JSValue, DOMPromiseDeferred<void>&&) final;
+ 
++    void sendFin(ScriptExecutionContext&);
++    void cancel(JSC::JSValue reason);
++
+     const ThreadSafeWeakPtr<WebTransport> m_transport;
+     const WebTransportStreamIdentifier m_identifier;
+     WeakPtr<WritableStream> m_stream;
++    std::unique_ptr<DOMPromiseDeferred<void>> m_closeDeferred;
++    RefPtr<AbortSignal> m_abortSignal;
++    std::optional<uint32_t> m_abortAlgorithmIdentifier;
+     bool m_isClosed { false };
+     bool m_isCancelled { false };
+ };
+diff --git a/Source/WebCore/bindings/js/InternalReadableStream.cpp b/Source/WebCore/bindings/js/InternalReadableStream.cpp
+index 96a81146..91b64c8a 100644
+--- a/Source/WebCore/bindings/js/InternalReadableStream.cpp
++++ b/Source/WebCore/bindings/js/InternalReadableStream.cpp
+@@ -26,10 +26,10 @@
+ #include "config.h"
+ #include "InternalReadableStream.h"
+ 
+-#include "JSDOMConvertObject.h"
+-#include "JSDOMConvertSequences.h"
++#include "JSDOMBindingFacade.h"
+ #include "JSDOMException.h"
+ #include "WebCoreJSClientData.h"
++#include <JavaScriptCore/JSArray.h>
+ #include <JavaScriptCore/JSObjectInlines.h>
+ #include <JavaScriptCore/TopExceptionScope.h>
+ 
+@@ -75,8 +75,15 @@ ExceptionOr<Ref<InternalReadableStream>> InternalReadableStream::createFromUnder
+     return adoptRef(*new InternalReadableStream(globalObject, *result.returnValue().toObject(&globalObject)));
+ }
+ 
++static bool isInternalReadableStream(JSDOMGlobalObject& globalObject, JSC::JSObject& object)
++{
++    auto& vm = globalObject.vm();
++    return !!object.getDirect(vm, builtinNames(vm).readableStreamControllerPrivateName());
++}
++
+ Ref<InternalReadableStream> InternalReadableStream::fromObject(JSDOMGlobalObject& globalObject, JSC::JSObject& object)
+ {
++    ASSERT(isInternalReadableStream(globalObject, object));
+     return adoptRef(*new InternalReadableStream(globalObject, object));
+ }
+ 
+@@ -215,12 +222,15 @@ ExceptionOr<std::pair<Ref<InternalReadableStream>, Ref<InternalReadableStream>>>
+     if (scope.exception()) [[unlikely]]
+         return Exception { ExceptionCode::ExistingExceptionError };
+ 
+-    auto resultsConversionResult = convert<IDLSequence<IDLObject>>(*globalObject, result);
+-    if (resultsConversionResult.hasException(scope)) [[unlikely]]
+-        return Exception { ExceptionCode::ExistingExceptionError };
++    // convert<IDLSequence> is using Array.prototype[Symbol.iterator], which the page script can override.
++    auto resultArray = getInternalBuiltinResultObjects<2>(*globalObject, result);
++    RETURN_IF_EXCEPTION(scope, Exception { ExceptionCode::ExistingExceptionError });
++    if (!resultArray) [[unlikely]]
++        return Exception { ExceptionCode::TypeError, "Internal ReadableStream tee returned an unexpected value"_s };
+ 
+-    auto results = resultsConversionResult.releaseReturnValue();
+-    ASSERT(results.size() == 2);
++    auto results = *resultArray;
++    if (!results[0] || !results[1] || !isInternalReadableStream(*globalObject, *results[0].get()) || !isInternalReadableStream(*globalObject, *results[1].get())) [[unlikely]]
++        return Exception { ExceptionCode::TypeError, "Internal ReadableStream tee returned branches of unexpected types"_s };
+ 
+     auto& jsDOMGlobalObject = *globalObject;
+     return std::make_pair(InternalReadableStream::fromObject(jsDOMGlobalObject, *results[0].get()), InternalReadableStream::fromObject(jsDOMGlobalObject, *results[1].get()));
+diff --git a/Source/WebCore/bindings/js/InternalReadableStream.h b/Source/WebCore/bindings/js/InternalReadableStream.h
+index 427b5bd5..2e0a3f23 100644
+--- a/Source/WebCore/bindings/js/InternalReadableStream.h
++++ b/Source/WebCore/bindings/js/InternalReadableStream.h
+@@ -25,6 +25,7 @@
+ 
+ #pragma once
+ 
++#include "ExceptionOr.h"
+ #include "JSDOMGuardedObject.h"
+ #include <JavaScriptCore/JSObject.h>
+ 
+diff --git a/Source/WebCore/bindings/js/JSDOMBindingFacade.cpp b/Source/WebCore/bindings/js/JSDOMBindingFacade.cpp
+index d626eb1d..3ae57c89 100644
+--- a/Source/WebCore/bindings/js/JSDOMBindingFacade.cpp
++++ b/Source/WebCore/bindings/js/JSDOMBindingFacade.cpp
+@@ -229,4 +229,26 @@ JSC::JSBoundFunction* createBoundFunction(JSC::VM& vm, JSC::JSGlobalObject* glob
+     return JSC::JSBoundFunction::create(vm, globalObject, target, boundThis, boundArgs, length, JSC::jsEmptyString(vm), JSC::makeSource(sourceName, JSC::SourceOrigin(), JSC::SourceTaintedOrigin::Untainted));
+ }
+ 
++JSC::JSArray* arrayFromValue(JSC::JSValue value, unsigned expectedLength)
++{
++    if (!value || !value.isObject())
++        return nullptr;
++    auto* object = JSC::asObject(value);
++    if (!JSC::isJSArray(object))
++        return nullptr;
++    auto* array = JSC::asArray(object);
++    if (array->length() != expectedLength)
++        return nullptr;
++    return array;
++}
++
++JSC::Strong<JSC::JSObject> objectFromArrayAt(JSC::JSGlobalObject& globalObject, JSC::VM& vm, JSC::ThrowScope& scope, JSC::JSArray& array, unsigned index)
++{
++    auto element = array.getDirectIndex(&globalObject, index);
++    RETURN_IF_EXCEPTION(scope, { });
++    if (!element || !element.isObject())
++        return { };
++    return { vm, JSC::asObject(element) };
++}
++
+ } // namespace WebCore
+diff --git a/Source/WebCore/bindings/js/JSDOMBindingFacade.h b/Source/WebCore/bindings/js/JSDOMBindingFacade.h
+index 1f6933d6..5b3758d4 100644
+--- a/Source/WebCore/bindings/js/JSDOMBindingFacade.h
++++ b/Source/WebCore/bindings/js/JSDOMBindingFacade.h
+@@ -103,4 +103,25 @@ WEBCORE_EXPORT JSC::JSValue freezeObject(JSC::JSGlobalObject&, JSC::JSObject*);
+ 
+ WEBCORE_EXPORT JSC::JSBoundFunction* createBoundFunction(JSC::VM&, JSC::JSGlobalObject*, JSC::JSObject* target, JSC::JSValue boundThis, JSC::ArgList, double length, ASCIILiteral sourceName);
+ 
++JSC::JSArray* arrayFromValue(JSC::JSValue, unsigned expectedLength);
++JSC::Strong<JSC::JSObject> objectFromArrayAt(JSC::JSGlobalObject&, JSC::VM&, JSC::ThrowScope&, JSC::JSArray&, unsigned);
++template<unsigned expectedLength>
++std::optional<std::array<JSC::Strong<JSC::JSObject>, expectedLength>> getInternalBuiltinResultObjects(JSC::JSGlobalObject& globalObject, JSC::JSValue value)
++{
++    auto* array = arrayFromValue(value, expectedLength);
++    if (!array) [[unlikely]]
++        return { };
++
++    auto& vm = JSC::getVM(&globalObject);
++    auto scope = DECLARE_THROW_SCOPE(vm);
++    std::array<JSC::Strong<JSC::JSObject>, expectedLength> result;
++    for (unsigned index = 0; index < expectedLength; ++index) {
++        auto element = objectFromArrayAt(globalObject, vm, scope, *array, index);
++        if (!element) [[unlikely]]
++            return { };
++        result[index] = WTF::move(element);
++    }
++    return result;
++}
++
+ } // namespace WebCore
+diff --git a/Source/WebCore/bindings/js/ScriptModuleLoader.cpp b/Source/WebCore/bindings/js/ScriptModuleLoader.cpp
+index 74a44c95..49dbfc14 100644
+--- a/Source/WebCore/bindings/js/ScriptModuleLoader.cpp
++++ b/Source/WebCore/bindings/js/ScriptModuleLoader.cpp
+@@ -504,15 +504,34 @@ void ScriptModuleLoader::notifyFinished(ModuleScriptLoader& moduleScriptLoader,
+ 
+         ModuleType type = ModuleType::Invalid;
+         auto mimeType = cachedScript->response().mimeType();
+-        if (MIMETypeRegistry::isSupportedJavaScriptMIMEType(mimeType))
+-            type = ModuleType::JavaScript;
++        auto requestedType = loader.parameters() ? loader.parameters()->type() : JSC::ScriptFetchParameters::Type::None;
++
++        switch (requestedType) {
++        case JSC::ScriptFetchParameters::Type::JSON:
++            if (MIMETypeRegistry::isSupportedJSONMIMEType(mimeType)) {
++                type = ModuleType::JSON;
++                break;
++            }
++
++            rejectWithFetchError(*context, WTF::move(promise), ExceptionCode::TypeError, makeString('\'', cachedScript->response().mimeType(), "' is not a valid JSON MIME type for module script."_s));
++            return;
++
++        // FIXME: figure out if we need to harden checks for these types too.
++        case JSC::ScriptFetchParameters::Type::JavaScript:
++        case JSC::ScriptFetchParameters::Type::WebAssembly:
++        case JSC::ScriptFetchParameters::Type::None:
+ #if ENABLE(WEBASSEMBLY)
+-        else if (context->settingsValues().webAssemblyESMIntegrationEnabled && MIMETypeRegistry::isSupportedWebAssemblyMIMEType(mimeType))
+-            type = ModuleType::WebAssembly;
++            if (context->settingsValues().webAssemblyESMIntegrationEnabled && MIMETypeRegistry::isSupportedWebAssemblyMIMEType(mimeType)) {
++                type = ModuleType::WebAssembly;
++                break;
++            }
+ #endif
+-        else if (loader.parameters() && loader.parameters()->type() == JSC::ScriptFetchParameters::JSON && MIMETypeRegistry::isSupportedJSONMIMEType(mimeType))
+-            type = ModuleType::JSON;
+-        else {
++
++            if (MIMETypeRegistry::isSupportedJavaScriptMIMEType(mimeType)) {
++                type = ModuleType::JavaScript;
++                break;
++            }
++
+             // https://html.spec.whatwg.org/multipage/webappapis.html#fetch-a-single-module-script
+             // The result of extracting a MIME type from response's header list (ignoring parameters) is not a JavaScript MIME type.
+             // For historical reasons, fetching a classic script does not include MIME type checking. In contrast, module scripts will fail to load if they are not of a correct MIME type.
+@@ -574,15 +593,33 @@ void ScriptModuleLoader::notifyFinished(ModuleScriptLoader& moduleScriptLoader,
+ 
+         ModuleType type = ModuleType::Invalid;
+         auto mimeType = loader.responseMIMEType();
+-        if (MIMETypeRegistry::isSupportedJavaScriptMIMEType(mimeType))
+-            type = ModuleType::JavaScript;
++        auto requestedType = loader.parameters() ? loader.parameters()->type() : JSC::ScriptFetchParameters::Type::None;
++
++        switch (requestedType) {
++        case JSC::ScriptFetchParameters::Type::JSON:
++            if (MIMETypeRegistry::isSupportedJSONMIMEType(mimeType)) {
++                type = ModuleType::JSON;
++                break;
++            }
++
++            rejectWithFetchError(*context, WTF::move(promise), ExceptionCode::TypeError, makeString('\'', loader.responseMIMEType(), "' is not a valid JSON MIME type for module script."_s));
++            return;
++
++        case JSC::ScriptFetchParameters::Type::JavaScript:
++        case JSC::ScriptFetchParameters::Type::WebAssembly:
++        case JSC::ScriptFetchParameters::Type::None:
+ #if ENABLE(WEBASSEMBLY)
+-        else if (context->settingsValues().webAssemblyESMIntegrationEnabled && MIMETypeRegistry::isSupportedWebAssemblyMIMEType(mimeType))
+-            type = ModuleType::WebAssembly;
++            if (context->settingsValues().webAssemblyESMIntegrationEnabled && MIMETypeRegistry::isSupportedWebAssemblyMIMEType(mimeType)) {
++                type = ModuleType::WebAssembly;
++                break;
++            }
+ #endif
+-        else if (loader.parameters() && loader.parameters()->type() == JSC::ScriptFetchParameters::JSON && MIMETypeRegistry::isSupportedJSONMIMEType(mimeType))
+-            type = ModuleType::JSON;
+-        else {
++
++            if (MIMETypeRegistry::isSupportedJavaScriptMIMEType(mimeType)) {
++                type = ModuleType::JavaScript;
++                break;
++            }
++
+             // https://html.spec.whatwg.org/multipage/webappapis.html#fetch-a-single-module-script
+             // The result of extracting a MIME type from response's header list (ignoring parameters) is not a JavaScript MIME type.
+             // For historical reasons, fetching a classic script does not include MIME type checking. In contrast, module scripts will fail to load if they are not of a correct MIME type.
+diff --git a/Source/WebCore/dom/TextDecoderStream.js b/Source/WebCore/dom/TextDecoderStream.js
+index 45a40cb8..55f206cc 100644
+--- a/Source/WebCore/dom/TextDecoderStream.js
++++ b/Source/WebCore/dom/TextDecoderStream.js
+@@ -64,7 +64,10 @@ function initializeTextDecoderStream()
+         return @promiseResolve(@Promise, @undefined);
+     };
+ 
+-    const [transform, readable, writable] = @createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm);
++    const streams = @createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm);
++    const transform = streams[0];
++    const readable = streams[1];
++    const writable = streams[2];
+     @putByIdDirectPrivate(this, "textDecoderStreamTransform", transform);
+     @putByIdDirectPrivate(this, "readable", readable);
+     @putByIdDirectPrivate(this, "writable", writable);
+diff --git a/Source/WebCore/dom/TextEncoderStream.js b/Source/WebCore/dom/TextEncoderStream.js
+index 87a00d73..fb9e5e39 100644
+--- a/Source/WebCore/dom/TextEncoderStream.js
++++ b/Source/WebCore/dom/TextEncoderStream.js
+@@ -56,7 +56,10 @@ function initializeTextEncoderStream()
+         return @promiseResolve(@Promise, @undefined);
+     };
+ 
+-    const [transform, readable, writable] = @createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm);
++    const streams = @createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm);
++    const transform = streams[0];
++    const readable = streams[1];
++    const writable = streams[2];
+     @putByIdDirectPrivate(this, "textEncoderStreamTransform", transform);
+     @putByIdDirectPrivate(this, "textEncoderStreamEncoder", new @TextEncoderStreamEncoder());
+     @putByIdDirectPrivate(this, "readable", readable);
+diff --git a/Source/WebCore/editing/AlternativeTextController.cpp b/Source/WebCore/editing/AlternativeTextController.cpp
+index 1eb95575..dd8dc7f0 100644
+--- a/Source/WebCore/editing/AlternativeTextController.cpp
++++ b/Source/WebCore/editing/AlternativeTextController.cpp
+@@ -56,6 +56,7 @@
+ #include "TextIterator.h"
+ #include "VisibleUnits.h"
+ #include "markup.h"
++#include <wtf/Scope.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
+ namespace WebCore {
+@@ -423,29 +424,29 @@ void AlternativeTextController::respondToChangedSelection(const VisibleSelection
+     // containing the original pre-correction word so that user can quickly revert the
+     // undesired autocorrection. Here, we start correction panel timer once we confirm that
+     // the new caret position is at the end of a word.
+-    if (!currentSelection.isCaret() || currentSelection == oldSelection || !currentSelection.isContentEditable())
++    if (currentSelection == oldSelection)
++        return;
++
++    bool handled = false;
++    auto forgetMarkerIfUnhandled = makeScopeExit([&] {
++        if (!handled)
++            m_markerForLastResponse = nullptr;
++    });
++
++    if (!currentSelection.isCaret() || !currentSelection.isContentEditable())
+         return;
+ 
+     VisiblePosition selectionPosition = currentSelection.start();
+-    VisiblePosition oldSelectionPosition = oldSelection.start();
+-    
++
+     // Creating a Visible position triggers a layout and there is no
+     // guarantee that the selection is still valid.
+     if (selectionPosition.isNull())
+         return;
+-    
+-    VisiblePosition startPositionOfWord = startOfWord(selectionPosition, WordSide::RightWordIfOnBoundary);
++
+     VisiblePosition endPositionOfWord = endOfWord(selectionPosition, WordSide::LeftWordIfOnBoundary);
+     if (endPositionOfWord.isNull())
+         return;
+ 
+-    if (!oldSelectionPosition.isNull()) {
+-        VisiblePosition oldStartPositionOfWord = startOfWord(oldSelectionPosition, WordSide::RightWordIfOnBoundary);
+-        VisiblePosition oldEndPositionOfWord = endOfWord(oldSelectionPosition, WordSide::LeftWordIfOnBoundary);
+-        if (startPositionOfWord == oldStartPositionOfWord || endPositionOfWord == oldEndPositionOfWord)
+-            return;
+-    }
+-
+     Position position = endPositionOfWord.deepEquivalent();
+     if (position.anchorType() != Position::PositionIsOffsetInAnchor)
+         return;
+@@ -456,7 +457,6 @@ void AlternativeTextController::respondToChangedSelection(const VisibleSelection
+     if (!markers)
+         return;
+ 
+-    bool handled = false;
+     for (auto& marker : markers->markersFor(*node, DocumentMarkerType::Grammar)) {
+         // Grammar markers take precedence.
+         ASSERT(marker);
+@@ -637,10 +637,12 @@ bool AlternativeTextController::shouldStartTimerFor(const WebCore::DocumentMarke
+     }
+ }
+ 
+-bool AlternativeTextController::respondToMarkerAtEndOfWord(const DocumentMarker& marker, const Position& endOfWordPosition)
++bool AlternativeTextController::respondToMarkerAtEndOfWord(DocumentMarker& marker, const Position& endOfWordPosition)
+ {
+     if (!shouldStartTimerFor(marker, endOfWordPosition.offsetInContainerNode()))
+         return false;
++    if (&marker == m_markerForLastResponse.get())
++        return true;
+     RefPtr node = endOfWordPosition.containerNode();
+     auto wordRange = makeSimpleRange(*node, marker);
+     String currentWord = plainText(wordRange);
+@@ -672,6 +674,7 @@ bool AlternativeTextController::respondToMarkerAtEndOfWord(const DocumentMarker&
+         ASSERT_NOT_REACHED();
+         break;
+     }
++    m_markerForLastResponse = marker;
+     return true;
+ }
+ 
+diff --git a/Source/WebCore/editing/AlternativeTextController.h b/Source/WebCore/editing/AlternativeTextController.h
+index 6135cb5e..ecb5c43d 100644
+--- a/Source/WebCore/editing/AlternativeTextController.h
++++ b/Source/WebCore/editing/AlternativeTextController.h
+@@ -115,7 +115,7 @@ private:
+     void recordSpellcheckerResponseForModifiedCorrection(const SimpleRange& rangeOfCorrection, const String& corrected, const String& correction);
+ 
+     bool shouldStartTimerFor(const DocumentMarker&, int endOffset) const;
+-    bool respondToMarkerAtEndOfWord(const DocumentMarker&, const Position& endOfWordPosition);
++    bool respondToMarkerAtEndOfWord(DocumentMarker&, const Position& endOfWordPosition);
+ 
+     EditorClient* NODELETE editorClient();
+     
+@@ -125,6 +125,7 @@ private:
+ 
+     EventLoopTimerHandle m_timer;
+     std::optional<SimpleRange> m_rangeWithAlternative;
++    WeakPtr<DocumentMarker> m_markerForLastResponse;
+     bool m_isActive { };
+     bool m_isDismissedByEditing { };
+     AlternativeTextType m_type;
+diff --git a/Source/WebCore/editing/RemoveNodePreservingChildrenCommand.cpp b/Source/WebCore/editing/RemoveNodePreservingChildrenCommand.cpp
+index fa4cce32..3fb70bf5 100644
+--- a/Source/WebCore/editing/RemoveNodePreservingChildrenCommand.cpp
++++ b/Source/WebCore/editing/RemoveNodePreservingChildrenCommand.cpp
+@@ -47,6 +47,9 @@ void RemoveNodePreservingChildrenCommand::doApply()
+     if (!parent || (m_shouldAssumeContentIsAlwaysEditable == DoNotAssumeContentIsAlwaysEditable && !isEditableNode(*parent)))
+         return;
+ 
++    if (m_shouldAssumeContentIsAlwaysEditable == DoNotAssumeContentIsAlwaysEditable && !isEditableNode(m_node) && m_node->renderer())
++        return;
++
+     for (RefPtr child = m_node->firstChild(); child; child = child->nextSibling())
+         children.append(*child);
+ 
+diff --git a/Source/WebCore/html/HTMLCanvasElement.cpp b/Source/WebCore/html/HTMLCanvasElement.cpp
+index 61a2ae4d..db51f1ce 100644
+--- a/Source/WebCore/html/HTMLCanvasElement.cpp
++++ b/Source/WebCore/html/HTMLCanvasElement.cpp
+@@ -435,7 +435,12 @@ WebGLRenderingContextBase* HTMLCanvasElement::createContextWebGL(WebGLVersion ty
+ 
+     // TODO(WEBXR): ensure the context is created in a compatible graphics
+     // adapter when there is an active immersive device.
+-    m_context = WebGLRenderingContextBase::create(*this, attrs, type);
++    auto context = WebGLRenderingContextBase::create(*this, attrs, type);
++    // Note: due to re-entrancy, m_context may have been assigned in the error case.
++    if (!context)
++        return nullptr;
++    ASSERT(!m_context);
++    m_context = WTF::move(context);
+     if (m_context) {
+         // Need to make sure a RenderLayer and compositing layer get created for the Canvas.
+         invalidateStyleAndLayerComposition();
+diff --git a/Source/WebCore/loader/PolicyChecker.cpp b/Source/WebCore/loader/PolicyChecker.cpp
+index e5d33138..ef79db32 100644
+--- a/Source/WebCore/loader/PolicyChecker.cpp
++++ b/Source/WebCore/loader/PolicyChecker.cpp
+@@ -84,7 +84,7 @@
+ 
+ namespace WebCore {
+ 
+-static bool isAllowedByContentSecurityPolicy(const URL& url, const Element* ownerElement, bool didReceiveRedirectResponse)
++static bool isAllowedByContentSecurityPolicy(const URL& url, const Element* ownerElement, bool didReceiveRedirectResponse, const URL& originalRequestURL)
+ {
+     if (!ownerElement)
+         return true;
+@@ -97,7 +97,7 @@ static bool isAllowedByContentSecurityPolicy(const URL& url, const Element* owne
+     Ref ownerElementDocument = ownerElement->document();
+     ASSERT(ownerElementDocument->contentSecurityPolicy());
+     if (is<HTMLPlugInElement>(ownerElement))
+-        return protect(ownerElementDocument->contentSecurityPolicy())->allowObjectFromSource(url, ownerElementDocument->currentParserSourcePosition(), redirectResponseReceived);
++        return protect(ownerElementDocument->contentSecurityPolicy())->allowObjectFromSource(url, ownerElementDocument->currentParserSourcePosition(), redirectResponseReceived, originalRequestURL);
+     return protect(ownerElementDocument->contentSecurityPolicy())->allowChildFrameFromSource(url, ownerElementDocument->currentParserSourcePosition(), redirectResponseReceived);
+ }
+ 
+@@ -181,9 +181,11 @@ void PolicyChecker::checkNavigationPolicy(ResourceRequest&& request, const Resou
+     }
+ 
+     RefPtr frameOwnerElement = frame->ownerElement();
++    // The original request URL regardless of number of redirect hops.
++    URL originalRequestURL = loader->originalRequest().url();
+     // Only cross-document navigations are subject to the navigation CSP check; same-document (fragment) navigations aren't fetched.
+     if (isSameDocumentNavigation == IsSameDocumentNavigation::No
+-        && !isAllowedByContentSecurityPolicy(request.url(), frameOwnerElement.get(), !redirectResponse.isNull())) {
++        && !isAllowedByContentSecurityPolicy(request.url(), frameOwnerElement.get(), !redirectResponse.isNull(), originalRequestURL)) {
+         if (frameOwnerElement) {
+             // Fire a load event (even though we were blocked by CSP) as timing attacks would otherwise
+             // reveal that the frame was blocked. This way, it looks like any other cross-origin page load.
+diff --git a/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp b/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
+index dee3a440..50c9a318 100644
+--- a/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
++++ b/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
+@@ -118,9 +118,21 @@ void GLFenceEGL::serverWait()
+     if (!display)
+         return;
+ 
+-    if (display->checkVersion(1, 5))
++    // Fences are nearly always signaled by the time they are waited on, so skip the server wait in
++    // that case. Besides saving work, this avoids an NVIDIA driver leak (580.178.04): the native
++    // fence fd it duplicates in eglWaitSync() is never closed when another wait is queued on the
++    // same context before the next fence is created, and the process runs out of file descriptors.
++    if (display->checkVersion(1, 5)) {
++        EGLAttrib status = 0;
++        if (eglGetSyncAttrib(display->eglDisplay(), m_sync, EGL_SYNC_STATUS, &status) && status == EGL_SIGNALED)
++            return;
++
+         eglWaitSync(display->eglDisplay(), m_sync, 0);
+-    else {
++    } else {
++        EGLint status = 0;
++        if (eglGetSyncAttribKHR(display->eglDisplay(), m_sync, EGL_SYNC_STATUS_KHR, &status) && status == EGL_SIGNALED_KHR)
++            return;
++
+         if (display->extensions().KHR_wait_sync)
+             eglWaitSyncKHR(display->eglDisplay(), m_sync, 0);
+         else
+diff --git a/Source/WebCore/platform/graphics/egl/GLFenceGL.cpp b/Source/WebCore/platform/graphics/egl/GLFenceGL.cpp
+index deea3d3f..d97c73b0 100644
+--- a/Source/WebCore/platform/graphics/egl/GLFenceGL.cpp
++++ b/Source/WebCore/platform/graphics/egl/GLFenceGL.cpp
+@@ -57,6 +57,11 @@ void GLFenceGL::clientWait()
+ 
+ void GLFenceGL::serverWait()
+ {
++    // As GLFenceEGL: no server wait on a fence that is already signaled.
++    GLint status = 0;
++    glGetSynciv(m_sync, GL_SYNC_STATUS, 1, nullptr, &status);
++    if (status == GL_SIGNALED)
++        return;
+     glWaitSync(m_sync, 0, GL_TIMEOUT_IGNORED);
+ }
+ 
+diff --git a/Source/WebCore/rendering/RenderLayer.cpp b/Source/WebCore/rendering/RenderLayer.cpp
+index e738aecc..05e90aa1 100644
+--- a/Source/WebCore/rendering/RenderLayer.cpp
++++ b/Source/WebCore/rendering/RenderLayer.cpp
+@@ -1798,6 +1798,17 @@ void RenderLayer::forceStackingContextIfNeeded()
+     }
+ }
+ 
++float RenderLayer::currentOpacity() const
++{
++    auto styleable = Styleable::fromRenderer(renderer());
++    if (styleable && styleable->isRunningAcceleratedAnimationOfProperty(CSSPropertyOpacity)) {
++        std::unique_ptr<Style::ComputedStyle> animatedStyle = renderer().animatedStyle();
++        return Style::evaluate<float>(animatedStyle->opacity());
++    }
++
++    return renderer().opacity();
++}
++
+ TransformationMatrix RenderLayer::currentTransform(OptionSet<Style::TransformResolverOption> options) const
+ {
+     if (!m_transform)
+@@ -2757,7 +2768,7 @@ void RenderLayer::beginTransparencyLayers(GraphicsContext& context, const LayerP
+         m_usedTransparency = true;
+         if (canPaintTransparencyWithSetOpacity()) {
+             m_savedAlphaForTransparency = context.alpha();
+-            context.setAlpha(context.alpha() * renderer().opacity());
++            context.setAlpha(context.alpha() * opacityForPainting(paintingInfo.paintBehavior));
+             return;
+         }
+         context.save();
+@@ -2770,7 +2781,7 @@ void RenderLayer::beginTransparencyLayers(GraphicsContext& context, const LayerP
+         if (usesCompositeOperation)
+             context.setCompositeOperation(context.compositeOperation(), blendMode());
+ 
+-        context.beginTransparencyLayer(renderer().opacity());
++        context.beginTransparencyLayer(opacityForPainting(paintingInfo.paintBehavior));
+ 
+         if (usesCompositeOperation)
+             context.setCompositeOperation(context.compositeOperation(), BlendMode::Normal);
+@@ -3382,7 +3393,7 @@ void RenderLayer::paintLayerWithEffects(GraphicsContext& context, const LayerPai
+         return;
+ 
+     // If this layer is totally invisible then there is nothing to paint.
+-    if (!renderer().opacity()
++    if (!opacityForPainting(paintingInfo.paintBehavior)
+         && !is<AccessibilityRegionContext>(paintingInfo.regionContext)
+         && !paintFlags.contains(PaintLayerFlag::CollectingEventRegion)) {
+         // However, we do want to continue painting for accessibility paints, as we still need accurate
+@@ -6550,10 +6561,10 @@ bool RenderLayer::isTransparentRespectingParentFrames() const
+ {
+     static const double minimumVisibleOpacity = 0.01;
+ 
+-    float currentOpacity = 1;
++    float accumulatedOpacity = 1;
+     for (auto* layer = this; layer; layer = parentLayerCrossFrame(*layer)) {
+-        currentOpacity *= Style::evaluate<float>(layer->renderer().style().opacity());
+-        if (currentOpacity < minimumVisibleOpacity)
++        accumulatedOpacity *= Style::evaluate<float>(layer->renderer().style().opacity());
++        if (accumulatedOpacity < minimumVisibleOpacity)
+             return true;
+     }
+ 
+diff --git a/Source/WebCore/rendering/RenderLayer.h b/Source/WebCore/rendering/RenderLayer.h
+index 872927f4..859b166f 100644
+--- a/Source/WebCore/rendering/RenderLayer.h
++++ b/Source/WebCore/rendering/RenderLayer.h
+@@ -830,6 +830,10 @@ public:
+     void setStaticInlinePosition(LayoutUnit position) { m_offsetForPosition.setWidth(position); }
+     void setStaticBlockPosition(LayoutUnit position) { m_offsetForPosition.setHeight(position); }
+ 
++    // currentOpacity computes the opacity which takes accelerated animations into account.
++    float currentOpacity() const;
++    inline float opacityForPainting(OptionSet<PaintBehavior>) const;
++
+     inline bool isTransformed() const;
+     // Note that this transform has the transform-origin baked in.
+     TransformationMatrix* transform() const LIFETIME_BOUND { return m_transform.get(); }
+diff --git a/Source/WebCore/rendering/RenderLayerInlines.h b/Source/WebCore/rendering/RenderLayerInlines.h
+index 8c59ece3..7c97a4c4 100644
+--- a/Source/WebCore/rendering/RenderLayerInlines.h
++++ b/Source/WebCore/rendering/RenderLayerInlines.h
+@@ -65,9 +65,14 @@ inline bool RenderLayer::canUseOffsetFromAncestor() const
+     return !isTransformed() && !renderer().isRenderOrLegacyRenderSVGRoot();
+ }
+ 
++inline float RenderLayer::opacityForPainting(OptionSet<PaintBehavior> paintBehavior) const
++{
++    return paintBehavior.containsAll({ PaintBehavior::FlattenCompositingLayers, PaintBehavior::Snapshotting }) ? currentOpacity() : renderer().opacity();
++}
++
+ inline bool RenderLayer::paintsWithTransparency(OptionSet<PaintBehavior> paintBehavior) const
+ {
+-    if (!renderer().isTransparent() && !hasNonOpacityTransparency())
++    if (opacityForPainting(paintBehavior) >= 1 && !hasNonOpacityTransparency())
+         return false;
+     return (paintBehavior & PaintBehavior::FlattenCompositingLayers) || !isComposited();
+ }
+diff --git a/Source/WebKit/NetworkProcess/NetworkProcess.cpp b/Source/WebKit/NetworkProcess/NetworkProcess.cpp
+index 43ff2dcf..4e6014e5 100644
+--- a/Source/WebKit/NetworkProcess/NetworkProcess.cpp
++++ b/Source/WebKit/NetworkProcess/NetworkProcess.cpp
+@@ -409,13 +409,15 @@ void NetworkProcess::createNetworkConnectionToWebProcess(ProcessIdentifier ident
+         return;
+     }
+ 
+-    auto& [currentLoadedWebArchive, currentDomains] = m_allowedFirstPartiesForCookies.ensure(identifier, [&] {
+-        return std::make_pair(parameters.loadedWebArchive, HashSet<RegistrableDomain> { });
++    auto& allowedFirstParties = m_allowedFirstPartiesForCookies.ensure(identifier, [&] {
++        return AllowedFirstParties { parameters.loadedWebArchive, { }, { } };
+     }).iterator->value;
+     if (parameters.loadedWebArchive == LoadedWebArchive::Yes)
+-        currentLoadedWebArchive = LoadedWebArchive::Yes;
+-    for (auto& domain : parameters.allowedFirstPartiesForCookies)
+-        currentDomains.add(domain);
++        allowedFirstParties.loadedWebArchive = LoadedWebArchive::Yes;
++    for (auto& site : parameters.allowedFirstPartiesForCookies) {
++        allowedFirstParties.domains.add(site.domain());
++        allowedFirstParties.sites.add(site);
++    }
+ 
+     auto newConnection = NetworkConnectionToWebProcess::create(*this, identifier, sessionID, WTF::move(parameters), WTF::move(connectionIdentifiers->server));
+     Ref connection = newConnection;
+@@ -453,10 +455,10 @@ void NetworkProcess::createNetworkConnectionToWebProcess(ProcessIdentifier ident
+         std::optional<HashSet<WebCore::RegistrableDomain>> allowedSites = HashSet<WebCore::RegistrableDomain> { };
+         auto iter = m_allowedFirstPartiesForCookies.find(identifier);
+         if (iter != m_allowedFirstPartiesForCookies.end()) {
+-            if (iter->value.first == LoadedWebArchive::Yes)
++            if (iter->value.loadedWebArchive == LoadedWebArchive::Yes)
+                 allowedSites = std::nullopt; // All sites.
+             else
+-                allowedSites = iter->value.second;
++                allowedSites = iter->value.domains;
+         }
+         session->storageManager().startReceivingMessageFromConnection(connection->connection(), WTF::move(allowedSites), connection->sharedPreferencesForWebProcessValue());
+     }
+@@ -469,14 +471,31 @@ void NetworkProcess::sharedPreferencesForWebProcessDidChange(WebCore::ProcessIde
+     completionHandler();
+ }
+ 
+-void NetworkProcess::addAllowedFirstPartyForCookies(WebCore::ProcessIdentifier processIdentifier, WebCore::RegistrableDomain&& firstPartyForCookies, LoadedWebArchive loadedWebArchive, CompletionHandler<void()>&& completionHandler)
++void NetworkProcess::addAllowedFirstPartyForCookies(WebCore::ProcessIdentifier processIdentifier, WebCore::Site&& firstPartyForCookies, LoadedWebArchive loadedWebArchive, CompletionHandler<void()>&& completionHandler)
++{
++    // Record every site that has a real scheme. Site::isEmpty() is not the test to use here: it reports the
++    // registrable domain, which RegistrableDomain sets to "nullOrigin" for any empty host, so it is true for a
++    // file: or custom-scheme first party as well as for an opaque one. Site::protocol() is empty only for the
++    // invalidProtocol sentinel an opaque origin collapses to, which is the one case worth dropping.
++    if (!firstPartyForCookies.protocol().isEmpty() && HashSet<WebCore::Site>::isValidValue(firstPartyForCookies)) {
++        m_allowedFirstPartiesForCookies.ensure(processIdentifier, [] {
++            return AllowedFirstParties { };
++        }).iterator->value.sites.add(firstPartyForCookies);
++    }
++
++    addAllowedFirstPartyDomainForCookies(processIdentifier, WebCore::RegistrableDomain { firstPartyForCookies.domain() }, loadedWebArchive, WTF::move(completionHandler));
++}
++
++void NetworkProcess::addAllowedFirstPartyDomainForCookies(WebCore::ProcessIdentifier processIdentifier, WebCore::RegistrableDomain&& firstPartyForCookies, LoadedWebArchive loadedWebArchive, CompletionHandler<void()>&& completionHandler)
+ {
+     if (!HashSet<WebCore::RegistrableDomain>::isValidValue(firstPartyForCookies))
+         return completionHandler();
+ 
+-    auto& [currentLoadedWebArchive, currentDomains] = m_allowedFirstPartiesForCookies.ensure(processIdentifier, [] {
+-        return std::make_pair(LoadedWebArchive::No, HashSet<RegistrableDomain> { });
++    auto& allowedFirstParties = m_allowedFirstPartiesForCookies.ensure(processIdentifier, [] {
++        return AllowedFirstParties { };
+     }).iterator->value;
++    auto& currentLoadedWebArchive = allowedFirstParties.loadedWebArchive;
++    auto& currentDomains = allowedFirstParties.domains;
+ 
+     auto updateConnectionAllowedSitesForStorage = [&](auto& allowedSites) {
+         auto iter = m_webProcessConnections.find(processIdentifier);
+@@ -528,16 +547,37 @@ auto NetworkProcess::allowsFirstPartyForCookies(WebCore::ProcessIdentifier proce
+         return terminateOrDisallow;
+     }
+ 
+-    if (iterator->value.first == LoadedWebArchive::Yes)
++    if (iterator->value.loadedWebArchive == LoadedWebArchive::Yes)
+         return AllowCookieAccess::Allow;
+ 
+-    auto& set = iterator->value.second;
++    auto& set = iterator->value.domains;
+     if (!std::remove_reference_t<decltype(set)>::isValidValue(firstPartyDomain)) {
+         ASSERT_NOT_REACHED();
+         return terminateOrDisallow;
+     }
+ 
+-    return set.contains(firstPartyDomain) ? AllowCookieAccess::Allow : terminateOrDisallow;
++    auto result = set.contains(firstPartyDomain);
++    return result ? AllowCookieAccess::Allow : terminateOrDisallow;
++}
++
++bool NetworkProcess::allowsFirstPartySite(WebCore::ProcessIdentifier processIdentifier, const WebCore::Site& site) const
++{
++    if (!decltype(m_allowedFirstPartiesForCookies)::isValidKey(processIdentifier)) {
++        ASSERT_NOT_REACHED();
++        return false;
++    }
++
++    auto iterator = m_allowedFirstPartiesForCookies.find(processIdentifier);
++    if (iterator == m_allowedFirstPartiesForCookies.end())
++        return false;
++
++    if (iterator->value.loadedWebArchive == LoadedWebArchive::Yes)
++        return true;
++
++    if (!HashSet<WebCore::Site>::isValidValue(site))
++        return false;
++
++    return iterator->value.sites.contains(site);
+ }
+ 
+ void NetworkProcess::addAllowedWebPageProxyIdentifier(WebCore::ProcessIdentifier processIdentifier, WebPageProxyIdentifier pageID)
+diff --git a/Source/WebKit/NetworkProcess/NetworkProcess.h b/Source/WebKit/NetworkProcess/NetworkProcess.h
+index eed20ffb..e1d7744a 100644
+--- a/Source/WebKit/NetworkProcess/NetworkProcess.h
++++ b/Source/WebKit/NetworkProcess/NetworkProcess.h
+@@ -31,6 +31,7 @@
+ #include "DataTaskIdentifier.h"
+ #include "DownloadID.h"
+ #include "DownloadManager.h"
++#include "LoadedWebArchive.h"
+ #include "NetworkActivityTracker.h"
+ #include "NetworkContentRuleListManager.h"
+ #include "QuotaIncreaseRequestIdentifier.h"
+@@ -52,6 +53,7 @@
+ #include <WebCore/RegistrableDomain.h>
+ #include <WebCore/ServiceWorkerIdentifier.h>
+ #include <WebCore/ServiceWorkerTypes.h>
++#include <WebCore/Site.h>
+ #include <memory>
+ #include <wtf/CheckedRef.h>
+ #include <wtf/CrossThreadTask.h>
+@@ -125,7 +127,6 @@ class SandboxExtensionHandle;
+ class WebPageNetworkParameters;
+ enum class CallDownloadDidStart : bool;
+ enum class DidFilterKnownLinkDecoration : bool;
+-enum class LoadedWebArchive : bool;
+ enum class RemoteWorkerType : uint8_t;
+ enum class ShouldGrandfatherStatistics : bool;
+ enum class StorageAccessStatus : uint8_t;
+@@ -487,7 +488,12 @@ public:
+     void deleteWebsiteDataForOrigins(PAL::SessionID, OptionSet<WebsiteDataType>, const Vector<WebCore::SecurityOriginData>& origins, const Vector<String>& cookieHostNames, const Vector<String>& HSTSCacheHostnames, const Vector<RegistrableDomain>&, CompletionHandler<void()>&&);
+     AllowCookieAccess allowsFirstPartyForCookies(WebCore::ProcessIdentifier, const URL&);
+     AllowCookieAccess allowsFirstPartyForCookies(WebCore::ProcessIdentifier, const RegistrableDomain&);
+-    void addAllowedFirstPartyForCookies(WebCore::ProcessIdentifier, WebCore::RegistrableDomain&&, LoadedWebArchive, CompletionHandler<void()>&&);
++
++    // Unlike allowsFirstPartyForCookies, this compares the scheme as well as the registrable domain.
++    bool allowsFirstPartySite(WebCore::ProcessIdentifier, const WebCore::Site&) const;
++
++    void addAllowedFirstPartyForCookies(WebCore::ProcessIdentifier, WebCore::Site&&, LoadedWebArchive, CompletionHandler<void()>&&);
++    void addAllowedFirstPartyDomainForCookies(WebCore::ProcessIdentifier, WebCore::RegistrableDomain&&, LoadedWebArchive, CompletionHandler<void()>&&);
+ 
+     // Per-process allow-list of WebPageProxyIdentifiers the WebContent process is permitted to reference. Fed by the
+     // (trusted) UIProcess as it associates a process with a page, and used to reject a process that supplies a
+@@ -666,7 +672,12 @@ private:
+ 
+     HashMap<PAL::SessionID, std::unique_ptr<NetworkSession>> m_networkSessions;
+     HashMap<PAL::SessionID, std::unique_ptr<WebCore::NetworkStorageSession>> m_networkStorageSessions;
+-    HashMap<WebCore::ProcessIdentifier, std::pair<LoadedWebArchive, HashSet<WebCore::RegistrableDomain>>> m_allowedFirstPartiesForCookies;
++    struct AllowedFirstParties {
++        LoadedWebArchive loadedWebArchive { LoadedWebArchive::No };
++        HashSet<WebCore::RegistrableDomain> domains;
++        HashSet<WebCore::Site> sites;
++    };
++    HashMap<WebCore::ProcessIdentifier, AllowedFirstParties> m_allowedFirstPartiesForCookies;
+     HashMap<WebCore::ProcessIdentifier, HashSet<WebPageProxyIdentifier>> m_allowedWebPageProxyIdentifiers;
+     HashMap<DownloadID, WebCore::ProcessIdentifier> m_authorizedDownloads;
+ 
+diff --git a/Source/WebKit/NetworkProcess/NetworkProcess.messages.in b/Source/WebKit/NetworkProcess/NetworkProcess.messages.in
+index 9aae6745..8ad94c78 100644
+--- a/Source/WebKit/NetworkProcess/NetworkProcess.messages.in
++++ b/Source/WebKit/NetworkProcess/NetworkProcess.messages.in
+@@ -31,7 +31,7 @@ messages -> NetworkProcess : AuxiliaryProcess WantsAsyncDispatchMessage {
+     CreateNetworkConnectionToWebProcess(WebCore::ProcessIdentifier processIdentifier, PAL::SessionID sessionID, struct WebKit::NetworkProcessConnectionParameters parameters) -> (std::optional<IPC::ConnectionHandle> connectionHandle, enum:uint8_t WebCore::HTTPCookieAcceptPolicy cookieAcceptPolicy) AllowedWhenWaitingForSyncReply
+     SharedPreferencesForWebProcessDidChange(WebCore::ProcessIdentifier processIdentifier, struct WebKit::SharedPreferencesForWebProcess sharedPreferencesForWebProcess) -> ()
+ 
+-    AddAllowedFirstPartyForCookies(WebCore::ProcessIdentifier processIdentifier, WebCore::RegistrableDomain firstPartyForCookies, enum:bool WebKit::LoadedWebArchive loadedWebArchive) -> ()
++    AddAllowedFirstPartyForCookies(WebCore::ProcessIdentifier processIdentifier, WebCore::Site firstPartyForCookies, enum:bool WebKit::LoadedWebArchive loadedWebArchive) -> ()
+     AddAllowedWebPageProxyIdentifier(WebCore::ProcessIdentifier processIdentifier, WebKit::WebPageProxyIdentifier pageID)
+     AuthorizeDownloadForWebProcess(WebCore::ProcessIdentifier processIdentifier, WebKit::DownloadID downloadID) -> ()
+ 
+diff --git a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
+index 4e605974..fc1a721b 100644
+--- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
++++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
+@@ -2370,7 +2370,7 @@ void NetworkResourceLoader::cancelMainResourceLoadForContentFilter(const WebCore
+ 
+ void NetworkResourceLoader::handleProvisionalLoadFailureFromContentFilter(const URL& blockedPageURL, WebCore::SubstituteData&& substituteData)
+ {
+-    connectionToWebProcess().networkProcess().addAllowedFirstPartyForCookies(m_connection->webProcessIdentifier(), RegistrableDomain { WebCore::ContentFilter::blockedPageURL() }, LoadedWebArchive::No, [] { });
++    connectionToWebProcess().networkProcess().addAllowedFirstPartyDomainForCookies(m_connection->webProcessIdentifier(), RegistrableDomain { WebCore::ContentFilter::blockedPageURL() }, LoadedWebArchive::No, [] { });
+     send(Messages::WebResourceLoader::ContentFilterDidBlockLoad(m_unblockHandler, m_unblockRequestDeniedScript, m_contentFilter->blockedError(), blockedPageURL, substituteData));
+ }
+ 
+diff --git a/Source/WebKit/NetworkProcess/NetworkSession.cpp b/Source/WebKit/NetworkProcess/NetworkSession.cpp
+index f6996354..f35336a0 100644
+--- a/Source/WebKit/NetworkProcess/NetworkSession.cpp
++++ b/Source/WebKit/NetworkProcess/NetworkSession.cpp
+@@ -983,7 +983,7 @@ void NetworkSession::addAllowedFirstPartyForCookies(WebCore::ProcessIdentifier w
+         return;
+     }
+ 
+-    m_networkProcess->addAllowedFirstPartyForCookies(webProcessIdentifier, WTF::move(firstPartyForCookies), LoadedWebArchive::No, [] { });
++    m_networkProcess->addAllowedFirstPartyDomainForCookies(webProcessIdentifier, WTF::move(firstPartyForCookies), LoadedWebArchive::No, [] { });
+ }
+ 
+ RefPtr<SWRegistrationStore> NetworkSession::createRegistrationStore(WebCore::SWServer& server)
+diff --git a/Source/WebKit/NetworkProcess/SharedWorker/WebSharedWorkerServerConnection.cpp b/Source/WebKit/NetworkProcess/SharedWorker/WebSharedWorkerServerConnection.cpp
+index 2c1aee3a..307f66f2 100644
+--- a/Source/WebKit/NetworkProcess/SharedWorker/WebSharedWorkerServerConnection.cpp
++++ b/Source/WebKit/NetworkProcess/SharedWorker/WebSharedWorkerServerConnection.cpp
+@@ -35,6 +35,7 @@
+ #include "WebSharedWorker.h"
+ #include "WebSharedWorkerObjectConnectionMessages.h"
+ #include "WebSharedWorkerServer.h"
++#include <WebCore/Site.h>
+ #include <WebCore/WorkerFetchResult.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
+@@ -91,7 +92,18 @@ NetworkSession* WebSharedWorkerServerConnection::session()
+ 
+ void WebSharedWorkerServerConnection::requestSharedWorker(WebCore::SharedWorkerKey&& sharedWorkerKey, WebCore::SharedWorkerObjectIdentifier sharedWorkerObjectIdentifier, WebCore::TransferredMessagePort&& port, WebCore::WorkerOptions&& workerOptions)
+ {
+-    MESSAGE_CHECK(m_networkProcess->allowsFirstPartyForCookies(m_webProcessIdentifier, WebCore::RegistrableDomain::uncheckedCreateFromHost(sharedWorkerKey.origin.topOrigin.host())) != NetworkProcess::AllowCookieAccess::Terminate);
++    // The claimed top origin decides which process runs this worker, via WebSharedWorker::topSite() and
++    // WebProcessPool::establishRemoteWorkerContextConnectionToNetworkProcess. Validate the whole site rather
++    // than just its registrable domain: a compromised process that forges only the scheme names a site no
++    // process owns, so the UI process launches a new one committed to it. rdar://183347241
++    //
++    // Skip the check when the top origin is opaque: every opaque origin collapses to the same Site, so there
++    // is nothing to compare against. Ordinary content reaches this, since a top-level document sandboxed by
++    // CSP has an opaque origin and may name a data: worker script.
++    WebCore::Site topSite { sharedWorkerKey.origin.topOrigin };
++    if (!topSite.protocol().isEmpty())
++        MESSAGE_CHECK(m_networkProcess->allowsFirstPartySite(m_webProcessIdentifier, topSite));
++
+     MESSAGE_CHECK(sharedWorkerObjectIdentifier.processIdentifier() == m_webProcessIdentifier);
+     MESSAGE_CHECK(sharedWorkerKey.name == workerOptions.name);
+     CONNECTION_RELEASE_LOG("requestSharedWorker: sharedWorkerObjectIdentifier=%" PUBLIC_LOG_STRING, sharedWorkerObjectIdentifier.toString().utf8().data());
+diff --git a/Source/WebKit/NetworkProcess/SharedWorker/WebSharedWorkerServerToContextConnection.cpp b/Source/WebKit/NetworkProcess/SharedWorker/WebSharedWorkerServerToContextConnection.cpp
+index a5b8d6c3..2a338680 100644
+--- a/Source/WebKit/NetworkProcess/SharedWorker/WebSharedWorkerServerToContextConnection.cpp
++++ b/Source/WebKit/NetworkProcess/SharedWorker/WebSharedWorkerServerToContextConnection.cpp
+@@ -125,7 +125,7 @@ void WebSharedWorkerServerToContextConnection::launchSharedWorker(WebSharedWorke
+     if (!connection)
+         return;
+ 
+-    connection->networkProcess().addAllowedFirstPartyForCookies(connection->webProcessIdentifier(), WebCore::RegistrableDomain::uncheckedCreateFromHost(sharedWorker.origin().topOrigin.host()), LoadedWebArchive::No, [] { });
++    connection->networkProcess().addAllowedFirstPartyDomainForCookies(connection->webProcessIdentifier(), WebCore::RegistrableDomain::uncheckedCreateFromHost(sharedWorker.origin().topOrigin.host()), LoadedWebArchive::No, [] { });
+ 
+     CONTEXT_CONNECTION_RELEASE_LOG("launchSharedWorker: sharedWorkerIdentifier=%" PRIu64, sharedWorker.identifier().toUInt64());
+     sharedWorker.markAsRunning();
+diff --git a/Source/WebKit/Shared/NetworkProcessConnectionParameters.h b/Source/WebKit/Shared/NetworkProcessConnectionParameters.h
+index 5b847115..054cc8f6 100644
+--- a/Source/WebKit/Shared/NetworkProcessConnectionParameters.h
++++ b/Source/WebKit/Shared/NetworkProcessConnectionParameters.h
+@@ -30,6 +30,7 @@
+ #include "WebPageProxyIdentifier.h"
+ #include <WebCore/PageIdentifier.h>
+ #include <WebCore/RegistrableDomain.h>
++#include <WebCore/Site.h>
+ #include <wtf/HashMap.h>
+ 
+ namespace WebKit {
+@@ -41,7 +42,7 @@ struct NetworkProcessConnectionParameters {
+ #endif
+     Vector<WebPageProxyIdentifier> pagesWithRelaxedThirdPartyCookieBlocking;
+     LoadedWebArchive loadedWebArchive { LoadedWebArchive::No };
+-    HashSet<WebCore::RegistrableDomain> allowedFirstPartiesForCookies;
++    HashSet<WebCore::Site> allowedFirstPartiesForCookies;
+     Vector<WebPageProxyIdentifier> allowedWebPageProxyIdentifiers;
+     HashMap<WebCore::PageIdentifier, Vector<String>> corsDisablingPatternsPerPage;
+ };
+diff --git a/Source/WebKit/Shared/NetworkProcessConnectionParameters.serialization.in b/Source/WebKit/Shared/NetworkProcessConnectionParameters.serialization.in
+index 028b589b..1d1252b8 100644
+--- a/Source/WebKit/Shared/NetworkProcessConnectionParameters.serialization.in
++++ b/Source/WebKit/Shared/NetworkProcessConnectionParameters.serialization.in
+@@ -27,7 +27,7 @@ struct WebKit::NetworkProcessConnectionParameters {
+ #endif
+     Vector<WebKit::WebPageProxyIdentifier> pagesWithRelaxedThirdPartyCookieBlocking;
+     WebKit::LoadedWebArchive loadedWebArchive;
+-    HashSet<WebCore::RegistrableDomain> allowedFirstPartiesForCookies;
++    HashSet<WebCore::Site> allowedFirstPartiesForCookies;
+     Vector<WebKit::WebPageProxyIdentifier> allowedWebPageProxyIdentifiers;
+     HashMap<WebCore::PageIdentifier, Vector<String>> corsDisablingPatternsPerPage;
+ };
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebContext.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebContext.cpp
+index 3072a66b..c8efdc2c 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebContext.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebContext.cpp
+@@ -500,6 +500,12 @@ static void webkitWebContextDispose(GObject* object)
+ #endif
+ 
+     if (priv->processPool) {
++#if ENABLE(REMOTE_INSPECTOR)
++        if (priv->automationSession) {
++            priv->processPool->setAutomationSession(nullptr);
++            priv->automationSession = nullptr;
++        }
++#endif
+         priv->processPool->setUserMessageHandler(nullptr);
+         priv->processPool = nullptr;
+     }
+diff --git a/Source/WebKit/UIProcess/API/wpe/WPEWebViewPlatform.cpp b/Source/WebKit/UIProcess/API/wpe/WPEWebViewPlatform.cpp
+index 2d9a7598..78b97ed1 100644
+--- a/Source/WebKit/UIProcess/API/wpe/WPEWebViewPlatform.cpp
++++ b/Source/WebKit/UIProcess/API/wpe/WPEWebViewPlatform.cpp
+@@ -222,7 +222,7 @@ void ViewPlatform::requestExitFullScreen()
+ #if ENABLE(GAMEPAD)
+ WebPageProxy* ViewPlatform::platformWebPageProxyForGamepadInput()
+ {
+-    // Find the visible view getting the input focus in the active toplevel.
++    // Find a mapped view in the active toplevel, preferring the one with the keyboard focus.
+     GUniquePtr<GList> toplevels(wpe_toplevel_list());
+     for (GList* iter = toplevels.get(); iter; iter = g_list_next(iter)) {
+         auto* toplevel = WPE_TOPLEVEL(iter->data);
+@@ -231,11 +231,15 @@ WebPageProxy* ViewPlatform::platformWebPageProxyForGamepadInput()
+ 
+         WPEView* view = nullptr;
+         wpe_toplevel_foreach_view(toplevel, +[](WPEToplevel* toplevel, WPEView* view, gpointer userData) -> gboolean {
+-            if (wpe_view_get_visible(view) && wpe_view_get_has_focus(view)) {
+-                *static_cast<WPEView**>(userData) = view;
+-                return TRUE;
+-            }
+-            return FALSE;
++            if (!wpe_view_get_mapped(view))
++                return FALSE;
++
++            auto** candidate = static_cast<WPEView**>(userData);
++            auto hasFocus = wpe_view_get_has_focus(view);
++            if (!*candidate || hasFocus)
++                *candidate = view;
++
++            return hasFocus;
+         }, &view);
+ 
+         if (view) {
+diff --git a/Source/WebKit/UIProcess/Inspector/glib/RemoteInspectorClient.cpp b/Source/WebKit/UIProcess/Inspector/glib/RemoteInspectorClient.cpp
+index e07de8d9..aa7b890a 100644
+--- a/Source/WebKit/UIProcess/Inspector/glib/RemoteInspectorClient.cpp
++++ b/Source/WebKit/UIProcess/Inspector/glib/RemoteInspectorClient.cpp
+@@ -291,7 +291,6 @@ void RemoteInspectorClient::setTargetList(uint64_t connectionID, Vector<Target>&
+ void RemoteInspectorClient::sendMessageToFrontend(uint64_t connectionID, uint64_t targetID, const char* message)
+ {
+     auto proxy = m_inspectorProxyMap.get(std::make_pair(connectionID, targetID));
+-    ASSERT(proxy);
+     if (!proxy)
+         return;
+     proxy->sendMessageToFrontend(String::fromUTF8(message));
+diff --git a/Source/WebKit/UIProcess/Network/NetworkProcessProxy.cpp b/Source/WebKit/UIProcess/Network/NetworkProcessProxy.cpp
+index bf0084e1..f8093ce7 100644
+--- a/Source/WebKit/UIProcess/Network/NetworkProcessProxy.cpp
++++ b/Source/WebKit/UIProcess/Network/NetworkProcessProxy.cpp
+@@ -2056,12 +2056,12 @@ void NetworkProcessProxy::reloadExecutionContextsForOrigin(const WebCore::Client
+         process->sendWithAsyncReply(Messages::WebProcess::ReloadExecutionContextsForOrigin(origin, triggeringFrame), [callbackAggregator] { });
+ }
+ 
+-void NetworkProcessProxy::addAllowedFirstPartyForCookies(WebProcessProxy& webProcessProxy, const WebCore::RegistrableDomain& firstPartyForCookies, LoadedWebArchive loadedWebArchive, CompletionHandler<void()>&& completionHandler)
++void NetworkProcessProxy::addAllowedFirstPartyForCookies(WebProcessProxy& webProcessProxy, const WebCore::Site& firstPartyForCookies, LoadedWebArchive loadedWebArchive, CompletionHandler<void()>&& completionHandler)
+ {
+     webProcessProxy.addAllowedFirstPartyForCookies(firstPartyForCookies, loadedWebArchive);
+ 
+     auto& pair = m_allowedFirstPartiesForCookies.ensure(webProcessProxy, [] {
+-        return std::make_pair(LoadedWebArchive::No, HashSet<RegistrableDomain> { });
++        return std::make_pair(LoadedWebArchive::No, HashSet<WebCore::Site> { });
+     }).iterator->value;
+ 
+     bool madeChange = pair.second.add(firstPartyForCookies).isNewEntry;
+diff --git a/Source/WebKit/UIProcess/Network/NetworkProcessProxy.h b/Source/WebKit/UIProcess/Network/NetworkProcessProxy.h
+index e8fec119..2b116bc2 100644
+--- a/Source/WebKit/UIProcess/Network/NetworkProcessProxy.h
++++ b/Source/WebKit/UIProcess/Network/NetworkProcessProxy.h
+@@ -44,6 +44,7 @@
+ #include <WebCore/FrameIdentifier.h>
+ #include <WebCore/NotificationEventType.h>
+ #include <WebCore/RegistrableDomain.h>
++#include <WebCore/Site.h>
+ #include <memory>
+ #include <wtf/Deque.h>
+ #include <wtf/TZoneMalloc.h>
+@@ -149,7 +150,7 @@ public:
+     Ref<DownloadProxy> createDownloadProxy(WebsiteDataStore&, Ref<API::DownloadClient>&&, const WebCore::ResourceRequest&, const std::optional<FrameInfoData>&, WebPageProxy* originatingPage);
+     void dataTaskWithRequest(WebPageProxy&, PAL::SessionID, WebCore::ResourceRequest&&, const std::optional<WebCore::SecurityOriginData>& topOrigin, bool shouldRunAtForegroundPriority, CompletionHandler<void(API::DataTask&)>&&);
+ 
+-    void addAllowedFirstPartyForCookies(WebProcessProxy&, const WebCore::RegistrableDomain& firstPartyForCookies, LoadedWebArchive, CompletionHandler<void()>&&);
++    void addAllowedFirstPartyForCookies(WebProcessProxy&, const WebCore::Site& firstPartyForCookies, LoadedWebArchive, CompletionHandler<void()>&&);
+     void addAllowedWebPageProxyIdentifier(WebProcessProxy&, WebPageProxyIdentifier);
+     void authorizeDownloadForWebProcess(WebProcessProxy&, DownloadID, CompletionHandler<void()>&&);
+     void addAllowedFilePaths(WebProcessProxy&, const Vector<String>& paths);
+@@ -493,7 +494,7 @@ private:
+ #endif
+ 
+     WeakHashSet<WebsiteDataStore> m_websiteDataStores;
+-    WeakHashMap<WebProcessProxy, std::pair<LoadedWebArchive, HashSet<WebCore::RegistrableDomain>>> m_allowedFirstPartiesForCookies;
++    WeakHashMap<WebProcessProxy, std::pair<LoadedWebArchive, HashSet<WebCore::Site>>> m_allowedFirstPartiesForCookies;
+     WeakHashMap<WebProcessProxy, HashSet<WebPageProxyIdentifier>> m_allowedWebPageProxyIdentifiers;
+     WeakHashMap<WebProcessProxy, HashSet<String>> m_allowedFilePathsByProcess;
+     HashMap<DataTaskIdentifier, Ref<API::DataTask>> m_dataTasks;
+diff --git a/Source/WebKit/UIProcess/WebFrameProxy.cpp b/Source/WebKit/UIProcess/WebFrameProxy.cpp
+index 72813630..6544209a 100644
+--- a/Source/WebKit/UIProcess/WebFrameProxy.cpp
++++ b/Source/WebKit/UIProcess/WebFrameProxy.cpp
+@@ -78,6 +78,7 @@
+ #include <WebCore/SecurityOriginData.h>
+ #include <WebCore/SecurityPolicy.h>
+ #include <WebCore/ShareableBitmapHandle.h>
++#include <WebCore/Site.h>
+ #include <WebCore/WebKitJSHandle.h>
+ #include <stdio.h>
+ #include <wtf/CallbackAggregator.h>
+@@ -586,7 +587,10 @@ void WebFrameProxy::prepareForProvisionalLoadInProcess(WebProcessProxy& process,
+     RefPtr page = m_page.get();
+     // FIXME: Main resource (of main or subframe) request redirects should go straight from the network to UI process so we don't need to make the processes for each domain in a redirect chain. <rdar://116202119>
+     Site mainFrameSite(page->mainFrame()->url());
+-    auto mainFrameDomain = WebCore::RegistrableDomain { protect(page->mainFrame())->securityOrigin()->data() };
++    // Built from the main frame's security origin rather than its URL so that it matches the Site the
++    // WebContent process derives from Document::topOrigin() for a shared worker request, including when
++    // the main frame is sandboxed into an opaque origin.
++    auto mainFrameFirstPartySite = WebCore::Site { protect(page->mainFrame())->securityOrigin()->data() };
+ 
+     // If we have an effectiveOrigin, it means we are loading about:blank which doesn't have any resources
+     // to load can commit it's provisional frame immediately
+@@ -598,7 +602,7 @@ void WebFrameProxy::prepareForProvisionalLoadInProcess(WebProcessProxy& process,
+ 
+     page->inspectorController().didCreateProvisionalFrame(provisionalFrame);
+ 
+-    auto continuation = [page = Ref { *page }, process = Ref { process }, mainFrameDomain, weakProvisionalFrame = WeakPtr { m_provisionalFrame }, pageID = page->webPageIDInProcess(process), completionHandler = WTF::move(completionHandler)] () mutable {
++    auto continuation = [page = Ref { *page }, process = Ref { process }, mainFrameFirstPartySite, weakProvisionalFrame = WeakPtr { m_provisionalFrame }, pageID = page->webPageIDInProcess(process), completionHandler = WTF::move(completionHandler)] () mutable {
+         RefPtr provisionalFrame = weakProvisionalFrame.get();
+         bool cancelled = !provisionalFrame || !protect(provisionalFrame->frame())->isConnected();
+         if (cancelled) {
+@@ -606,7 +610,7 @@ void WebFrameProxy::prepareForProvisionalLoadInProcess(WebProcessProxy& process,
+             return;
+         }
+ 
+-        page->addAllowedFirstPartyForCookies(process, mainFrameDomain, LoadedWebArchive::No, [weakProvisionalFrame = WTF::move(weakProvisionalFrame), pageID, completionHandler = WTF::move(completionHandler)] mutable {
++        page->addAllowedFirstPartyForCookies(process, mainFrameFirstPartySite, LoadedWebArchive::No, [weakProvisionalFrame = WTF::move(weakProvisionalFrame), pageID, completionHandler = WTF::move(completionHandler)] mutable {
+             RefPtr provisionalFrame = weakProvisionalFrame.get();
+             bool cancelled = !provisionalFrame || !protect(provisionalFrame->frame())->isConnected();
+             if (cancelled) {
+@@ -1265,13 +1269,13 @@ void WebFrameProxy::updateDocumentSecurityOrigin(WebFrameProxy* creator, ForInit
+ WebCore::CertificateInfo WebFrameProxy::provisionalCertificateInfoFromNetworkProcess(const URL& url) const
+ {
+     String hostAndPort = url.hostAndPort();
+-    if (!decltype(m_hostAndPortToCertificateInfo)::isValidKey(hostAndPort))
++    if (hostAndPort.isNull())
+         return { };
+ 
+     if (!url.protocolIsSecure())
+         return { };
+ 
+-    if (CertificateInfo certificateInfo = m_hostAndPortToCertificateInfo.get(hostAndPort); !certificateInfo.isEmpty())
++    if (CertificateInfo certificateInfo = protect(process())->certificateInfoForHostAndPort(hostAndPort); !certificateInfo.isEmpty())
+         return certificateInfo;
+ 
+     RefPtr page = m_page.get();
+@@ -1286,7 +1290,7 @@ WebCore::CertificateInfo WebFrameProxy::provisionalCertificateInfoFromNetworkPro
+ 
+     connection->waitForAndDispatchImmediately<Messages::WebFrameProxyFromNetworkProcess::ReceivedMainResourceResponseWithCertificateInfo>(frameID(), 0_s);
+ 
+-    CertificateInfo certificateInfo = m_hostAndPortToCertificateInfo.get(hostAndPort);
++    CertificateInfo certificateInfo = protect(process())->certificateInfoForHostAndPort(hostAndPort);
+     if (certificateInfo.isEmpty())
+         RELEASE_LOG_ERROR(Network, "Unexpectedly missing certificate info");
+     return certificateInfo;
+@@ -1299,20 +1303,17 @@ void WebFrameProxy::commitCertificateInfo(const URL& url, bool hasCertificateInf
+ 
+ void WebFrameProxy::receivedMainResourceResponseWithCertificateInfo(String&& hostAndPort, WebCore::CertificateInfo&& certificateInfo)
+ {
+-    // FIXME: This has no corresponding remove call. If we know a host is not being used by the back/forward
+-    // cache and is not being navigated to, we could clean up this map. Since we don't re-use main frames for
+-    // multiple hosts, this would only affect iframes that navigate to many hosts.
+-    if (decltype(m_hostAndPortToCertificateInfo)::isValidKey(hostAndPort))
+-        m_hostAndPortToCertificateInfo.set(WTF::move(hostAndPort), WTF::move(certificateInfo));
++    if (RefPtr provisionalFrame = m_provisionalFrame)
++        return protect(provisionalFrame->process())->setCertificateInfoForHostAndPort(WTF::move(hostAndPort), WTF::move(certificateInfo));
++    protect(process())->setCertificateInfoForHostAndPort(WTF::move(hostAndPort), WTF::move(certificateInfo));
+ }
+ 
+ void WebFrameProxy::setCertificateInfoForProcessSwapOnNavigationResponse(const URL& url, WebCore::CertificateInfo&& certificateInfo)
+ {
+     ASSERT(isMainFrame());
+     ASSERT(!certificateInfo.isEmpty());
+-    ASSERT(m_hostAndPortToCertificateInfo.isEmpty());
+ 
+-    m_hostAndPortToCertificateInfo.set(url.hostAndPort(), WTF::move(certificateInfo));
++    protect(process())->setCertificateInfoForHostAndPort(url.hostAndPort(), WTF::move(certificateInfo));
+ }
+ 
+ } // namespace WebKit
+diff --git a/Source/WebKit/UIProcess/WebFrameProxy.h b/Source/WebKit/UIProcess/WebFrameProxy.h
+index 0e0d324c..c1ef71d2 100644
+--- a/Source/WebKit/UIProcess/WebFrameProxy.h
++++ b/Source/WebKit/UIProcess/WebFrameProxy.h
+@@ -377,7 +377,6 @@ private:
+     String m_frameName;
+     bool m_containsPluginDocument { false };
+     WebCore::CertificateInfo m_certificateInfo;
+-    HashMap<String, WebCore::CertificateInfo> m_hostAndPortToCertificateInfo;
+     RefPtr<WebFramePolicyListenerProxy> m_activeListener;
+     WebCore::FrameIdentifier m_frameID;
+     ListHashSet<Ref<WebFrameProxy>> m_childFrames;
+diff --git a/Source/WebKit/UIProcess/WebPageProxy.cpp b/Source/WebKit/UIProcess/WebPageProxy.cpp
+index da5d5767..ec87b4ce 100644
+--- a/Source/WebKit/UIProcess/WebPageProxy.cpp
++++ b/Source/WebKit/UIProcess/WebPageProxy.cpp
+@@ -1195,7 +1195,7 @@ ProcessID WebPageProxy::gpuProcessID() const
+     return 0;
+ }
+ 
+-void WebPageProxy::addAllowedFirstPartyForCookies(WebProcessProxy& process, const WebCore::RegistrableDomain& firstPartyForCookies, LoadedWebArchive loadedWebArchive, CompletionHandler<void()>&& completionHandler)
++void WebPageProxy::addAllowedFirstPartyForCookies(WebProcessProxy& process, const WebCore::Site& firstPartyForCookies, LoadedWebArchive loadedWebArchive, CompletionHandler<void()>&& completionHandler)
+ {
+     Ref networkProcess = websiteDataStore().networkProcess();
+     // Record that this process is now legitimately hosting a frame of this page, so the network process can validate
+@@ -2662,7 +2662,7 @@ void WebPageProxy::loadAlternateHTML(Ref<WebCore::DataSegment>&& htmlData, const
+         });
+     };
+ 
+-    addAllowedFirstPartyForCookies(process, RegistrableDomain(baseURL), LoadedWebArchive::No, WTF::move(continueLoad));
++    addAllowedFirstPartyForCookies(process, Site { baseURL }, LoadedWebArchive::No, WTF::move(continueLoad));
+ }
+ 
+ void WebPageProxy::stopLoading()
+@@ -6087,7 +6087,7 @@ void WebPageProxy::receivedNavigationActionPolicyDecision(WebProcessProxy& proce
+             if (frame->isMainFrame()) {
+                 Ref process { sharedProcess->process() };
+                 auto shutdownPreventingScope = process->shutdownPreventingScope();
+-                addAllowedFirstPartyForCookies(sharedProcess->process(), site.domain(), LoadedWebArchive::No, [
++                addAllowedFirstPartyForCookies(sharedProcess->process(), site, LoadedWebArchive::No, [
+                     process = WTF::move(process),
+                     shutdownPreventingScope = WTF::move(shutdownPreventingScope),
+                     continueWithProcessForNavigation = WTF::move(continueWithProcessForNavigation)
+@@ -6526,12 +6526,12 @@ void WebPageProxy::continueNavigationInNewProcess(API::Navigation& navigation, W
+         continuation = [
+             protectedThis = Ref { *this },
+             continuation = WTF::move(continuation),
+-            navigationDomain = RegistrableDomain(navigation.currentRequest().url()),
++            navigationSite = Site { navigation.currentRequest().url() },
+             process,
+             preventProcessShutdownScope = process->shutdownPreventingScope(),
+             loadedWebArchive
+         ] () mutable {
+-            protectedThis->addAllowedFirstPartyForCookies(process, navigationDomain, loadedWebArchive, WTF::move(continuation));
++            protectedThis->addAllowedFirstPartyForCookies(process, navigationSite, loadedWebArchive, WTF::move(continuation));
+         };
+     }
+ 
+@@ -10503,7 +10503,7 @@ void WebPageProxy::performProcessSwapForNavigationResponse(API::Navigation& navi
+ {
+     auto preventProcessShutdown = processForNavigation->shutdownPreventingScope();
+ 
+-    auto domain = RegistrableDomain { navigation.currentRequest().url() };
++    auto site = Site { navigation.currentRequest().url() };
+     auto navigationID = navigation.navigationID();
+     Ref process = processForNavigation.get();
+ 
+@@ -10531,7 +10531,7 @@ void WebPageProxy::performProcessSwapForNavigationResponse(API::Navigation& navi
+         completionHandler(destinationWebProcessIdentifier);
+     };
+ 
+-    addAllowedFirstPartyForCookies(process, domain, LoadedWebArchive::No, WTF::move(addCookiesCompletionHandler));
++    addAllowedFirstPartyForCookies(process, site, LoadedWebArchive::No, WTF::move(addCookiesCompletionHandler));
+ }
+ 
+ void WebPageProxy::triggerBrowsingContextGroupSwitchForNavigation(WebCore::NavigationIdentifier navigationID, BrowsingContextGroupSwitchDecision browsingContextGroupSwitchDecision, const Site& responseSite, NetworkResourceLoadIdentifier existingNetworkResourceLoadIdentifierToResume, CompletionHandler<void(std::optional<WebCore::ProcessIdentifier> destinationWebProcess)>&& completionHandler)
+diff --git a/Source/WebKit/UIProcess/WebPageProxy.h b/Source/WebKit/UIProcess/WebPageProxy.h
+index e2bd468a..f96e133f 100644
+--- a/Source/WebKit/UIProcess/WebPageProxy.h
++++ b/Source/WebKit/UIProcess/WebPageProxy.h
+@@ -1886,7 +1886,7 @@ public:
+ 
+     // Grants a process this page's first-party cookie access and records that the process may reference this
+     // page's WebPageProxyIdentifier over IPC. Call this for any process that begins hosting a frame of the page.
+-    void addAllowedFirstPartyForCookies(WebProcessProxy&, const WebCore::RegistrableDomain&, LoadedWebArchive, CompletionHandler<void()>&&);
++    void addAllowedFirstPartyForCookies(WebProcessProxy&, const WebCore::Site&, LoadedWebArchive, CompletionHandler<void()>&&);
+ 
+     ProcessID gpuProcessID() const;
+     ProcessID NODELETE modelProcessID() const;
+diff --git a/Source/WebKit/UIProcess/WebProcessPool.cpp b/Source/WebKit/UIProcess/WebProcessPool.cpp
+index 5c749fc7..437f3bb9 100644
+--- a/Source/WebKit/UIProcess/WebProcessPool.cpp
++++ b/Source/WebKit/UIProcess/WebProcessPool.cpp
+@@ -768,7 +768,7 @@ void WebProcessPool::establishRemoteWorkerContextConnectionToNetworkProcess(Remo
+     auto aggregator = CallbackAggregator::create([completionHandler = WTF::move(completionHandler), remoteProcessIdentifier = remoteWorkerProcessProxy->coreProcessIdentifier()]() mutable {
+         completionHandler(remoteProcessIdentifier);
+     });
+-    protect(websiteDataStore->networkProcess())->addAllowedFirstPartyForCookies(*remoteWorkerProcessProxy, site.domain(), LoadedWebArchive::No, [aggregator] { });
++    protect(websiteDataStore->networkProcess())->addAllowedFirstPartyForCookies(*remoteWorkerProcessProxy, site, LoadedWebArchive::No, [aggregator] { });
+     if (auto workerPageProxyID = remoteWorkerProcessProxy->remoteWorkerPageProxyID(workerType))
+         protect(websiteDataStore->networkProcess())->addAllowedWebPageProxyIdentifier(*remoteWorkerProcessProxy, *workerPageProxyID);
+     remoteWorkerProcessProxy->establishRemoteWorkerContext(workerType, preferencesStore.store, site, serviceWorkerPageIdentifier, workerCrossOriginEmbedderPolicy, [aggregator] { });
+@@ -2253,7 +2253,7 @@ void WebProcessPool::processForNavigation(WebPageProxy& page, WebFrameProxy& fra
+         if (RefPtr frameProcess = browsingContextGroup.processForSite(site))
+             process = &frameProcess->process();
+         if (process && process->websiteDataStore() == dataStore.ptr() && process->websiteDataStore() == &page.websiteDataStore() && !process->isInProcessCache() && process->lockdownMode() == lockdownMode && enhancedSecurityStatesAreConsistent(process->enhancedSecurity(), enhancedSecurity)) {
+-            page.addAllowedFirstPartyForCookies(*process, mainFrameSite.domain(), LoadedWebArchive::No, [completionHandler = WTF::move(completionHandler), process, preventProcessShutdownScope = process->shutdownPreventingScope()] () mutable {
++            page.addAllowedFirstPartyForCookies(*process, mainFrameSite, LoadedWebArchive::No, [completionHandler = WTF::move(completionHandler), process, preventProcessShutdownScope = process->shutdownPreventingScope()] () mutable {
+                 completionHandler(process.releaseNonNull(), nullptr, "Found process for the same site"_s);
+             });
+             return;
+@@ -2310,7 +2310,7 @@ void WebProcessPool::prepareProcessForNavigation(Ref<WebProcessProxy>&& process,
+         completionHandler(WTF::move(process), suspendedPage, reason);
+     };
+ 
+-    page.addAllowedFirstPartyForCookies(process, site.domain(), loadedWebArchive, [callCompletionHandler = WTF::move(callCompletionHandler), weakSuspendedPage = WeakPtr { suspendedPage }]() mutable {
++    page.addAllowedFirstPartyForCookies(process, site, loadedWebArchive, [callCompletionHandler = WTF::move(callCompletionHandler), weakSuspendedPage = WeakPtr { suspendedPage }]() mutable {
+         if (RefPtr suspendedPage = weakSuspendedPage.get())
+             suspendedPage->waitUntilReadyToUnsuspend(WTF::move(callCompletionHandler));
+         else
+diff --git a/Source/WebKit/UIProcess/WebProcessProxy.cpp b/Source/WebKit/UIProcess/WebProcessProxy.cpp
+index c1902d39..7102c322 100644
+--- a/Source/WebKit/UIProcess/WebProcessProxy.cpp
++++ b/Source/WebKit/UIProcess/WebProcessProxy.cpp
+@@ -292,9 +292,9 @@ void WebProcessProxy::forWebPagesWithOrigin(PAL::SessionID sessionID, const Secu
+     }
+ }
+ 
+-void WebProcessProxy::addAllowedFirstPartyForCookies(const WebCore::RegistrableDomain& domain, LoadedWebArchive loadedWebArchive)
++void WebProcessProxy::addAllowedFirstPartyForCookies(const WebCore::Site& site, LoadedWebArchive loadedWebArchive)
+ {
+-    m_allowedFirstPartiesForCookies.second.add(domain);
++    m_allowedFirstPartiesForCookies.second.add(site);
+     if (loadedWebArchive == LoadedWebArchive::Yes)
+         m_allowedFirstPartiesForCookies.first = LoadedWebArchive::Yes;
+ }
+@@ -3521,6 +3521,23 @@ void WebProcessProxy::takeInvalidMessageStringForTesting(CompletionHandler<void(
+ }
+ #endif
+ 
++WebCore::CertificateInfo WebProcessProxy::certificateInfoForHostAndPort(const String& hostAndPort) const
++{
++    if (!decltype(m_hostAndPortToCertificateInfo)::isValidKey(hostAndPort))
++        return { };
++
++    return m_hostAndPortToCertificateInfo.get(hostAndPort);
++}
++
++void WebProcessProxy::setCertificateInfoForHostAndPort(String&& hostAndPort, WebCore::CertificateInfo&& certificateInfo)
++{
++    if (!decltype(m_hostAndPortToCertificateInfo)::isValidKey(hostAndPort))
++        return;
++
++    // FIXME: This has no corresponding remove call. It is bounded by the number of distinct hosts and ports loaded in this process.
++    m_hostAndPortToCertificateInfo.set(WTF::move(hostAndPort), WTF::move(certificateInfo));
++}
++
+ } // namespace WebKit
+ 
+ #undef MESSAGE_CHECK
+diff --git a/Source/WebKit/UIProcess/WebProcessProxy.h b/Source/WebKit/UIProcess/WebProcessProxy.h
+index 12977c08..ae1de9a6 100644
+--- a/Source/WebKit/UIProcess/WebProcessProxy.h
++++ b/Source/WebKit/UIProcess/WebProcessProxy.h
+@@ -46,6 +46,7 @@
+ #include "WebPageProxyIdentifier.h"
+ #include "WebPermissionControllerProxy.h"
+ #include "WebProcessCreationParameters.h"
++#include <WebCore/CertificateInfo.h>
+ #include <WebCore/CrossOriginMode.h>
+ #include <WebCore/FrameIdentifier.h>
+ #include <WebCore/MediaProducer.h>
+@@ -210,8 +211,8 @@ public:
+     ~WebProcessProxy();
+ 
+     static void forWebPagesWithOrigin(PAL::SessionID, const WebCore::SecurityOriginData&, NOESCAPE const Function<void(WebPageProxy&)>&);
+-    void addAllowedFirstPartyForCookies(const WebCore::RegistrableDomain&, LoadedWebArchive);
+-    const std::pair<LoadedWebArchive, HashSet<WebCore::RegistrableDomain>>& allowedFirstPartiesForCookiesData() const { return m_allowedFirstPartiesForCookies; }
++    void addAllowedFirstPartyForCookies(const WebCore::Site&, LoadedWebArchive);
++    const std::pair<LoadedWebArchive, HashSet<WebCore::Site>>& allowedFirstPartiesForCookiesData() const { return m_allowedFirstPartiesForCookies; }
+ 
+     void initializeWebProcess(WebProcessCreationParameters&&);
+ 
+@@ -250,6 +251,9 @@ public:
+     void setIsInProcessCache(bool, WillShutDown = WillShutDown::No);
+     bool isInProcessCache() const { return m_isInProcessCache; }
+ 
++    WebCore::CertificateInfo certificateInfoForHostAndPort(const String&) const;
++    void setCertificateInfoForHostAndPort(String&&, WebCore::CertificateInfo&&);
++
+     void enableRemoteWorkers(RemoteWorkerType, const WebUserContentControllerProxy&);
+     void disableRemoteWorkers(OptionSet<RemoteWorkerType>);
+ 
+@@ -864,8 +868,9 @@ private:
+     HashSet<WebCore::Site> m_committedSites;
+     std::optional<WebCore::Site> m_sharedProcessMainFrameSite;
+     HashSet<WebCore::RegistrableDomain> m_sharedProcessDomains;
+-    std::pair<LoadedWebArchive, HashSet<WebCore::RegistrableDomain>> m_allowedFirstPartiesForCookies { LoadedWebArchive::No, { } };
++    std::pair<LoadedWebArchive, HashSet<WebCore::Site>> m_allowedFirstPartiesForCookies { LoadedWebArchive::No, { } };
+     bool m_isInProcessCache { false };
++    HashMap<String, WebCore::CertificateInfo> m_hostAndPortToCertificateInfo;
+     bool m_isShuttingDown { false };
+ 
+     IsolatedProcessType m_isolatedProcessType { IsolatedProcessType::Unspecified };
