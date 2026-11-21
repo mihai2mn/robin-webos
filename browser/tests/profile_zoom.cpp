@@ -73,6 +73,9 @@ int main() {
         check(p.icon_for("https://a.example/page").empty(), "non-http icon URLs rejected");
         p.set_icon("https://a.example/page", "https://a.example/icon.png");
         check(p.icon_for("https://a.example/page") == "https://a.example/icon.png", "https icon URL accepted");
+        p.clear_history(0);
+        check(p.icon_for("https://a.example/page").empty(), "clearing all history clears saved site icons");
+        p.set_site_zoom("https://www.a.example/one", 3);  // restore zoom for persistence test below
         p.flush_now();
     }
 
