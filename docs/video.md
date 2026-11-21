@@ -38,7 +38,8 @@ All of this was checked on the LG CX (webOS 5.3) with test clips and the engine 
 ## Hybrid policy
 
 The page script `engine/ubo/compat.js` decides per video element, before its player starts. Turn it off with
-`WPE_BROWSER_DEBUG_HYBRID=0`. The decisions appear in `engine.log` as `hybrid video:` lines.
+`WPE_BROWSER_DEBUG_HYBRID=0`. The decisions appear in `engine.log` as `hybrid video:` lines when
+`WPE_BROWSER_DEBUG_HYBRID=log` or `WPE_BROWSER_DEBUG_CONSOLE=1` is set.
 
 - **Software, in the page:** a muted video smaller than 960 by 540 CSS pixels, not fullscreen, with no controls, not
   protected. Previews and animated clips stay in the page and scroll with it. Patch 0010 supports this.
@@ -91,7 +92,8 @@ one for every kind of player.
 ## Known issues
 
 - **A seek in one large streaming site's TV player** gave "pipeline error 100", smeared blocks, and no presented frames
-  while units kept being fed. After it the decoder stayed busy until the TV restarted. Seen once. Open.
+  while units kept being fed. After it the decoder stayed busy until the TV restarted. Seen once; mid-stream decoder
+  error recovery was subsequently added in `browser/media_server.cpp`.
 - **Audio has not been heard.** It was checked in logs only: the load, PCM and volume calls and their return values.
 - An unmuted short clip inside an article moves to the hardware plane, which does not scroll exactly with the page.
 - One hardware video at a time. A second one loses its picture.
@@ -99,5 +101,5 @@ one for every kind of player.
   `WPE_BROWSER_DEBUG_AUTOPLAY=allow` is for tests.
 - Test pages need a server with HTTP range support.
 - The 64-bit engine has no hardware video ([engine64.md](engine64.md)).
-- Memory: the page cache is off by default and the web and network processes have pressure limits (420 MB by
-  default for the network process). The `appinfo.json` declares `requiredMemory` 450.
+- Memory: the page cache is off by default and the web and network processes have pressure limits (520 MB by
+  default for each). The `appinfo.json` declares `requiredMemory` 1700.

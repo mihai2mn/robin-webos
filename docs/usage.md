@@ -54,7 +54,9 @@ The zooms are stored in `zooms.json` in the profile folder (up to 500 sites). Be
 | `{"wpebPresent": "direct" \| "shm"}` | draw pages straight to the screen (default) or via shared memory |
 | `{"wpebGlibc": "bundled" \| "system"}` | force the engine's bundled glibc or the TV's (default: bundled only where the TV's glibc is older than 2.28) |
 | `{"wpebShow": "home" \| "panel" \| "quick" \| "side" \| "zoom" \| "tabs"}` | open that screen a few seconds after start (screenshots, tests) |
-| `{"wpebEnv": {"NAME": "value"}}` | environment for the engine, e.g. `WPE_BROWSER_DEBUG_CONSOLE=1` (page console, EME/MSE calls and media events to `engine.log`), `WPE_BROWSER_DESKTOP_YOUTUBE=1`, `GST_DEBUG`, `WEBKIT_*`, `WPEB_HW_OPUS=1` (experimental hardware Opus) |
+| `{"wpebShmVideo": "1"}` | opt into hardware video when running with `{"wpebPresent": "shm"}` |
+| `{"wpebVideoBackend": "starfish" \| "ndl"}` | select the hardware video backend (default: `starfish`, with `ndl` fallback) |
+| `{"wpebEnv": {"NAME": "value"}}` | allowlisted engine environment prefixes: `WEBKIT_*` (excluding `WEBKIT_EXEC_PATH` and `WEBKIT_INJECTED_BUNDLE_PATH`), `JSC_*`, `WPE_BROWSER_DEBUG*` (e.g. `WPE_BROWSER_DEBUG_CONSOLE=1`, `WPE_BROWSER_DEBUG_ENGINE=64`), `GST_DEBUG`, `G_TLS_*`, `MSE_*` |
 
 ## Logs
 

@@ -88,7 +88,7 @@ Output: `build/release/*.ipk`, `MD5SUMS` and `BUILD-INFO.txt` (commit, WebKit li
    `WK_SHARED`, overwrites every differing source file from the pristine tree, rebuilds with ninja, and fails unless
    the copy then has no differing file. Needs the WebKit tarball in `$BUILD_ROOT/dl/wpewebkit/`. About 6 GB of disk.
    `FULL=1` cleans first (hours). `webkit32 clean` removes the copy. Caveat: ninja trusts object mtimes.
-5. `engine32`: `wpe-engine` and `libgstwpebmedia.so` against the 2.54.3 headers, in the container.
+5. `engine32`: `wpe-engine`, `libgstwpebmedia.so`, and `libgstinterleave.so` (`tools/build-gst-interleave.sh`) against the 2.54.3 headers, in the container.
 6. `backend`: `libWPEBackend-webos.so` and `libwpeb-owner.so` with the NDK.
 7. `ubo`: **needs network**. `tools/ubo/update.py` downloads uBO's filter lists and resources (the uBO commit is
    recorded in `ubo/COMMIT`). `tools/ubo/build.sh data` compiles them (needs `cargo` and `node`).

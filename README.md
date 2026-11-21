@@ -25,7 +25,8 @@ number 0.3.3 of the base it was made from.
 - **An optional 64-bit (aarch64) engine** in the same package. It runs the 64-bit JIT but draws in software and has no
   hardware video ([engine64.md](docs/engine64.md)).
 - **Hardware video through LG's Starfish pipeline**: H.264 with AAC audio, other decoded audio (Opus, Vorbis) sent as
-  PCM, page volume and mute, a real crop when a video is partly off screen, and seeking. A hybrid policy keeps small
+  PCM, page volume and mute, scaling into the visible area when a video is partly off screen (or a real crop where the
+  compositor supports it), and seeking. A hybrid policy keeps small
   muted previews in the page and puts the rest on the hardware plane ([video.md](docs/video.md)).
 - **Remote media keys** (play/pause, stop, rewind and fast-forward by 10 s) for the page's main video, and **page zoom
   remembered per site** ([usage.md](docs/usage.md)).
