@@ -617,7 +617,7 @@ constexpr const char *kScrollScript = R"JS((function () {
         var links = document.querySelectorAll('link[rel]');
         for (var i = 0; i < links.length; i++) {
             var l = links[i], rel = (l.getAttribute('rel') || '').toLowerCase(), href = l.href || '';
-            if (!href || href.indexOf('data:') === 0) continue;
+            if (!href || !/^https?:\/\//i.test(href)) continue;
             var touch = rel.indexOf('apple-touch-icon') >= 0, icon = /(^|\s)icon(\s|$)/.test(rel);
             if (!touch && !icon) continue;
             var type = (l.getAttribute('type') || '').toLowerCase(), path = href.split(/[?#]/)[0].toLowerCase();
@@ -791,7 +791,11 @@ gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision, W
 void on_icon_message(WebKitUserContentManager *, JSCValue *value, gpointer data)
 {
     gchar *url = jsc_value_to_string(value);
-    send_text(WPE_ENGINE_ICON, GPOINTER_TO_UINT(data), url ? url : "");
+    const char *safe = (url && (*url == '\0' || g_ascii_strncasecmp(url, "http://", 7) == 0 ||
+                                g_ascii_strncasecmp(url, "https://", 8) == 0))
+                           ? url
+                           : "";
+    send_text(WPE_ENGINE_ICON, GPOINTER_TO_UINT(data), safe);
     g_free(url);
 }
 
@@ -981,7 +985,8 @@ constexpr const char *kConsoleScript = R"JS((function () {
 void on_console_message(WebKitUserContentManager *, JSCValue *value, gpointer data)
 {
     gchar *text = jsc_value_to_string(value);
-    log_msg("tab %u page: %s", GPOINTER_TO_UINT(data), text);
+    if (text)
+        log_msg("tab %u page: %.2048s", GPOINTER_TO_UINT(data), text);
     g_free(text);
 }
 
@@ -1013,7 +1018,7 @@ void on_hybrid_message(WebKitUserContentManager *, JSCValue *value, gpointer dat
 {
     gchar *text = jsc_value_to_string(value);
     if (text && *text)
-        log_msg("tab %u hybrid video: %s", GPOINTER_TO_UINT(data), text);
+        log_msg("tab %u hybrid video: %.2048s", GPOINTER_TO_UINT(data), text);
     g_free(text);
 }
 
@@ -1966,7 +1971,9 @@ void on_wren_scheme(WebKitURISchemeRequest *request, gpointer)
 void on_adblock_message(WebKitUserContentManager *, JSCValue *value, gpointer view)
 {
     const char *uri = webkit_web_view_get_uri(WEBKIT_WEB_VIEW(view));
-    if (!uri || !g_str_has_prefix(uri, "wren://adblock") || ubo.dir.empty() || !jsc_value_is_string(value))
+    const bool is_adblock = uri && g_str_has_prefix(uri, "wren://adblock") &&
+                            (uri[14] == '\0' || uri[14] == '/' || uri[14] == '?' || uri[14] == '#');
+    if (!is_adblock || ubo.dir.empty() || !jsc_value_is_string(value))
         return;
     gchar *text = jsc_value_to_string(value);
     if (g_str_has_prefix(text, "mine\n")) {

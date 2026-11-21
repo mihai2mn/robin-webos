@@ -28,6 +28,9 @@ int main() {
     same(redact_urls("no url here?really#yes"), "no url here?really#yes");
     same(redact_urls("https://a.b/?q=1 then plain? text"), "https://a.b/?… then plain? text");
     same(redact_urls("(https://a.b/x?y), https://c.d"), "(https://a.b/x?…), https://c.d");
+    same(redact_urls("https://user:secret@host.example/path?k=v"), "https://…@host.example/path?…");
+    same(redact_urls("http://a@b:pw@host.example/p"), "http://…@host.example/p");
+    same(redact_urls("https://host.example/@handle/post"), "https://host.example/@handle/post");
     same(redact_urls(""), "");
 
     char pattern[] = "/tmp/wpe-logexport-test-XXXXXX";

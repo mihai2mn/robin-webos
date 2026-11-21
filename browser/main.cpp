@@ -871,6 +871,8 @@ class App : public wnk::app::Delegate {
             if (e.down && !e.repeat) {
                 if (t->fullscreen) {
                     engine_.exit_fullscreen(t->id);  // as Escape on a desktop browser
+                    // Clear fullscreen locally too so a spoofed message handler call cannot trap Back.
+                    tab(active_)->fullscreen = false;
                 } else if (t->can_back) {
                     engine_.go_back(t->id);
                 } else
@@ -1310,8 +1312,14 @@ class App : public wnk::app::Delegate {
             Tab *t = tab(id);
             if (t == nullptr) return;
             if (e == WPE_LOAD_FINISHED) profile_.add_visit(t->title, t->url);
-            if (e == WPE_LOAD_STARTED) release_video_of(id, "navigation");
-            if (e == WPE_LOAD_COMMITTED && id == active_) apply_zoom();
+            if (e == WPE_LOAD_STARTED) {
+                release_video_of(id, "navigation");
+                t->fullscreen = false;
+            }
+            if (e == WPE_LOAD_COMMITTED) {
+                t->fullscreen = false;
+                if (id == active_) apply_zoom();
+            }
             const bool loading = e == WPE_LOAD_STARTED || e == WPE_LOAD_COMMITTED;
             if (loading != t->loading) {
                 t->loading = loading;

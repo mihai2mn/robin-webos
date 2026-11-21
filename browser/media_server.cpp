@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -108,10 +109,11 @@ bool MediaServer::start(const std::string &path, bool video_window, std::string 
     std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
     ::unlink(path.c_str());
     const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0 || ::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 || ::listen(fd, 4) != 0 ||
-        ::pipe2(wake_, O_CLOEXEC) != 0) {
+    if (fd < 0 || ::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 ||
+        ::chmod(path.c_str(), 0600) != 0 || ::listen(fd, 4) != 0 || ::pipe2(wake_, O_CLOEXEC) != 0) {
         *why = std::string("media socket: ") + std::strerror(errno);
         if (fd >= 0) ::close(fd);
+        ::unlink(path.c_str());
         return false;
     }
     path_ = path;
@@ -327,6 +329,18 @@ void MediaServer::accept_loop() {
         if (!(fds[0].revents & POLLIN)) continue;
         const int fd = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
         if (fd < 0) continue;
+        struct ucred cred{};
+        socklen_t cred_len = sizeof(cred);
+        if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) != 0 || cred.uid != ::getuid()) {
+            WNK_LOGW(kCat, "media socket: rejected peer (uid %u)", static_cast<unsigned>(cred.uid));
+            ::close(fd);
+            continue;
+        }
+        if (connections_.load() >= 16) {
+            WNK_LOGW(kCat, "media socket: connection limit reached");
+            ::close(fd);
+            continue;
+        }
         const uint64_t id = next_id_++;
         ++connections_;
         std::thread([this, fd, id] {

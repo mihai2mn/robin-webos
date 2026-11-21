@@ -25,10 +25,11 @@ data)
         python3 "$UBO/update.py" $(cat "$UBO/ubo/COMMIT" 2>/dev/null)
     rm -rf "$OUT/data" && mkdir -p "$OUT/data/lists"
     node "$UBO/scriptlets-to-json.mjs" "$UBO/ubo/js/resources/scriptlets.js" "$OUT/scriptlets.json"
-    LISTS=$(python3 -c "
-import json,sys
-for l in json.load(open('$UBO/lists/lists.json')):
-    print('$UBO/lists/' + l['name'] + '.txt' + ''.join(':' + f for f in l['flags'].split(',') if f))")
+    LISTS=$(python3 -c '
+import json, os, sys
+ubo = sys.argv[1]
+for l in json.load(open(os.path.join(ubo, "lists", "lists.json"))):
+    print(os.path.join(ubo, "lists", l["name"] + ".txt") + "".join(":" + f for f in l["flags"].split(",") if f))' "$UBO")
     # shellcheck disable=SC2086
     cargo run --quiet --release --manifest-path "$SRC/engine/ubo/Cargo.toml" --features compiler \
         --target-dir "$OUT/cargo-host" --bin wren-ubo-compile -- \
@@ -38,10 +39,11 @@ for l in json.load(open('$UBO/lists/lists.json')):
     sh "$UBO/popups.sh" "$OUT/data/popups.txt" "$UBO"/lists/*.txt "$UBO/wren-filters.txt"
     # Extra lists: one engine each, with uBO's Unbreak and Quick fixes so their exceptions apply inside it, and
     # lists/catalog.ini for the engine's settings page (title, what it does, on by default, size).
-    python3 -c "
-import json
-for l in json.load(open('$UBO/lists/optional.json')):
-    print(l['name'], '$UBO/lists/' + l['name'] + '.txt' + ''.join(':' + f for f in l['flags'].split(',') if f))" |
+    python3 -c '
+import json, os, sys
+ubo = sys.argv[1]
+for l in json.load(open(os.path.join(ubo, "lists", "optional.json"))):
+    print(l["name"], os.path.join(ubo, "lists", l["name"] + ".txt") + "".join(":" + f for f in l["flags"].split(",") if f))' "$UBO" |
     while read -r name spec; do
         cargo run --quiet --release --manifest-path "$SRC/engine/ubo/Cargo.toml" --features compiler \
             --target-dir "$OUT/cargo-host" --bin wren-ubo-compile -- --list-engine "$OUT/data/lists/$name.dat" \

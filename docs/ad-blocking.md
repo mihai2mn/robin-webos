@@ -1,20 +1,15 @@
 # Ad blocking
 
-Wren has two ad blockers. The package carries one or both; the UI starts the engine with the uBO blocker when it
-is there, and with the rule list otherwise (`browser/engine_client.cpp`). Both are off on YouTube and on the hosts
-where the user allowed ads (**Hold OK → Allow ads on this site**).
+Wren uses a uBlock-Origin-compatible ad blocker (`engine/ubo`, `tools/ubo`) loaded as a WebKit web process extension
+(`lib/web-extensions/libwren-ubo.so`), paired with a `$popup`/`$popunder` rule matcher in the engine
+(`engine/src/popup_filter.h`). Settings, optional extra filter lists, allowed hosts, and custom rules are managed on
+`wren://adblock`.
 
-## The rule list (tools/adblock)
+## How it works
 
-EasyList and EasyPrivacy, converted at build time to WebKit's content-blocker format and compiled into a store
-the engine loads. Fast (WebKit matches requests in the network process) but lossy: WebKit's format cannot say
-uBO's redirects, scriptlets, `removeparam`, procedural cosmetic filters or many exceptions, so those are dropped.
-
-## The uBO blocker (engine/ubo, tools/ubo) — prototype
-
-uBlock Origin's default lists and uBO's own resources, matched with Brave's
+uBlock Origin's default lists, optional extra lists, and uBO's own resources are matched with Brave's
 [adblock-rust](https://github.com/brave/adblock-rust) (the engine Brave uses for the same lists) inside the web
-process, as a WebKit web process extension (`lib/web-extensions/libwren-ubo.so`):
+process:
 
 | | how |
 |---|---|
@@ -54,8 +49,8 @@ tools/ubo/build.sh lib       # the extension for the TV -> build/ubo/armv7-unkno
 tools/ubo/test/run.sh        # desktop test with the system's WPE WebKit
 ```
 
-`tools/stage-engine.sh` then puts `engine/ubo/` and `engine/lib/web-extensions/` in the package.
-`WREN_UBO=0` in the engine's environment falls back to the rule list; `WREN_UBO_LOG=1` logs each blocked,
+`tools/package-release.sh` puts `engine/ubo/` and `engine/lib/web-extensions/` in the package.
+`WREN_UBO=0` in the engine's environment disables the ad blocker; `WREN_UBO_LOG=1` logs each blocked,
 redirected or rewritten request, `WREN_UBO_LOG=2` every request with the type it was given.
 
 Desktop test (WPE WebKit 2.54, 2026-11-19): network blocking, `redirect=` for scripts and images, `removeparam`,

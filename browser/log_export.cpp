@@ -66,12 +66,24 @@ std::string redact_urls(const std::string &text) {
         }
         std::size_t end = at + len;
         while (end < text.size() && !url_end(text[end])) ++end;
-        const std::size_t cut = text.find_first_of("?#", at + len);
+        const std::size_t auth_start = at + len;
+        const std::size_t auth_sep = text.find_first_of("/?#", auth_start);
+        const std::size_t auth_end = auth_sep == std::string::npos ? end : std::min(end, auth_sep);
+        out.append(text, i, auth_start - i);
+        std::size_t host_start = auth_start;
+        if (auth_end > auth_start) {
+            const std::size_t at_sign = text.rfind('@', auth_end - 1);
+            if (at_sign != std::string::npos && at_sign >= auth_start) {
+                out += "…@";
+                host_start = at_sign + 1;
+            }
+        }
+        const std::size_t cut = text.find_first_of("?#", host_start);
         if (cut != std::string::npos && cut < end) {
-            out.append(text, i, cut - i);
+            out.append(text, host_start, cut - host_start);
             out += "?…";
         } else {
-            out.append(text, i, end - i);
+            out.append(text, host_start, end - host_start);
         }
         i = end;
     }

@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
             launch.data_dir = base / "data";
             launch.cache_dir = base / "cache";
             launch.gpu = gpu;
+            launch.extra_env = {{"WEBKIT_EXEC_PATH", "/tmp/bad"}, {"WEBKIT_INJECTED_BUNDLE_PATH", "/tmp/bad"}};
             browser::EngineClient client({});
             std::string error;
             require(client.start(launch, error), error);

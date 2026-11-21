@@ -211,8 +211,21 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
         wnk::media::StarfishBackend::frame_rate_fraction(fps, &num, &den);
         fps_info = ",\"videoFpsValue\":" + std::to_string(num) + ",\"videoFpsScale\":" + std::to_string(den);
     }
+    auto safe_id = [](const std::string &s) {
+        if (s.empty() || s.size() > 256) return false;
+        for (unsigned char c : s) {
+            const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                            c == '.' || c == '_' || c == '-' || c == ':' || c == '/';
+            if (!ok) return false;
+        }
+        return true;
+    };
+    if (!safe_id(app_id) || !safe_id(window_id)) {
+        *error = "invalid Starfish appId or windowId";
+        return false;
+    }
     char payload[4096];
-    std::snprintf(payload, sizeof payload,
+    const int n = std::snprintf(payload, sizeof payload,
                   "{\"args\":[{\"mediaTransportType\":\"BUFFERSTREAM\",\"option\":{\"appId\":\"%s\",\"windowId\":\"%s\","
                   "\"externalStreamingInfo\":{\"contents\":{\"codec\":{\"video\":\"%s\"%s},\"esInfo\":{\"pauseAtDecodeTime\":false,"
                   "\"ptsToDecode\":0,\"seperatedPTS\":true%s},\"format\":\"RAW\",\"provider\":\"wpebrowser\"%s},"
@@ -226,6 +239,10 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
                   !with_audio ? "" : opus ? ",\"audio\":\"OPUS\"" : pcm ? ",\"audio\":\"PCM\"" : ",\"audio\":\"AAC\"", fps_info.c_str(), audio_info.c_str(),
                   with_audio ? "true" : "false", with_audio ? 1048576 : 32768, with_audio ? "true" : "false",
                   "false", max_w, max_h, max_fps);
+    if (n < 0 || static_cast<size_t>(n) >= sizeof payload) {
+        *error = "StarfishMediaAPIs load payload truncated";
+        return false;
+    }
     api_ = new_api();
     if (api_ == nullptr) {
         *error = "out of memory";

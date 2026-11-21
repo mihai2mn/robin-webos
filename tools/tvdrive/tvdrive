@@ -21,6 +21,7 @@ ti() { local a="" x; for x in "$@"; do a="$a $(printf '%q' "$x")"; done
        tvssh "/opt/bin/python3 - $a" < "$DIR/tvinput.py"; }
 die() { echo "tvdrive: $*" >&2; exit 1; }
 num() { case "$1" in ''|*[!0-9-]*) die "not a number: '$1'";; esac; }
+sq()  { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 now() { date +%H%M%S; }
 ffm() { command -v ffmpeg 2>/dev/null || command -v ffmpeg.exe 2>/dev/null; }
 
@@ -67,13 +68,15 @@ case "$cmd" in
   open)
     url=${1:-}; [ -n "$url" ] || die "open <url> [--fresh]"; shift
     fresh=0; wait=8
-    while [ $# -gt 0 ]; do case "$1" in --fresh) fresh=1;; --wait) wait=$2; shift;; esac; shift; done
+    while [ $# -gt 0 ]; do case "$1" in --fresh) fresh=1;; --wait) wait=${2:-}; shift;; esac; shift; done
+    num "$wait"
     esc=${url//\\/\\\\}; esc=${esc//\"/\\\"}
-    if [ $fresh = 1 ]; then tvsh "tv close $APP >/dev/null 2>&1; sleep 2"; fi
-    tvsh "tv launch $APP '{\"target\":\"$esc\"}'" || die "launch failed"
+    payload="{\"target\":\"$esc\"}"
+    if [ $fresh = 1 ]; then tvsh "tv close $(sq "$APP") >/dev/null 2>&1; sleep 2"; fi
+    tvsh "tv launch $(sq "$APP") $(sq "$payload")" || die "launch failed"
     sleep "$wait" ;;
 
-  close) tvsh "tv close $APP" ;;
+  close) tvsh "tv close $(sq "$APP")" ;;
 
   frames)
     secs=4; fps=10; d=""
@@ -122,11 +125,11 @@ case "$cmd" in
 
   log)
     if [ "${1:-}" = "--follow" ] || [ "${1:-}" = "-f" ]; then
-      tvssh "tail -n 20 -f $RUN/events.log"
+      tvssh "tail -n 20 -f $(sq "$RUN/events.log")"
     else
       n=${1:-40}; num "$n"
-      echo "== events.log (last $n)"; tvssh "tail -n $n $RUN/events.log"
-      echo "== engine.log (last $n)"; tvssh "tail -n $n $RUN/engine.log"
+      echo "== events.log (last $n)"; tvssh "tail -n $n $(sq "$RUN/events.log")"
+      echo "== engine.log (last $n)"; tvssh "tail -n $n $(sq "$RUN/engine.log")"
     fi ;;
 
   state)
@@ -141,7 +144,7 @@ echo \"lock: \$(head -n1 $LOCKDIR/owner 2>/dev/null || echo free)\"" ;;
 
   lock)
     owner=${1:-}; [ -n "$owner" ] || die "lock <owner-name>"
-    if tvsh "mkdir $LOCKDIR 2>/dev/null && echo '$owner' > $LOCKDIR/owner && date +%s >> $LOCKDIR/owner"; then echo "lock taken by $owner (hold <= 25 min)"
+    if tvsh "mkdir $LOCKDIR 2>/dev/null && printf '%s\n' $(sq "$owner") > $LOCKDIR/owner && date +%s >> $LOCKDIR/owner"; then echo "lock taken by $owner (hold <= 25 min)"
     else echo "lock held by: $(tvssh "head -n1 $LOCKDIR/owner" 2>/dev/null)"; exit 1; fi ;;
   unlock)
     owner=${1:-}; [ -n "$owner" ] || die "unlock <owner-name>"
