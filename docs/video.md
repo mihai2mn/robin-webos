@@ -30,7 +30,7 @@ All of this was checked on the LG CX (webOS 5.3) with test clips and the engine 
   the video, because webOS 5 has no PulseAudio server. The PCM leads by 400 ms, as in the kit's backend.
 - **Volume and mute** from the page reach Starfish (`setVolume`, `setAudioMute`). A muted video still builds the
   hardware chain, so unmuting later works.
-- **Crop**: a video partly off screen or under the toolbar is cut with the exported window's crop region, not squashed.
+- **Partly off screen**: the compositor on the tested TV offers only version 1 of its foreign-window interface, which has no crop request. So a video scrolled partly off the screen or under the toolbar shows the **whole picture fitted into the visible part** (smaller, with side bars). The kit patch 0007 uses a real crop where the compositor has one. Hiding the video instead was tried and dropped: a black box looked worse. `WPEB_CROP_FALLBACK=squash` is the default behaviour, kept as a switch.
 - **Scrolling**: the plane is placed from the page's measured scroll motion and settles onto the hole when it stops.
   The plane-to-hole gap on a scroll test page fell from 10.6 px to 2.0 px on average.
 - Navigating away, closing the tab or going home releases the decoder.
@@ -49,25 +49,49 @@ The page script `engine/ubo/compat.js` decides per video element, before its pla
 ## Fullscreen
 
 WebKit's own fullscreen leaves the page black and the video plane at its old place, because the video layer is no longer
-painted as a hole. So for a video on the hardware plane (or an element that contains one) `engine/ubo/compat.js` does not
-use WebKit's fullscreen. It emulates it:
+painted as a hole. So for a video that is on the hardware plane, or that the fullscreen rule moves there, and for any
+element that contains such a video, `engine/ubo/compat.js` does not use WebKit's fullscreen. It emulates it:
 
-- The element is stretched over the whole screen with fixed positioning, a black background and the video scaled to fit.
-- Ancestors that would trap a fixed element or hold it under other content give up those properties while fullscreen:
-  transform, filter, perspective, contain, will-change, clip-path, mask, opacity and stacking z-index. The page's
-  scrolling is locked (`html` and `body` get `overflow: hidden`), so the remote's keys do not move the page behind the video.
-- The page sees a normal fullscreen: `document.fullscreenElement`, `fullscreenchange` and `exitFullscreen` all work.
-  The browser hides its toolbar. Back or Escape leaves it.
-- On leave, the inline styles that were changed are put back and the scroll position is restored.
-- A video that is not on the hardware plane keeps WebKit's own fullscreen. Going fullscreen is also one of the reasons
-  that moves a video to the hardware plane (see the policy above), and leaving moves it back.
+- **A gesture is needed**, as for the real one. A script without a user action gets the normal rejection.
+- The element is stretched over the whole screen with fixed positioning and a black background. A `<video>` is
+  scaled to fit. In a container, the videos inside it are made to fill it too, because the page's `:fullscreen` CSS
+  cannot match an emulated fullscreen.
+- **Ancestors that trap or hold down a fixed box give up those properties** while fullscreen: transform, translate,
+  rotate, scale, filter, perspective, contain, container types, content-visibility, will-change, isolation, blend mode,
+  clip-path, mask, opacity and stacking z-index. This reaches through shadow roots and slots. Their own transitions are
+  switched off, so nothing slides. The page's scrolling is locked (`html` and `body` get `overflow: hidden`).
+- The page sees a normal fullscreen: `document.fullscreenElement`, one `fullscreenchange` on entering and one on leaving,
+  and `exitFullscreen`. Another element asking while one is fullscreen switches without an exit in between. The browser
+  hides its toolbar. Back or Escape leaves.
+- **A player in an iframe** works: the frame tells its parent, and the parent makes the `<iframe>` element cover the
+  screen. This needs a user action and a frame that allows fullscreen (or one of the same origin).
+- It ends by itself when its element leaves the document or the page navigates.
+- On leave, **only the properties it wrote are put back**. A style the page changed meanwhile stays, and no `style`
+  attribute is rewritten as text, so a strict style CSP does not get in the way. The scroll position is restored unless
+  the page moved on.
+- A video that stays in the page (an MSE stream that cannot be reloaded) keeps WebKit's own fullscreen. Going fullscreen is
+  also one of the reasons that moves a video to the hardware plane (see the policy above), and leaving moves it back.
 
-Limits of this emulation (see the review notes for details): a player inside an iframe, a page that changes its inline styles
-while fullscreen, and a player removed from the page while fullscreen are not handled yet. Overlays with the same or a higher
-`z-index` as the video can stay on top of it.
+Limits: an overlay with the same or a higher `z-index` as the video, and anything in the browser's top layer (an open
+modal dialog), can stay on top of it. A scrolling container inside the page (not the document) still scrolls under the
+video. The black background was chosen so that letterbox bars are black; it has not been compared against a transparent
+one for every kind of player.
+
+## Media sources and the LG decoder
+
+- **ManagedMediaSource is hidden from pages** (desktop Chrome has none). Players that prefer it attach through a `<source>`
+  child of the video and remove the page's own `<source>`. A seek that reloads the source then ended on a stale source with
+  nothing feeding it. Plain MediaSource works as well, so players use that.
+- **Parameter sets and keyframes:** the sink puts the stream's parameter sets (SPS, PPS) in front of every keyframe unit.
+  LG's decoder smeared macroblocks on a 1080p H.264 stream with B-frames when a unit began with them ahead of its
+  own delimiter. The LG player now starts keyframe units at their access unit delimiter, and skips the leading copies
+  only when the unit has its own. An MP4 stream often carries no parameter sets in band, and then the leading copies
+  are the only ones and are kept. Checked on a test clip with screenshots, no smearing in the runs after the change.
 
 ## Known issues
 
+- **A seek in one large streaming site's TV player** gave "pipeline error 100", smeared blocks, and no presented frames
+  while units kept being fed. After it the decoder stayed busy until the TV restarted. Seen once. Open.
 - **Audio has not been heard.** It was checked in logs only: the load, PCM and volume calls and their return values.
 - An unmuted short clip inside an article moves to the hardware plane, which does not scroll exactly with the page.
 - One hardware video at a time. A second one loses its picture.

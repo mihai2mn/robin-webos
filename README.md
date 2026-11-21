@@ -27,6 +27,8 @@ number 0.3.3 of the base it was made from.
 - **Hardware video through LG's Starfish pipeline**: H.264 with AAC audio, other decoded audio (Opus, Vorbis) sent as
   PCM, page volume and mute, a real crop when a video is partly off screen, and seeking. A hybrid policy keeps small
   muted previews in the page and puts the rest on the hardware plane ([video.md](docs/video.md)).
+- **Remote media keys** (play/pause, stop, rewind and fast-forward by 10 s) for the page's main video, and **page zoom
+  remembered per site** ([usage.md](docs/usage.md)).
 - **Memory limits** for the web and network processes, no back/forward page cache by default, and a declared
   memory need in the app's `appinfo.json`.
 - **Reproducible release packaging**: `tools/package-release.sh` builds the ipk from a clean clone of a commit
@@ -64,6 +66,12 @@ The remote, launch parameters and logs are in [usage.md](docs/usage.md). The 32-
 64-bit engine, launch once with `{"wpebEnv":{"WPE_BROWSER_DEBUG_ENGINE":"64"}}`, or put a file named `engine64`
 containing `on` in the app's data folder ([engine64.md](docs/engine64.md)).
 
+## Test tools
+
+`tools/tvdrive/` drives the dev copy of the app from a PC (screenshots, pointer, remote keys, on-screen keyboard), and
+reads back what the screen and the page did as text (`frames`: static, moving, flicker; `motion.js`: element motion
+from a recorder script). It needs a rooted TV. See [usage.md](docs/usage.md) and [tools/tvdrive/README.md](tools/tvdrive/README.md).
+
 ## Reporting a bug
 
 Plug a USB drive into the TV, then in Wren: hold OK, **Settings**, **Help and feedback**, **Save logs to USB**.
@@ -83,7 +91,10 @@ The in-app "Report a problem" row still shows upstream's issue address.
   not scroll exactly with the page, and a short clip with sound inside an article also moves there.
 - **Only one hardware video at a time** (LG's pipeline).
 - **Fullscreen of a hardware video is emulated** (the element is stretched over the screen), because WebKit's own fullscreen
-  leaves the video plane behind. A player inside an iframe may not fill the screen. See [video.md](docs/video.md#fullscreen).
+  leaves the video plane behind. Iframe players, trapping containers and gesture rules are handled. An overlay with a high
+  z-index can still cover the video. See [video.md](docs/video.md#fullscreen).
+- **A video scrolled partly off screen is shrunk, not cropped.** The TV's compositor has no crop request. The picture is
+  fitted into the visible part.
 - **The RegExp JIT is off on the 32-bit engine.** With it on, the web process of one tested site crashed shortly
   after load. The Baseline JIT and DFG are on. A page load was not faster with the JIT in the tests. See
   [jit-armv7.md](docs/jit-armv7.md).

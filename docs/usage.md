@@ -10,7 +10,7 @@ Wren works with the arrows, OK and Back of any LG remote; colour keys are option
 | ▲ at the top of a page | the glass panel: the tab row above the toolbar; ◀ ▶ and OK switch tabs |
 | **Hold OK** | quick actions (new tab, bookmark, tabs, reload, close tab, home, settings, toolbar) and page zoom |
 | CH + / − | previous / next tab |
-| Play / Pause / Stop / Rewind / Fast-forward | control the page's main video (play/pause toggle, pause, stop, seek −10 s / +10 s) |
+| Play / Pause / Stop / Rewind / Fast-forward | control the page's main video: play/pause toggles, Pause pauses, Stop pauses and goes back to the start, Rewind and Fast-forward seek −10 s / +10 s|
 | Back | back in the page's history, or to the panel; in the panel, back to the page |
 | Menu | side panel: bookmarks, history, zoom, settings, exit |
 | Red / Green / Yellow / Blue | all tabs / side panel / quick actions / new tab |
@@ -24,6 +24,24 @@ top edge.
 **TV mode:** on TV web apps (a `tv.` host or a `/tv` path, such as YouTube's TV app) Wren hides its panel and
 progress line so the page fills the screen. Hold OK → **Toolbar** brings the tabs back. youtube.com links open
 YouTube's TV app; the engine variable `WPE_BROWSER_DESKTOP_YOUTUBE=1` keeps the desktop site.
+
+## Media keys
+
+The remote's media keys act on the page's **main video**, so they work with players that have no remote support of
+their own. Wren picks the video like this: the one inside the fullscreen element if there is one; otherwise, among the
+videos with media (also in same-origin iframes and open shadow roots), a playing video that is not a small muted
+preview first, then a visible, unmuted or large one; an `<audio>` element only if the page has no video. A seek stops at the
+start and at the end (or the seekable range of a live stream). The space bar of a
+keyboard is never a media key: it stays with the page.
+
+## Zoom per site
+
+Hold OK → **Zoom** (or Menu → zoom) changes the zoom of the **site you are on**, and Wren remembers it for that host.
+The panel says "Remembered for <host>". Pages without a host (the home page) use the default zoom, which is shown as
+"Default for sites without their own zoom". The zoom is applied again when a page of that site loads, in any tab.
+
+The zooms are stored in `zooms.json` in the profile folder (up to 500 sites). Because they name the sites you visited,
+**clearing all history also forgets them**.
 
 ## Launch parameters
 
@@ -53,3 +71,18 @@ ssh root@<tv-ip> 'cd /tmp/org.sostk.wpebrowser && tail -c 1500000 engine.log eng
 ```
 
 The logs list the addresses of pages you visited; read them before posting them publicly.
+
+## Driving the TV from a PC (developers)
+
+`tools/tvdrive/` drives the dev copy of the app the way a person with the remote does, and reads back what happened.
+It needs a rooted TV and an ssh host. It is for testing, not for users. Details are in
+[tools/tvdrive/README.md](../tools/tvdrive/README.md). In short:
+
+| Tool | What it gives |
+|---|---|
+| `tvdrive shot`, `open`, `click`, `scroll`, `key`, `type`, `log`, `state` | screenshots and input: pointer, wheel, remote keys, the on-screen keyboard |
+| `tvdrive frames [seconds]` | a short burst of screen captures reduced to text: static stretches, changing stretches, and flicker (the screen alternating among a few pictures). It sees faults that no page element explains |
+| `motion-recorder.js` and `motion.js` | a recorder that runs in the page (`WPE_BROWSER_DEBUG_SCRIPT`) and samples element boxes, opacity and scroll on every frame; the analyzer turns the log into text: holds, moves (duration, easing, speed), jumps, reversals, long frames, and an optional SVG timeline. Layout motion only |
+
+Running the frame burst slightly delays the screen (worst frame gap 31 to 35 ms instead of 24 ms in the one test made).
+The tools were tried on one TV. The motion analyzer was first tested with a simulated log, then on the TV.
