@@ -611,6 +611,7 @@ static bool target_hold_frames(const struct target *t)
     return !t->attached && t->shell_surface != NULL;
 }
 
+static unsigned g_tr_rendered, g_tr_done, g_tr_timeout;
 static void target_frame_complete(struct target *t)
 {
     if (t->timeout_source) {
@@ -637,6 +638,7 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time)
     (void)callback;
     (void)time;
     struct target *t = data;
+    g_tr_done++;
     if (t->waiting_first_frame) {
         t->waiting_first_frame = false;
         target_status(t, WPEB_WEBOS_STATUS_FIRST_FRAME);
@@ -650,6 +652,7 @@ static gboolean frame_timeout(gpointer data)
     struct target *t = data;
     g_source_unref(t->timeout_source);
     t->timeout_source = NULL;
+    g_tr_timeout++;
     target_frame_complete(t);
     return G_SOURCE_REMOVE;
 }
@@ -1059,9 +1062,26 @@ static EGLNativeWindowType target_get_native_window(void *data)
     return (EGLNativeWindowType)((struct target *)data)->window;
 }
 
+// WPE_BROWSER_DEBUG_FRAMES=1 (forwarded to the engine): once a second, how many frames WebKit drew, how many the compositor completed and how many fell
+// back to the timeout (a page that stops presenting shows rendered > 0 and done = 0, or rendered = 0).
+static gint64 g_tr_last;
+static void trace_frames(const struct target *t)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("WPE_BROWSER_DEBUG_FRAMES") != NULL;
+    if (!on) return;
+    const gint64 now = g_get_monotonic_time();
+    if (now - g_tr_last < 1000000) return;
+    LOG("frames/s: rendered=%u compositor-done=%u timeout=%u target=%ux%u surface_h=%d attached=%d", g_tr_rendered, g_tr_done,
+        g_tr_timeout, t->width, t->height, surface_height(t->width, t->height), t->attached);
+    g_tr_rendered = g_tr_done = g_tr_timeout = 0;
+    g_tr_last = now;
+}
+
 static void target_resize(void *data, uint32_t width, uint32_t height)
 {
     struct target *t = data;
+    LOG("page target resize %ux%u -> %ux%u (surface height %d)", t->width, t->height, width, height, surface_height(width, height));
     t->width = width;
     t->height = height;
     if (t->window)
@@ -1092,6 +1112,8 @@ static void target_frame_will_render(void *data)
 static void target_frame_rendered(void *data)
 {
     struct target *t = data;
+    g_tr_rendered++;
+    trace_frames(t);
     if (target_hold_frames(t) && t->surface) {
         // A frame that was already being drawn when the page was detached: unmap again in the same flush.
         LOG("frame drawn while detached: unmapped again");
