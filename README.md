@@ -82,6 +82,8 @@ The in-app "Report a problem" row still shows upstream's issue address.
 - **Hybrid video trade-off.** An unmuted video goes to the hardware plane so that its sound is heard. That plane does
   not scroll exactly with the page, and a short clip with sound inside an article also moves there.
 - **Only one hardware video at a time** (LG's pipeline).
+- **Fullscreen of a hardware video is emulated** (the element is stretched over the screen), because WebKit's own fullscreen
+  leaves the video plane behind. A player inside an iframe may not fill the screen. See [video.md](docs/video.md#fullscreen).
 - **The RegExp JIT is off on the 32-bit engine.** With it on, the web process of one tested site crashed shortly
   after load. The Baseline JIT and DFG are on. A page load was not faster with the JIT in the tests. See
   [jit-armv7.md](docs/jit-armv7.md).

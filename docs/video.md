@@ -46,6 +46,26 @@ The page script `engine/ubo/compat.js` decides per video element, before its pla
   is **not muted**, because software video has no audio output on webOS 5.
 - A muted preview that gets unmuted is reloaded on the hardware plane at its media time.
 
+## Fullscreen
+
+WebKit's own fullscreen leaves the page black and the video plane at its old place, because the video layer is no longer
+painted as a hole. So for a video on the hardware plane (or an element that contains one) `engine/ubo/compat.js` does not
+use WebKit's fullscreen. It emulates it:
+
+- The element is stretched over the whole screen with fixed positioning, a black background and the video scaled to fit.
+- Ancestors that would trap a fixed element or hold it under other content give up those properties while fullscreen:
+  transform, filter, perspective, contain, will-change, clip-path, mask, opacity and stacking z-index. The page's
+  scrolling is locked (`html` and `body` get `overflow: hidden`), so the remote's keys do not move the page behind the video.
+- The page sees a normal fullscreen: `document.fullscreenElement`, `fullscreenchange` and `exitFullscreen` all work.
+  The browser hides its toolbar. Back or Escape leaves it.
+- On leave, the inline styles that were changed are put back and the scroll position is restored.
+- A video that is not on the hardware plane keeps WebKit's own fullscreen. Going fullscreen is also one of the reasons
+  that moves a video to the hardware plane (see the policy above), and leaving moves it back.
+
+Limits of this emulation (see the review notes for details): a player inside an iframe, a page that changes its inline styles
+while fullscreen, and a player removed from the page while fullscreen are not handled yet. Overlays with the same or a higher
+`z-index` as the video can stay on top of it.
+
 ## Known issues
 
 - **Audio has not been heard.** It was checked in logs only: the load, PCM and volume calls and their return values.
