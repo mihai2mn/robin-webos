@@ -20,6 +20,7 @@ Setup: an ssh host called `lgtv` (root on a rooted TV with `/opt/bin/tv` and pyt
 | `log [n]` / `log --follow` | tail the app's events.log and engine.log |
 | `state` | foreground app, memory/swap, web process sizes, lock owner |
 | `lock <owner>` / `unlock <owner>` | the shared dev-app lock; `close` closes the app |
+| `frames [seconds] [--fps N]` | what the screen did over a short capture burst: static / changing / FLICKER stretches (see Screen traces) |
 
 ## How it works (and what to know)
 - Pointer, wheel and remote keys go through LG's network-input service: the unix socket
@@ -56,3 +57,8 @@ different pictures), and FLICKER (the screen alternating among a few pictures), 
 complements the motion trace: that one knows which element moved and how, this one sees faults no element explains.
 Cost on the TV while it runs (measured with the motion recorder on a 60 fps page): median and p95 frame gap unchanged
 (17 / 18 ms), worst gap 31-35 ms instead of 24 ms. A busy TV gives fewer captures than asked for.
+
+## Selftest
+`node selftest.js` checks `motion.js` and `frames.js` on synthetic inputs in a temp folder (no TV, no network): one
+`ok <case>` or `FAIL <case>` line per case, exit code 1 if any case fails; `node selftest.js frames` runs only the
+matching cases.
