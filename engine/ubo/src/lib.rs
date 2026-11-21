@@ -367,6 +367,266 @@ pub extern "C" fn wren_ubo_hidden(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adblock::lists::{FilterSet, ParseOptions};
+    use adblock::resources::{MimeType, PermissionMask, Resource, ResourceType};
+
+    fn cstr(s: &str) -> CString {
+        CString::new(s).unwrap()
+    }
+
+    fn take_string(p: *mut c_char) -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        wren_ubo_string_free(p);
+        Some(s)
+    }
+
+    fn compile_dat(rules: &[&str], trusted: bool) -> Vec<u8> {
+        let mut set = FilterSet::new(false);
+        let opts = ParseOptions {
+            permissions: PermissionMask::from_bits(if trusted { 1 } else { 0 }),
+            ..Default::default()
+        };
+        set.add_filter_list(rules.join("\n"), opts);
+        Engine::new_with_filter_set(set).serialize()
+    }
+
+    fn sample_resources_json() -> String {
+        // Minimal self-contained redirect & scriptlet resources (base64-encoded):
+        //   noopjs: "(() => {})();"
+        //   stub-a.js: "/* stub A */"
+        //   stub-b.js: "/* stub B */"
+        //   set-flag.js: "function setFlag(k, v) { window[k] = v; }"
+        let resources = vec![
+            Resource {
+                name: "noopjs".into(),
+                aliases: vec!["noop.js".into()],
+                kind: ResourceType::Mime(MimeType::ApplicationJavascript),
+                content: "KCgpID0+IHt9KSgpOw==".into(),
+                dependencies: vec![],
+                permission: PermissionMask::default(),
+            },
+            Resource {
+                name: "stub-a.js".into(),
+                aliases: vec![],
+                kind: ResourceType::Mime(MimeType::ApplicationJavascript),
+                content: "Lyogc3R1YiBBICov".into(),
+                dependencies: vec![],
+                permission: PermissionMask::default(),
+            },
+            Resource {
+                name: "stub-b.js".into(),
+                aliases: vec![],
+                kind: ResourceType::Mime(MimeType::ApplicationJavascript),
+                content: "Lyogc3R1YiBCICov".into(),
+                dependencies: vec![],
+                permission: PermissionMask::default(),
+            },
+            Resource {
+                name: "set-flag.js".into(),
+                aliases: vec!["set-flag".into()],
+                kind: ResourceType::Mime(MimeType::ApplicationJavascript),
+                content: "ZnVuY3Rpb24gc2V0RmxhZyhrLCB2KSB7IHdpbmRvd1trXSA9IHY7IH0=".into(),
+                dependencies: vec![],
+                permission: PermissionMask::default(),
+            },
+        ];
+        serde_json::to_string(&resources).unwrap()
+    }
+
+    #[test]
+    fn regression_fixed_sample_network_decisions_across_engines() {
+        let core_dat = compile_dat(
+            &[
+                "||ads.example.test^",
+                "||stub.example.test/ad.js$script,redirect=stub-a.js",
+                "||important-core.example.test^$important",
+                "||imp-redir.example.test/x.js$script,important,redirect=stub-a.js",
+                "||overridden-by-extra-exc.example.test^",
+                "@@||excepted-by-core.example.test^",
+                "||self-excepted.example.test^",
+                "@@||self-excepted.example.test^",
+                "||params.example.org^$removeparam=utm_source",
+                "||blocked-and-param.example.test^",
+                "||blocked-and-param.example.test^$removeparam=track",
+                "||exc-with-param.example.org^",
+                "@@||exc-with-param.example.org^",
+                "||exc-with-param.example.org^$removeparam=utm_medium",
+                "||dual-block.example.test/s.js$script,redirect=stub-a.js",
+                "||escalated-imp.example.test/s.js$script,redirect=stub-a.js",
+            ],
+            true,
+        );
+        let extra1_dat = compile_dat(
+            &[
+                "||extra1.example.test^",
+                "||extra1-redir.example.test/a.js$script,redirect=stub-b.js",
+                "||excepted-by-core.example.test^",
+                "||self-excepted.example.test^",
+                "@@||overridden-by-extra-exc.example.test^",
+                "@@||important-core.example.test^",
+                "||important-extra.example.test^$important",
+                "||dual-block.example.test/s.js$script,redirect=stub-b.js",
+                "||escalated-imp.example.test/s.js$script,important,redirect=stub-b.js",
+                "||extra-params.example.org^$removeparam=fbclid",
+                "||exc-then-extra-param.example.org^",
+            ],
+            true,
+        );
+        let extra2_dat = compile_dat(
+            &[
+                "@@||important-extra.example.test^",
+                "||extra2.example.test^",
+                "@@||exc-then-extra-param.example.org^",
+                "||exc-then-extra-param.example.org^$removeparam=ref",
+                "||imp-wins-over-param.example.test^$important",
+                "||imp-wins-over-param.example.test^$removeparam=foo",
+            ],
+            false,
+        );
+
+        let res_c = cstr(&sample_resources_json());
+        let ubo = wren_ubo_new(core_dat.as_ptr(), core_dat.len(), res_c.as_ptr());
+        assert!(!ubo.is_null());
+        let n1 = cstr("extra1");
+        let n2 = cstr("extra2");
+        assert_eq!(wren_ubo_add_list(ubo, n1.as_ptr(), extra1_dat.as_ptr(), extra1_dat.len()), 1);
+        assert_eq!(wren_ubo_add_list(ubo, n2.as_ptr(), extra2_dat.as_ptr(), extra2_dat.len()), 1);
+        let mf_name = cstr("my-filters");
+        let mf_text = cstr("@@||extra2.example.test/allowed.js\n||myblock.example.test^\n");
+        assert_eq!(wren_ubo_add_text(ubo, mf_name.as_ptr(), mf_text.as_ptr(), 1), 2);
+
+        let stub_a = "data:application/javascript;base64,Lyogc3R1YiBBICov";
+        let stub_b = "data:application/javascript;base64,Lyogc3R1YiBCICov";
+
+        // Fixed sample of requests and their exact expected (action, text) decisions.
+        let cases: &[(&str, &str, &str, i32, Option<&str>)] = &[
+            // Plain allowed requests
+            ("https://example.org/app.js", "https://example.org/", "script", WREN_UBO_ALLOW, None),
+            ("https://cdn.example.net/img.png", "https://example.org/", "image", WREN_UBO_ALLOW, None),
+            ("https://example.org/api?page=1", "https://example.org/", "xhr", WREN_UBO_ALLOW, None),
+            // Core block & redirect
+            ("https://ads.example.test/banner.js", "https://example.org/", "script", WREN_UBO_BLOCK, None),
+            ("https://stub.example.test/ad.js", "https://example.org/", "script", WREN_UBO_REDIRECT, Some(stub_a)),
+            // Extra-list block & redirect
+            ("https://extra1.example.test/t.js", "https://example.org/", "script", WREN_UBO_BLOCK, None),
+            ("https://extra1-redir.example.test/a.js", "https://example.org/", "script", WREN_UBO_REDIRECT, Some(stub_b)),
+            ("https://extra2.example.test/b.js", "https://example.org/", "script", WREN_UBO_BLOCK, None),
+            // Cross-engine exceptions (core -> extra, extra -> core, my-filters -> extra)
+            ("https://excepted-by-core.example.test/x.js", "https://example.org/", "script", WREN_UBO_ALLOW, None),
+            ("https://overridden-by-extra-exc.example.test/x.js", "https://example.org/", "script", WREN_UBO_ALLOW, None),
+            ("https://self-excepted.example.test/x.js", "https://example.org/", "script", WREN_UBO_ALLOW, None),
+            ("https://extra2.example.test/allowed.js", "https://example.org/", "script", WREN_UBO_ALLOW, None),
+            // My-filters block
+            ("https://myblock.example.test/z.js", "https://example.org/", "script", WREN_UBO_BLOCK, None),
+            // $important beats exceptions across engines (core and extra)
+            ("https://important-core.example.test/x.js", "https://example.org/", "script", WREN_UBO_BLOCK, None),
+            ("https://imp-redir.example.test/x.js", "https://example.org/", "script", WREN_UBO_REDIRECT, Some(stub_a)),
+            ("https://important-extra.example.test/x.js", "https://example.org/", "script", WREN_UBO_BLOCK, None),
+            // First non-important block wins redirect; later $important overrides earlier non-important block
+            ("https://dual-block.example.test/s.js", "https://example.org/", "script", WREN_UBO_REDIRECT, Some(stub_a)),
+            ("https://escalated-imp.example.test/s.js", "https://example.org/", "script", WREN_UBO_REDIRECT, Some(stub_b)),
+            // $removeparam rewrites (core, extra, excepted block still rewrites, blocked does not rewrite)
+            ("https://params.example.org/p?a=1&utm_source=x&b=2", "https://example.org/", "xhr", WREN_UBO_REWRITE, Some("https://params.example.org/p?a=1&b=2")),
+            ("https://extra-params.example.org/p?fbclid=abc&k=v", "https://example.org/", "xhr", WREN_UBO_REWRITE, Some("https://extra-params.example.org/p?k=v")),
+            ("https://blocked-and-param.example.test/p?track=1&ok=2", "https://example.org/", "xhr", WREN_UBO_BLOCK, None),
+            ("https://exc-with-param.example.org/p?utm_medium=m&k=1", "https://example.org/", "xhr", WREN_UBO_REWRITE, Some("https://exc-with-param.example.org/p?k=1")),
+            ("https://exc-then-extra-param.example.org/p?ref=home&k=1", "https://example.org/", "xhr", WREN_UBO_REWRITE, Some("https://exc-then-extra-param.example.org/p?k=1")),
+            ("https://imp-wins-over-param.example.test/p?foo=bar&k=1", "https://example.org/", "xhr", WREN_UBO_BLOCK, None),
+            // Unparseable URL safely allowed
+            ("not-a-url", "https://example.org/", "script", WREN_UBO_ALLOW, None),
+        ];
+
+        for &(url, src, ty, exp_action, exp_text) in cases {
+            let cu = cstr(url);
+            let cs = cstr(src);
+            let ct = cstr(ty);
+            let v = wren_ubo_check(ubo, cu.as_ptr(), cs.as_ptr(), ct.as_ptr());
+            let got_text = take_string(v.text);
+            assert_eq!(
+                (v.action, got_text.as_deref()),
+                (exp_action, exp_text),
+                "mismatch for ({url}, {src}, {ty})"
+            );
+        }
+
+        wren_ubo_free(ubo);
+    }
+
+    #[test]
+    fn regression_cosmetic_and_generic_hiding_across_engines() {
+        let core_dat = compile_dat(
+            &[
+                "##.generic-ad",
+                "###generic-banner",
+                "##div[data-ad-slot]",
+                "example.org##.site-specific",
+                "example.org#@#.generic-ad",
+                "example.org##+js(set-flag, flagA, 1)",
+                "@@||generichide.example.org^$generichide",
+            ],
+            true,
+        );
+        let extra_dat = compile_dat(
+            &[
+                "##.extra-generic",
+                "example.org##.extra-specific",
+                "example.org##+js(set-flag, flagA, 1)",
+                "example.org##+js(set-flag, flagB, 2)",
+                "@@||generichide.example.org^$generichide",
+            ],
+            true,
+        );
+
+        let res_c = cstr(&sample_resources_json());
+        let ubo = wren_ubo_new(core_dat.as_ptr(), core_dat.len(), res_c.as_ptr());
+        assert!(!ubo.is_null());
+        let n1 = cstr("extra");
+        assert_eq!(wren_ubo_add_list(ubo, n1.as_ptr(), extra_dat.as_ptr(), extra_dat.len()), 1);
+
+        let u1 = cstr("https://example.org/");
+        let mut c1 = wren_ubo_cosmetic(ubo, u1.as_ptr());
+        let css = take_string(c1.css).unwrap(); c1.css = ptr::null_mut();
+        let script = take_string(c1.script).unwrap(); c1.script = ptr::null_mut();
+        let exc = take_string(c1.exceptions).unwrap(); c1.exceptions = ptr::null_mut();
+        assert_eq!(c1.generichide, 0);
+        wren_ubo_cosmetic_free(&mut c1);
+
+        assert!(css.contains(".site-specific{display:none!important}\n"));
+        assert!(css.contains(".extra-specific{display:none!important}\n"));
+        assert!(css.contains("div[data-ad-slot]{display:none!important}\n"));
+        assert_eq!(script.matches("setFlag(\"flagA\", \"1\")").count(), 1);
+        assert_eq!(script.matches("setFlag(\"flagB\", \"2\")").count(), 1);
+
+        // Generic hiding respects per-engine exceptions (.generic-ad excepted in core).
+        let cls = cstr("generic-ad\nextra-generic\nnormal-cls\n");
+        let ids = cstr("generic-banner\nnormal-id\n");
+        let ce = cstr(&exc);
+        let hid = take_string(wren_ubo_hidden(ubo, cls.as_ptr(), ids.as_ptr(), ce.as_ptr())).unwrap();
+        assert!(!hid.contains(".generic-ad{"));
+        assert!(hid.contains(".extra-generic{display:none!important}\n"));
+        assert!(hid.contains("#generic-banner{display:none!important}\n"));
+
+        // Repeat call with same exceptions must produce identical selectors.
+        let hid2 = take_string(wren_ubo_hidden(ubo, cls.as_ptr(), ids.as_ptr(), ce.as_ptr())).unwrap();
+        let set1: HashSet<&str> = hid.lines().collect();
+        let set2: HashSet<&str> = hid2.lines().collect();
+        assert_eq!(set1, set2);
+
+        // $generichide disables generic hiding in both engines.
+        let u2 = cstr("https://generichide.example.org/");
+        let mut c2 = wren_ubo_cosmetic(ubo, u2.as_ptr());
+        let exc2 = take_string(c2.exceptions).unwrap(); c2.exceptions = ptr::null_mut();
+        assert_eq!(c2.generichide, 1);
+        wren_ubo_cosmetic_free(&mut c2);
+        let ce2 = cstr(&exc2);
+        let hid_gh = take_string(wren_ubo_hidden(ubo, cls.as_ptr(), ids.as_ptr(), ce2.as_ptr())).unwrap();
+        assert!(hid_gh.is_empty());
+
+        wren_ubo_free(ubo);
+    }
 
     #[test]
     fn isolates_class_helpers_and_deduplicates_invocations_across_engines() {
