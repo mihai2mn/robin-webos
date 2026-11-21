@@ -452,7 +452,9 @@
                 // Like the real one, only inside a user gesture (an ad script must not take the screen). A software video that the
                 // fullscreen rule moves to the hardware plane (every one but an MSE stream, which cannot be reloaded) is emulated too:
                 // WebKit's real fullscreen would leave the plane behind once the reload puts it there.
-                if (userGesture() && (hardwareVideoIn(this) || movesToHardware(this))) { enter(this); return Promise.resolve(); }
+                // A frame the page itself asks for (iframe.requestFullscreen()) is emulated too: its player is not reachable from here, and WebKit's own
+                // fullscreen would leave the plane behind.
+                if (userGesture() && (hardwareVideoIn(this) || movesToHardware(this) || (policy.on && isFrame(this)))) { enter(this); return Promise.resolve(); }
                 return original.apply(this, arguments);
             };
         }
