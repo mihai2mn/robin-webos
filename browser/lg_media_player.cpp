@@ -235,6 +235,7 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
     playing_ = paused_ = false;
     seek_pending_ = true;
     fed_ = full_ = last_pts_us_ = audio_fed_ = 0;
+    dropped_ = 0;
     has_audio_ = with_audio;
     frames_ = 0;
     error_ = 0;
@@ -285,10 +286,10 @@ LgMediaPlayer::Feed LgMediaPlayer::feed(bool audio, const uint8_t *data, size_t 
                                std::chrono::steady_clock::now().time_since_epoch()).count();
     if (now_ms - stats_at_ms_ >= 5000) {
         stats_at_ms_ = now_ms;
-        WNK_LOGI(kCat, "fed %lld units + %lld audio (last video pts %.3f s), %lld refused as full, %lld frames presented, "
+        WNK_LOGI(kCat, "fed %lld units + %lld audio (last video pts %.3f s), %lld refused as full, %lld frames presented, %lld dropped, "
                  "play time %.3f s",
                  static_cast<long long>(fed_), static_cast<long long>(audio_fed_), last_pts_us_ / 1e6, static_cast<long long>(full_),
-                 static_cast<long long>(frames_.load()), api_->getCurrentPlaytime() / 1e9);
+                 static_cast<long long>(frames_.load()), static_cast<long long>(dropped_.load()), api_->getCurrentPlaytime() / 1e9);
     }
     if (reply.find("BufferFull") != std::string::npos) {
         ++full_;
@@ -447,8 +448,10 @@ void LgMediaPlayer::on_event(int type, int64_t num, const char *str) {
     case PF_EVENT_TYPE_INT_BUFFERLOW:
     case PF_EVENT_TYPE_INT_NEED_DATA:
     case PF_EVENT_TYPE_INT_ENOUGH_DATA:
-    case PF_EVENT_TYPE_DROPPED_FRAME:
         return;  // frequent
+    case PF_EVENT_TYPE_DROPPED_FRAME:  // frames dropped in the last 200 ms (a dropped reference frame smears the picture until the next keyframe)
+        dropped_ += num;
+        return;
     default:
         WNK_LOGI(kCat, "event 0x%x %lld %.160s", static_cast<unsigned>(type), static_cast<long long>(num), str ? str : "");
     }

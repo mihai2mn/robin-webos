@@ -73,6 +73,7 @@ private:
     int64_t fed_ = 0, full_ = 0, last_pts_us_ = 0, audio_fed_ = 0;
     std::atomic<int> error_{0};
     std::atomic<int64_t> frames_{0};  // from the pipeline's thread
+    std::atomic<int64_t> dropped_{0};  // frames the pipeline dropped (event 0x30), from the pipeline's thread
     int64_t stats_at_ms_ = 0;
 };
 
