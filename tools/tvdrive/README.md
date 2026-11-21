@@ -57,6 +57,12 @@ different pictures), and FLICKER (the screen alternating among a few pictures), 
 complements the motion trace: that one knows which element moved and how, this one sees faults no element explains.
 Cost on the TV while it runs (measured with the motion recorder on a 60 fps page): median and p95 frame gap unchanged
 (17 / 18 ms), worst gap 31-35 ms instead of 24 ms. A busy TV gives fewer captures than asked for.
+What the capture sees: the screen as composed, hardware video plane included (checked 2026-11-21 with a clip on the LG player path:
+motion shows in the video region, and screenshots show the picture). It is not blind to video; "almost entirely white" or "black"
+means the picture really was that (a page that failed to load, a dark clip). Protected video (DRM) is black. If the capture
+service writes nothing (for instance when another capture is running at the same moment: it serves one at a time), `frames` now
+stops with "the TV's capture service wrote no frame file" and prints the service's answers; run it again when the TV is quiet.
+
 
 ## Selftest
 `node selftest.js` checks `motion.js` and `frames.js` on synthetic inputs in a temp folder (no TV, no network): one
