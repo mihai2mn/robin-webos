@@ -204,6 +204,7 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
     }
     if (l.hw_audio) set_env(env, "WPEB_MEDIA_HW_AUDIO", "aac,pcm");  // the UI's decoder takes the page's AAC, and decoded audio as PCM (media socket)
     for (const auto &[name, value] : l.extra_env) {
+        if (name == "WEBKIT_EXEC_PATH" || name == "WEBKIT_INJECTED_BUNDLE_PATH") continue;
         if (name.rfind("WEBKIT_", 0) == 0 || name.rfind("JSC_", 0) == 0 || name.rfind("WPE_BROWSER_DEBUG", 0) == 0 ||
             name.rfind("GST_DEBUG", 0) == 0 || name.rfind("G_TLS_", 0) == 0 ||
             name.rfind("MSE_", 0) == 0) {  // MSE_MAX_BUFFER_SIZE: WPE's per-type SourceBuffer byte limit (experiments)
@@ -415,7 +416,7 @@ void EngineClient::handle(const uint8_t *buf, size_t n, int fd) {
         WpeFrame f{};
         std::memcpy(&f, p, std::min(len, sizeof(f)));
         if (f.slot >= WPE_IPC_FRAME_SLOTS || static_cast<uint64_t>(f.stride) * f.height > slot_bytes_ ||
-            f.stride < f.width * 4) {
+            f.stride < static_cast<uint64_t>(f.width) * 4) {
             WNK_LOGW(kCat, "bad frame message (slot %u, %ux%u stride %u)", f.slot, f.width, f.height, f.stride);
             break;
         }
