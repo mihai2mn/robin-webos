@@ -101,7 +101,7 @@ Build parameters: `APP_ID_BASE` (default `io.github.mihai2mn.robin`; the dev id 
    (with Buildroot's gcc). It needs `rustup target add armv7-unknown-linux-gnueabi aarch64-unknown-linux-gnu`.
 8. `stage`: base stage + WebKit 2.54.3 + launcher + uBO into one engine tree per id.
 9. `ui`: the UI app per id (`WPEB_APPID`), packed with the kit.
-10. `add64`: adds `engine64/` and writes the ipks with `tools/mkar.py`. The TV's installer wants ar member names
+10. `add64`: writes the ipks (and adds `engine64/` first when `ENGINE64=1`; the default is the 32-bit engine only) with `tools/mkar.py`. The TV's installer wants ar member names
     without a trailing `/` and tar entries without `./`. GNU `ar rc` output is refused. The ipks are written to `$OUT.tmp`.
 11. `sums`: `MD5SUMS` and `BUILD-INFO.txt` (full commit id) for exactly the ipks of `IDS`.
 12. `check`: unpacks every ipk and fails on a missing or extra package, a wrong id or version, missing `engine/` or
@@ -128,8 +128,8 @@ symbol inventory).
 
 ## Size
 
-Each ipk is about 230 MB and installs to about 546 MB: the UI (a few MB), `engine/` (221 MB) and `engine64/`
-(319 MB). Most of `engine64/` is Mesa's software renderer (llvmpipe, with libLLVM at 67 MB), the 122 MB WebKit
+Each ipk is about 105 MB and installs to about 230 MB: the UI (a few MB) and `engine/` (221 MB). With `ENGINE64=1` the
+package also holds `engine64/` (319 MB): about 230 MB to download and 546 MB installed. Most of `engine64/` is Mesa's software renderer (llvmpipe, with libLLVM at 67 MB), the 122 MB WebKit
 library and 33 MB of ICU data. The 32-bit engine carries its own ICU data too. A shared ICU data file would save
 about 30 MB. Replacing llvmpipe by softpipe would save about 65 MB and is untested.
 

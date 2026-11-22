@@ -68,8 +68,6 @@ you install.
 - **Memory limits that hold.** The web process is capped, the back/forward page cache is off, and at most two small
   videos are decoded in software at once.
 - **Zoom remembered per site**, bookmarks, history and tabs that come back after a restart ([usage](docs/usage.md)).
-- **An optional 64-bit engine** in the same package, for experiments. It draws in software and has no hardware video
-  ([details](docs/engine64.md)).
 
 ### Measured on the CX
 
@@ -94,8 +92,8 @@ You need a TV with root access and the [Homebrew Channel](https://www.webosbrew.
 ares-install -d <your-device> io.github.mihai2mn.robin_1.0.0_arm.ipk
 ```
 
-The package is about 230 MB to download and 550 MB installed, because it carries two engines. Have about 800 MB free
-on the TV's app storage before you start: an install that runs out of space leaves an app that will not open.
+The package is about 105 MB to download and 230 MB installed. Have about 400 MB free on the TV's app storage before
+you start: an install that runs out of space leaves an app that will not open.
 
 Robin has its own app id, so it installs beside Wren and does not replace it. To bring your Wren bookmarks, history
 and filters across, see [Keeping your Wren data](docs/release-notes-1.0.0.md#keeping-your-wren-data).
@@ -113,7 +111,6 @@ its own data. Most people do not need it.
 - **Small muted videos above 720p are not played** until you start them yourself. This keeps pages with many
   background videos inside the memory limit.
 - **The RegExp JIT is off** on the 32-bit engine. It crashed one tested site.
-- **The 64-bit engine is slower to load pages** and has no hardware video.
 - **Cloudflare checks take about a minute** on the TV's processor. Wait for them.
 
 <details>
@@ -125,7 +122,8 @@ its own data. Most people do not need it.
 - A video scrolled partly off screen is cropped by the compositor on the tested CX. On older webOS it is shrunk into
   the visible part instead.
 - Audio was verified in the player logs, not by a listening test.
-- The package holds the ICU data and some libraries twice, once per engine.
+- An experimental 64-bit engine exists in the source but is not in the release packages: it draws in software and
+  has no hardware video ([details](docs/engine64.md)).
 - Video test pages need a server that supports HTTP range requests. `python -m http.server` does not.
 
 </details>

@@ -72,7 +72,7 @@ GPL-3.0 is compatible with all of these. LGPL libraries are shared libraries in 
 The source for these packages is what Buildroot downloads. See
 [what a release must attach or link](docs/building.md#what-a-release-must-attach-or-link).
 
-## The 64-bit engine (`engine64/` in the ipk)
+## The 64-bit engine (`engine64/`, only in a package built with `ENGINE64=1`; not in the release packages)
 
 | Component | Licence | Note |
 |---|---|---|
@@ -111,7 +111,8 @@ The first package (built before Robin) lacked these. `tools/package-release.sh` 
    patches, and Buildroot and the toolchain definitions. The address is `SOURCE_URL` (default
    `https://github.com/mihai2mn/robin-webos/tree/<tag or commit>`).
 2. `engine/licenses/manifest.csv` says WebKit 2.54.3 (the licence files are byte-identical in the 2.50.5 and 2.54.3 tarballs).
-3. `engine64/licenses/` holds the Mesa and LLVM licence files, taken from the aarch64 Buildroot build tree.
+3. In a package built with `ENGINE64=1`, `engine64/licenses/` holds the Mesa and LLVM licence files, taken from the
+   aarch64 Buildroot build tree. The release packages have no `engine64/`.
 4. `licenses/ad-blocker/` holds `NOTICES.txt`, `THIRD-PARTY-CRATES.txt` (59 crates with their licence texts, from
    `tools/ubo/crate-licences.py`), `LICENCES.txt` (each filter list's own header lines, written by `tools/ubo/update.py`)
    and uBlock Origin's `LICENSE.txt`.

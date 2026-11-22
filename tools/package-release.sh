@@ -49,6 +49,9 @@ WK_SHARED=${WK_SHARED:-$BR/br-out/build/wpewebkit-2.54.3}
 WK_TREE=${WK_TREE:-$WORK/wk-tree}
 WK254=$WK_TREE   # what stage takes the engine libraries from
 STAGE64=${STAGE64:-$repo/build/engine-stage-aarch64/engine}
+# ENGINE64=1 also packs the experimental aarch64 engine (engine64/, about +320 MB installed). Off by default: it has no
+# hardware video and draws in software, so a release does not carry it. The launcher starts the 32-bit engine without it.
+ENGINE64=${ENGINE64:-0}
 NDK=${WEBOS_NDK:-$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}
 STRIP32=$BR/x-tools/arm-webos-linux-gnueabi/bin/arm-webos-linux-gnueabi-strip
 STRIP64=$BR/br-out-aarch64/host/bin/aarch64-buildroot-linux-gnu-strip
@@ -325,13 +328,13 @@ Corresponding source of this package: $SOURCE_URL
     repository above. The sources of the Buildroot packages (GStreamer, FFmpeg, GLib and the rest of engine/licenses/manifest.csv)
     are attached to the release page of $SOURCE_REPO .
   Filter lists: the snapshot the build downloaded is attached to the same release page.
-Licences: licenses/ (UI and kit components), engine/licenses/ and engine64/licenses/ (engine libraries),
+Licences: licenses/ (UI and kit components), engine/licenses/ and, when packed, engine64/licenses/ (engine libraries),
 licenses/ad-blocker/ (ad blocker, Rust crates, filter lists).
 
 LG's firmware libraries (media pipeline, NDL, Luna, EGL/GLES, libcurl) are not part of this package;
 they are loaded from the TV at runtime.
 EOF
-    # engine64: Mesa and LLVM
+    if [ "$ENGINE64" = 1 ]; then   # engine64: Mesa and LLVM
     bd=$BR/br-out-aarch64/build
     mkdir -p "$appdir/engine64/licenses"
     for m in "$bd"/mesa3d-*/docs/license.rst; do
@@ -347,6 +350,7 @@ engine64/ holds the same libraries as engine/ built for aarch64, plus Mesa (soft
 Mesa: MIT and other permissive licences, see mesa3d-*/license.rst. LLVM: Apache-2.0 with LLVM exceptions, see llvm-*/LICENSE.TXT.
 The licences of all other packages are in ../../engine/licenses/ (same packages, same versions).
 EOF
+    fi
     # ad blocker
     [ -f "$WORK/ubo/data/licences/NOTICES.txt" ] || { echo "no ad blocker notices in $WORK/ubo/data/licences: run the ubo phase" >&2; exit 1; }
     mkdir -p "$appdir/licenses/ad-blocker"; cp -a "$WORK/ubo/data/licences/." "$appdir/licenses/ad-blocker/"
@@ -354,18 +358,21 @@ EOF
 }
 
 do_add64() {
-    [ -d "$STAGE64" ] || { echo "no aarch64 stage $STAGE64 (tools/engine-aarch64.sh stage)" >&2; exit 1; }
+    [ "$ENGINE64" != 1 ] || [ -d "$STAGE64" ] || { echo "no aarch64 stage $STAGE64 (tools/engine-aarch64.sh stage)" >&2; exit 1; }
     rm -rf "$STAGE_OUT"; mkdir -p "$STAGE_OUT"   # this run's set only; $OUT is not touched until `publish`
     for id in $IDS; do
         local app; app=$(appid "$id")
         local in; in=$(ls -t "$src"/browser/build/webos-"$id"/dist/${app}_*_arm.ipk | head -1)
-        say "add engine64 to $in"
+        if [ "$ENGINE64" = 1 ]; then say "add engine64 to $in"; else say "finish $in (32-bit engine only)"; fi
         local w; w=$(mktemp -d)
         ( cd "$w" && ar x "$in" && mkdir data && tar xzf data.tar.gz -C data )
         local appdir="$w/data/usr/palm/applications/$app"
+        if [ "$ENGINE64" = 1 ]; then
         cp -a "$STAGE64" "$appdir/engine64"
         rm -rf "$appdir/engine64/licenses" "$appdir/engine64/lib/glibc/gconv"   # UTF-8/ASCII only
+        fi
         add_licences "$appdir" "$app"
+        if [ "$ENGINE64" = 1 ]; then
         find "$appdir/engine64" -type f \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) | while read -r f; do
             case "$f" in *.dat|*.conf|*.json|*.txt|*.ini|*.js) continue ;; esac
             "$STRIP64" --strip-unneeded "$f" 2>/dev/null || true
@@ -381,7 +388,17 @@ do_add64() {
         mkdir -p "$appdir/engine64/lib/glibc/lib/web-extensions"
         install -m755 "$WORK/ubo/aarch64-unknown-linux-gnu/libwren-ubo.so" "$appdir/engine64/lib/glibc/lib/web-extensions/libwren-ubo.so"
         ln -s ../../../engine/ubo "$appdir/engine64/lib/glibc/ubo"
-        cat > "$appdir/ENGINES.txt" <<EOF
+        fi
+        if [ "$ENGINE64" != 1 ]; then cat > "$appdir/ENGINES.txt" <<EOF
+Robin $VERSION ($app): the web engine
+  engine/    32-bit WPE WebKit 2.54.3 (ARMv7 JIT + DFG). engine/wpe-engine is a small launcher; the real engine is
+             engine/wpe-engine32.
+This package does not hold the experimental 64-bit engine (engine64/): the launcher starts the 32-bit engine. A build
+with ENGINE64=1 (tools/package-release.sh) packs it; see docs/engine64.md in the source.
+Hardware video in shared-memory mode is opt-in: launch parameter {"wpebShmVideo":"1"}.
+Licences of the bundled libraries: licenses/, engine/licenses/, licenses/ad-blocker/.
+EOF
+        else cat > "$appdir/ENGINES.txt" <<EOF
 Robin $VERSION ($app): two web engines in one package
   engine/    32-bit WPE WebKit 2.54.3 (ARMv7 JIT + DFG), the default. engine/wpe-engine is a small launcher; the real
              engine is engine/wpe-engine32.
@@ -397,6 +414,7 @@ If engine64/ or its loader is missing the launcher logs "wpe-launcher: ..." in e
 Hardware video in shared-memory mode is opt-in: launch parameter {"wpebShmVideo":"1"} (32-bit engine).
 Licences of the bundled libraries: licenses/, engine/licenses/, engine64/licenses/, licenses/ad-blocker/.
 EOF
+        fi
         # control: new Installed-Size; same package name and version
         local kb; kb=$(du -sk "$w/data" | cut -f1)
         mkdir -p "$w/ctl"; tar xzf "$w/control.tar.gz" -C "$w/ctl"
@@ -418,7 +436,7 @@ do_sums() {
       echo "ids $IDS  version $VERSION"
       echo "date $(date -u +%FT%TZ)"
       echo "WK254 libWPEWebKit (stripped) md5 $(md5sum "$WORK/stage-${IDS%% *}/engine/lib/libWPEWebKit-2.0.so.1" | cut -d' ' -f1)"
-      echo "inputs: 32-bit engine stage $(basename "$(dirname "$STAGE_BASE")"), 64-bit engine stage $(basename "$(dirname "$STAGE64")"); uBO: built from the clone ($(cat "$WORK/ubo/COMMIT" 2>/dev/null))"
+      echo "inputs: 32-bit engine stage $(basename "$(dirname "$STAGE_BASE")"), 64-bit engine $([ "$ENGINE64" = 1 ] && basename "$(dirname "$STAGE64")" || echo "not packed"); uBO: built from the clone ($(cat "$WORK/ubo/COMMIT" 2>/dev/null))"
       echo "kit $(git -C "$src/third_party/webos-native-app-kit" log -1 --format=%h)"; } > "$STAGE_OUT/BUILD-INFO.txt"
 }
 
@@ -456,11 +474,14 @@ do_check() {
         grep -q "\"id\": *\"$app\"" "$A/appinfo.json" 2>/dev/null || fail "$app: appinfo.json id is not $app"
         for f in ENGINES.txt engine/wpe-engine engine/wpe-engine32 engine/lib/libWPEWebKit-2.0.so.1 engine/libexec/WPEWebProcess engine/libexec/WPENetworkProcess \
                  engine/libexec/WPEGPUProcess engine/lib/injected-bundle/libWPEInjectedBundle.so engine/lib/gstreamer-1.0/libgstwpebmedia.so \
-                 engine/lib/libWPEBackend-webos.so engine/lib/glibc/ld-linux.so.3 engine/ubo/engine.dat engine/lib/web-extensions/libwren-ubo.so \
-                 engine64/wpe-engine engine64/lib/libWPEWebKit-2.0.so.1 engine64/libexec/WPEWebProcess engine64/libexec/WPENetworkProcess \
-                 engine64/lib/glibc/ld-linux-aarch64.so.1 engine64/lib/glibc/ubo/engine.dat engine64/lib/glibc/lib/web-extensions/libwren-ubo.so; do
+                 engine/lib/libWPEBackend-webos.so engine/lib/glibc/ld-linux.so.3 engine/ubo/engine.dat engine/lib/web-extensions/libwren-ubo.so; do
             [ -e "$A/$f" ] || fail "$app: $f missing"
         done
+        if [ "$ENGINE64" = 1 ]; then
+            for f in engine64/wpe-engine engine64/lib/libWPEWebKit-2.0.so.1 engine64/libexec/WPEWebProcess engine64/libexec/WPENetworkProcess engine64/lib/glibc/ld-linux-aarch64.so.1 engine64/lib/glibc/ubo/engine.dat engine64/lib/glibc/lib/web-extensions/libwren-ubo.so; do [ -e "$A/$f" ] || fail "$app: $f missing"; done
+        else
+            [ ! -e "$A/engine64" ] || fail "$app: engine64/ is in the package although ENGINE64 is not 1"
+        fi
         while read -r f; do fail "$app: dangling link $f"; done < <(cd "$A" && find . -xtype l)
         for tree in engine engine64; do
             [ -d "$A/$tree" ] || continue
@@ -483,7 +504,7 @@ do_check() {
             interp=$(readelf -l "$A/$f" 2>/dev/null | sed -n 's/.*interpreter: \(.*\)\]/\1/p')
             [ "$interp" = "/tmp/$app/ld-linux.so.3" ] || fail "$app: $f PT_INTERP is '$interp'"
         done
-        for f in engine64/wpe-engine engine64/libexec/WPEWebProcess engine64/libexec/WPENetworkProcess engine64/libexec/WPEGPUProcess; do
+        [ "$ENGINE64" != 1 ] || for f in engine64/wpe-engine engine64/libexec/WPEWebProcess engine64/libexec/WPENetworkProcess engine64/libexec/WPEGPUProcess; do
             interp=$(readelf -l "$A/$f" 2>/dev/null | sed -n 's/.*interpreter: \(.*\)\]/\1/p')
             [ "$interp" = "/tmp/$app/ld-linux-aarch64.so.1" ] || fail "$app: $f PT_INTERP is '$interp'"
         done
@@ -491,7 +512,7 @@ do_check() {
         grep -q 'not set' "$A/licenses/SOURCE.txt" 2>/dev/null && fail "$app: licenses/SOURCE.txt does not name the source"
         grep -q "$COMMIT" "$A/licenses/SOURCE.txt" 2>/dev/null || fail "$app: licenses/SOURCE.txt does not name commit $COMMIT"
         grep -q 'wpewebkit.*2\.50\.5' "$A/engine/licenses/manifest.csv" 2>/dev/null && fail "$app: engine/licenses/manifest.csv still lists WebKit 2.50.5"
-        ls "$A"/engine64/licenses/mesa3d-*/license.rst "$A"/engine64/licenses/llvm-*/LICENSE.TXT >/dev/null 2>&1 || fail "$app: engine64/licenses has no Mesa or LLVM licence"
+        [ "$ENGINE64" != 1 ] || ls "$A"/engine64/licenses/mesa3d-*/license.rst "$A"/engine64/licenses/llvm-*/LICENSE.TXT >/dev/null 2>&1 || fail "$app: engine64/licenses has no Mesa or LLVM licence"
         for f in NOTICES.txt THIRD-PARTY-CRATES.txt LICENCES.txt LICENSE.txt; do [ -s "$A/licenses/ad-blocker/$f" ] || fail "$app: licenses/ad-blocker/$f missing"; done
         rm -rf "$w"
     done

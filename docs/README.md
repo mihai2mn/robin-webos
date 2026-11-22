@@ -11,7 +11,7 @@ Robin is based on Wren by [sostk](https://github.com/sostk/webos-wpe-browser). T
 | [patches.md](patches.md) | patches to WebKit (2.54.3 series), GnuTLS and the app kit, and why |
 | [jit-armv7.md](jit-armv7.md) | the 32-bit ARMv7 JIT on WebKit 2.54: what was broken, the fixes, how it was checked |
 | [video.md](video.md) | hardware video through Starfish, audio, the hybrid policy, known issues |
-| [engine64.md](engine64.md) | the optional 64-bit engine |
+| [engine64.md](engine64.md) | the experimental 64-bit engine (not in the release packages) |
 | [ad-blocking.md](ad-blocking.md) | the uBO style ad blocker and My filters |
 | [lg-chromium-media.md](lg-chromium-media.md) | how LG's Chromium drives the media pipeline, and how Robin matches it |
 | [release-notes-1.0.0.md](release-notes-1.0.0.md) | what is new over Wren 0.3.3, known limits, install size, keeping your data |

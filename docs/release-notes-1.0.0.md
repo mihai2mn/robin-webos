@@ -13,8 +13,8 @@ Versions: Robin 1.0.0, based on Wren 0.3.3, WPE WebKit 2.54.3.
 - WPE WebKit **2.54.3** instead of 2.50.5, with a series of 25 patches, numbered 0001 to 0027 ([patches.md](patches.md)).
 - WebKit 2.54 turns the JIT off on every 32-bit build. The series brings back the ARMv7 Baseline JIT and DFG on the
   TV's 32-bit softfp userland ([jit-armv7.md](jit-armv7.md)). The RegExp JIT stays off.
-- An optional **64-bit (aarch64) engine** in the same package. It has the 64-bit JIT, draws in software and has no
-  hardware video ([engine64.md](engine64.md)). The 32-bit engine is the default.
+- An experimental 64-bit (aarch64) engine in the source tree. It is **not in the release packages**: it draws in
+  software and has no hardware video, and it more than doubled the install size ([engine64.md](engine64.md)).
 - A small launcher that picks the engine at start.
 - Fixes for black pages in direct mode with WebKit 2.54. Black-picture starts on static pages: 9 of 62 launches before
   the fix, 0 of 40 with it.
@@ -64,7 +64,7 @@ Versions: Robin 1.0.0, based on Wren 0.3.3, WPE WebKit 2.54.3.
   interpreter, needed libraries, ids, versions, licence files). It writes `MD5SUMS` and `BUILD-INFO.txt`.
   The build is not bit-for-bit reproducible: the toolchain image, the filter lists and the staged base are not pinned.
 - The package carries its licence material: `licenses/SOURCE.txt` names the source and commit, `engine/licenses/`
-  and `engine64/licenses/` (Mesa and LLVM too) cover the engine libraries, `licenses/ad-blocker/` covers the ad blocker
+  covers the engine libraries, `licenses/ad-blocker/` covers the ad blocker
   and the filter lists.
 - Tools for working on a rooted TV: `tools/tvdrive` drives a test copy from a PC.
 
@@ -73,7 +73,6 @@ Versions: Robin 1.0.0, based on Wren 0.3.3, WPE WebKit 2.54.3.
 - One TV model was tested. Other models and webOS versions are untested.
 - Audio is not confirmed by ear. The logs show the calls reaching LG's pipeline.
 - The RegExp JIT is off on the 32-bit engine.
-- The 64-bit engine is software rendered, shared-memory only and slower to load (Wikipedia 8.2 s against 4.7 s).
 - One hardware video at a time.
 - The package is large (below).
 - Widevine is at software security level and was not tested with Robin.
@@ -88,8 +87,8 @@ packages of 2026-11-22.
 
 ## Install size
 
-About 230 MB to download and about 550 MB installed. Have about 800 MB free on the TV's app storage before you start:
-an install that runs out of space leaves an app that will not open. The size is two engines in one package ([building.md](building.md#size)).
+About 105 MB to download and about 230 MB installed. Have about 400 MB free on the TV's app storage before you start:
+an install that runs out of space leaves an app that will not open ([building.md](building.md#size)).
 
 ## Files in this release
 

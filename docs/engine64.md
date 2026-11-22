@@ -1,5 +1,9 @@
 # The 64-bit engine
 
+> **Not in the release packages.** Since Robin 1.0.0 the ipks carry the 32-bit engine only. The 64-bit engine draws in
+> software, has no hardware video and added about 320 MB to the install, so it is built only on request:
+> `ENGINE64=1 bash tools/package-release.sh all`. Everything below describes a package built that way.
+
 The package carries a second engine, WPE WebKit 2.54.3 built for aarch64 (`engine64/`, 319 MB installed). It is
 optional and off by default.
 
