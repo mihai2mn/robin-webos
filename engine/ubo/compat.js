@@ -501,16 +501,42 @@
             else if (emu.el.parentNode !== emu.parent) { emu.parent = emu.el.parentNode; strip(emu.el); }
         }, 500);
         for (const name of ['pagehide', 'popstate', 'hashchange']) addEventListener(name, () => { if (emu.el) leave(); });
+        // Every element matching a selector in the document, through shadow roots.
+        const deepAll = sel => {
+            const out = [];
+            const walk = root => {
+                out.push(...root.querySelectorAll(sel));
+                for (const x of root.querySelectorAll('*')) { const s = shadowOf(x); if (s) walk(s); }
+            };
+            walk(document);
+            return out;
+        };
+        const frameMayFullscreen = frame => {
+            let origin = '';
+            try { origin = new URL(frame.getAttribute('src') || 'about:blank', location.href).origin; } catch (x) {}
+            for (const part of (frame.getAttribute('allow') || '').split(';')) {
+                const t = part.trim().split(/\s+/).filter(Boolean);
+                if (t[0] !== 'fullscreen') continue;
+                const list = t.slice(1);
+                return list.length === 0 || list.includes("'src'") || list.includes('*') || list.includes(origin);
+            }
+            if (frame.allowFullscreen || frame.hasAttribute('allowfullscreen') || frame.hasAttribute('webkitallowfullscreen')) return true;
+            try { return !!frame.contentDocument; } catch (x) { return false; }   // same origin: allowed by default
+        };
         addEventListener('message', e => {
             const d = e.data;
             if (!d || typeof d !== 'object' || !d.wrenFullscreen || e.source === window) return;
             if (d.wrenFullscreen === 'exit') { if (e.source === parent && emu.el) leave(); return; }
-            const frame = [...document.querySelectorAll('iframe, frame')].find(f => f.contentWindow === e.source);
+            const frame = deepAll('iframe, frame').find(f => f.contentWindow === e.source);
             if (!frame) return;
             if (d.wrenFullscreen === 'leave') { if (emu.el === frame) leave(); return; }
-            // 'enter': only with the user's activation, and only for a frame the page allowed to go fullscreen.
-            const allowed = frame.allowFullscreen || /\bfullscreen\b/.test(frame.getAttribute('allow') || '') || (() => { try { return !!frame.contentDocument; } catch (x) { return false; } })();
-            if (allowed && (!navigator.userActivation || navigator.userActivation.isActive)) enter(frame);
+            // 'enter': only with the user's activation, for the frame the user is in (it has the focus: an ad frame the user never touched
+            // cannot take the screen while the page itself has an activation), a frame that is laid out and visible, and one the page allowed to
+            // go fullscreen (the allow attribute parsed: allow="fullscreen 'none'" or a list without 'src'/'*'/its own origin says no).
+            if (!(navigator.userActivation && navigator.userActivation.isActive) || frame.getRootNode().activeElement !== frame) return;
+            const r = frame.getBoundingClientRect(), cs = getComputedStyle(frame);
+            if (r.width <= 0 || r.height <= 0 || cs.visibility === 'hidden' || cs.display === 'none') return;
+            if (frameMayFullscreen(frame)) enter(frame);
         }, true);
         for (const [name, value] of [['fullscreenElement', () => retarget(emu.el)], ['webkitFullscreenElement', () => retarget(emu.el)],
                                      ['webkitCurrentFullScreenElement', () => retarget(emu.el)], ['fullscreen', () => !!emu.el], ['webkitIsFullScreen', () => !!emu.el]]) {
