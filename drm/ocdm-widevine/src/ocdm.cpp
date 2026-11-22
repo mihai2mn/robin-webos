@@ -31,7 +31,16 @@ struct OpenCDMSystem {
 };
 
 struct OpenCDMSession {
-    std::atomic<int> refs { 1 };
+    std::atomic<int> refs { 1 };          // 0 = being destroyed: the destroy task is queued; no new reference may be taken (try_ref)
+    bool try_ref()                        // +1 unless the count already reached 0
+    {
+        int n = refs.load();
+        while (n > 0) {
+            if (refs.compare_exchange_weak(n, n + 1))
+                return true;
+        }
+        return false;
+    }
     std::string id;                       // the CDM's session id; immutable once registered
     OpenCDMSessionCallbacks callbacks {};
     void* user_data = nullptr;
@@ -262,8 +271,7 @@ OpenCDMSession* Context::acquire(const std::string& id)
     auto it = sessions.find(id);
     if (it == sessions.end())
         return nullptr;
-    it->second->refs.fetch_add(1);
-    return it->second;
+    return it->second->try_ref() ? it->second : nullptr;   // a session at 0 references is dying (its destroy is queued)
 }
 
 void Context::post(std::function<void()> task)
@@ -299,6 +307,7 @@ void Context::release(OpenCDMSession* session)
 
 void Context::destroy(OpenCDMSession* session)
 {
+    unregister_session(session);   // first: from here nothing can find the session, so nothing can take a new reference
     {
         std::lock_guard<std::recursive_mutex> lock(cdm_lock);
         if (session->open) {
@@ -306,7 +315,6 @@ void Context::destroy(OpenCDMSession* session)
             session->open = false;
         }
     }
-    unregister_session(session);
     delete session;
 }
 
@@ -314,7 +322,7 @@ void Context::schedule_refresh(OpenCDMSession* session)
 {
     if (session->refresh_pending.exchange(true))
         return;
-    session->refs.fetch_add(1);
+    session->refs.fetch_add(1);   // the caller holds a reference (refs >= 1), so this never revives a dying session
     post([this, session] {
         session->refresh_pending = false;
         refresh(session);
@@ -521,6 +529,8 @@ struct OpenCDMSession* opencdm_get_system_session(struct OpenCDMSystem*, const u
     context->keys_changed.wait_for(lock, std::chrono::milliseconds(waitTime), [&] {
         for (const auto& entry : context->sessions) {
             auto it = entry.second->keys.find(key);
+            if (entry.second->refs.load() == 0)
+                continue;   // being destroyed
             if (it == entry.second->keys.end())
                 continue;
             if (!found || it->second == Usable)
@@ -530,8 +540,8 @@ struct OpenCDMSession* opencdm_get_system_session(struct OpenCDMSystem*, const u
         }
         return found != nullptr;
     });
-    if (found)
-        found->refs.fetch_add(1);
+    if (found && !found->try_ref())   // it dropped its last reference since the scan: not available any more
+        found = nullptr;
     return found;
 }
 
