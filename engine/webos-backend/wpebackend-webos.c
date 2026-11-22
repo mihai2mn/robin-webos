@@ -1443,6 +1443,22 @@ __attribute__((visibility("default"))) int64_t wpeb_webos_video_last_commit_us(v
     return (int64_t)g_video_commit_at.tv_sec * 1000000 + g_video_commit_at.tv_nsec / 1000;
 }
 
+// Whether the shown page already has a video window (of another sink: the asking sink has none yet). The media sink asks it at
+// preroll: a video that is not playing does not take the page's window and LG's decoder away from the one that has them (two
+// hardware videos on one page: the preloading one took them from the playing one, TV 2026-11-22).
+__attribute__((visibility("default"))) int wpeb_webos_video_shown_window_busy(void)
+{
+    pthread_mutex_lock(&g_video_lock);
+    const struct target *t = g_shown_target;
+    const int busy = t && t->video && t->video_id[0];
+    char id[128]; // = sizeof(struct target.video_id)
+    snprintf(id, sizeof(id), "%s", busy ? t->video_id : "");
+    pthread_mutex_unlock(&g_video_lock);
+    if (busy)
+        LOG("video window: the page's window %s belongs to another video: a video that is not playing waits for its play", id);
+    return busy;
+}
+
 // Closes the window with this id only (the window of the page that is shown now stays when another page's sink stops).
 __attribute__((visibility("default"))) void wpeb_webos_video_close_id(const char *id)
 {
