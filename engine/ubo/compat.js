@@ -347,7 +347,11 @@
         // The element's parent in the flattened tree: out of a shadow root into its host, out of a slot's content into the slot.
         const flatParent = n => n.assignedSlot || n.parentElement || ((r => (r instanceof ShadowRoot ? r.host : null))(n.getRootNode()));
         // Every ancestor that traps a fixed element (containing block, clip) or that holds it under something else (stacking context).
-        const strip = start => {
+        // `inside`: the fullscreen element, when `start` is a video within it. The ancestors between the video and that element are
+        // inside the player's own stacking order (its controls are their siblings): they are freed from what traps a fixed element but
+        // never given a z-index, or the video's branch would paint over the controls.
+        const strip = (start, inside) => {
+            let below = !!inside;
             for (let a = flatParent(start); a; a = flatParent(a)) {
                 const cs = getComputedStyle(a);
                 const props = [];
@@ -366,7 +370,8 @@
                 if (not(cs.mixBlendMode, 'normal')) props.push(['mix-blend-mode', 'normal']);
                 if ((cs.maskImage || cs.webkitMaskImage || 'none') !== 'none') props.push(['mask', 'none'], ['-webkit-mask', 'none']);
                 if (+cs.opacity < 1) props.push(['opacity', '1']);
-                if (cs.zIndex !== 'auto' || cs.position === 'fixed' || cs.position === 'sticky') props.push(['z-index', '2147483647']);
+                if (!below && (cs.zIndex !== 'auto' || cs.position === 'fixed' || cs.position === 'sticky')) props.push(['z-index', '2147483647']);
+                if (a === inside) below = false;
                 // Without this, setting transform: none starts the page's own "transition: transform" and the element rides the animation.
                 if (props.length) put(a, props.concat([['transition', 'none']]));
             }
@@ -375,13 +380,17 @@
                       ['max-width', 'none'], ['max-height', 'none'], ['min-width', '0'], ['min-height', '0'], ['margin', '0'], ['padding', '0'],
                       ['border', '0'], ['box-sizing', 'border-box'], ['transform', 'none'], ['translate', 'none'], ['z-index', '2147483647'],
                       ['visibility', 'visible'], ['opacity', '1'], ['object-fit', 'contain']];
+        // A video inside the fullscreen container fills the screen but keeps the page's own stacking: the player's controls are its siblings
+        // (or cousins), drawn by the page above it, and a video on top of them would punch its hole through them.
+        const FILL_IN = FILL.filter(([k]) => k !== 'z-index');
+        const fillVideo = (v, el) => { strip(v, el); put(v, FILL_IN); };
         const isFrame = n => n.tagName === 'IFRAME' || n.tagName === 'FRAME';
         // While a container is fullscreen: a video the page puts into it (a player re-mounting its element, a new source element) is made
         // to fill the screen like the ones that were there at enter().
         let watch = null;
         const fillNew = el => {
             if (el instanceof HTMLVideoElement || isFrame(el)) return;
-            for (const v of videosIn(el)) if (v.isConnected && !saved.has(v)) { strip(v); put(v, FILL); }
+            for (const v of videosIn(el)) if (v.isConnected && !saved.has(v)) fillVideo(v, el);
         };
         const enter = el => {
             const swap = !!emu.el;               // another element asks while one is fullscreen: switch, one change event, no exit
@@ -394,7 +403,7 @@
             // A container: the page's own CSS (:fullscreen video { ... }) cannot match an emulated fullscreen, so its video is made to fill
             // the screen here too, and freed from its own trapping ancestors.
             if (!(el instanceof HTMLVideoElement) && !isFrame(el))
-                for (const v of videosIn(el)) if (v.isConnected && v.__wrenPolicy === 'hw') { strip(v); put(v, FILL); }
+                for (const v of videosIn(el)) if (v.isConnected && v.__wrenPolicy === 'hw') fillVideo(v, el);
             put(el, FILL.concat([['background-color', '#000']]));
             if (watch) watch.disconnect();
             watch = new MutationObserver(() => { if (emu.el === el) fillNew(el); });
