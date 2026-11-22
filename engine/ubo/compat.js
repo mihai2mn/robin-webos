@@ -360,6 +360,9 @@
                 if (not(cs.contentVisibility, 'visible')) props.push(['content-visibility', 'visible']);
                 if (not(cs.willChange, 'auto')) props.push(['will-change', 'auto']);
                 if (not(cs.isolation, 'auto')) props.push(['isolation', 'auto']);
+                // An ancestor that clips (overflow hidden/clip) cuts a fixed descendant to its own old box in WebKit's compositor (the fullscreen
+                // element then keeps the size and place it had before; TV 2026-11-22), although layout says it covers the screen.
+                if (['hidden', 'clip'].includes(cs.overflowX) || ['hidden', 'clip'].includes(cs.overflowY)) props.push(['overflow', 'visible']);
                 if (not(cs.mixBlendMode, 'normal')) props.push(['mix-blend-mode', 'normal']);
                 if ((cs.maskImage || cs.webkitMaskImage || 'none') !== 'none') props.push(['mask', 'none'], ['-webkit-mask', 'none']);
                 if (+cs.opacity < 1) props.push(['opacity', '1']);
