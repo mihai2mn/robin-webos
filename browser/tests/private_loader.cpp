@@ -96,11 +96,40 @@ int main(int, char **argv) {
               fs::read_symlink(LOADER_FIXTURE_INTERP) == flat,
           "no TV loader: bundled from engine/lib (" + c.why + ")");
 
+    // A wrong link in a folder that is not the app's runtime folder cannot be fixed from here.
+    fs::remove(LOADER_FIXTURE_INTERP);
+    fs::create_symlink("/bin/true", LOADER_FIXTURE_INTERP);
     err.clear();
     check(!browser::prepare_private_loader(fixture, lib, "/somewhere/else/" + fs::path(runtime).filename().string(),
                                            GlibcPolicy::Auto, "2.28", syslib, c, err) &&
               err.find("runtime folder") != std::string::npos,
           "runtime folder mismatch is reported: " + err);
+
+    // The app's "<folder>-<uid>" runtime folder (the kit refused /tmp/<folder>, another user's): the engine's loader is still in
+    // /tmp/<folder>, a folder this process may not change. A link that is already right is used; a wrong one is an error, not
+    // "the system's loader" with nothing checked.
+    {
+        const std::string uid_runtime = runtime + "-" + std::to_string(::getuid());
+        fs::create_directories(uid_runtime);
+        fs::remove(LOADER_FIXTURE_INTERP);
+        fs::create_symlink(flat, LOADER_FIXTURE_INTERP);
+        err.clear();
+        check(browser::prepare_private_loader(fixture, lib, uid_runtime, GlibcPolicy::Auto, "2.28", syslib, c, err) && c.linked &&
+                  fs::read_symlink(LOADER_FIXTURE_INTERP) == flat,
+              "<folder>-<uid> runtime folder, link already right: used (" + err + ")");
+        fs::remove(LOADER_FIXTURE_INTERP);
+        fs::create_symlink("/bin/true", LOADER_FIXTURE_INTERP);
+        err.clear();
+        check(!browser::prepare_private_loader(fixture, lib, uid_runtime, GlibcPolicy::Auto, "2.28", syslib, c, err) &&
+                  err.find("runtime folder") != std::string::npos && fs::read_symlink(LOADER_FIXTURE_INTERP) == "/bin/true",
+              "<folder>-<uid> runtime folder, wrong link: reported and left alone: " + err);
+        const std::string other = runtime + "-abc";
+        fs::create_directories(other);
+        check(browser::prepare_private_loader(fixture, lib, other, GlibcPolicy::Auto, "2.28", syslib, c, err) && !c.linked,
+              "<folder>-abc is not the app's folder: system loader");
+        fs::remove_all(uid_runtime);
+        fs::remove_all(other);
+    }
 
     fs::remove_all(runtime);
     fs::remove_all(engine);
