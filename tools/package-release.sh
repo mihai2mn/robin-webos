@@ -7,7 +7,7 @@
 #
 #   bash tools/package-release.sh all                 every phase, both ids -> build/release/*.ipk, MD5SUMS, BUILD-INFO.txt
 #   bash tools/package-release.sh clone|launcher|engine32|stage|ui|add64|sums|check|publish   one phase (each needs the ones before)
-#   IDS="dev"  COMMIT=<sha>  BUILD_ROOT=~/webos-browser-build  OUT=...  bash tools/package-release.sh all
+#   IDS="dev"  COMMIT=<sha>  BUILD_ROOT=~/webos-browser-build (alias WPE_BUILD_ROOT)  OUT=...  bash tools/package-release.sh all
 # The packages are assembled in $OUT.tmp (add64 empties it first) and moved into $OUT by `publish` only when every id was built and
 # `check` passed; `publish` first removes the old *_arm.ipk, MD5SUMS and BUILD-INFO.txt from $OUT (other files there are left), so
 # $OUT never holds a mixture of two runs. MD5SUMS and BUILD-INFO.txt describe exactly the ipks of $IDS (default: both ids).
@@ -27,7 +27,13 @@
 # Rebuilt here from the clean clone: wpe-engine + libgstwpebmedia.so (against the 2.54.3 headers), the launcher, the UI.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-BR=${BUILD_ROOT:-$HOME/webos-browser-build}
+# One build root for every tool this script runs: BUILD_ROOT (this script) and WPE_BUILD_ROOT (build-launcher.sh, build-engine.sh, ...) name the
+# same directory; setting both to different values is refused, and the child scripts get the resolved root explicitly (BR_OUT is passed
+# as $BR/br-out to build-webos-backend.sh whatever the environment holds: engine-aarch64.sh documents BR_OUT as the aarch64 tree).
+if [ -n "${BUILD_ROOT:-}" ] && [ -n "${WPE_BUILD_ROOT:-}" ] && [ "$BUILD_ROOT" != "$WPE_BUILD_ROOT" ]; then
+    echo "BUILD_ROOT=$BUILD_ROOT and WPE_BUILD_ROOT=$WPE_BUILD_ROOT differ: set one of them" >&2; exit 2
+fi
+BR=${BUILD_ROOT:-${WPE_BUILD_ROOT:-$HOME/webos-browser-build}}
 COMMIT=$(git -C "$repo" rev-parse --verify "${COMMIT:-HEAD}^{commit}")   # always the full id: BUILD-INFO and `check` compare it
 OUT=${OUT:-$repo/build/release}
 STAGE_OUT=$OUT.tmp   # the packages are assembled here and move into $OUT only when the whole set was built and checked
@@ -83,7 +89,7 @@ do_launcher() {
     for id in $IDS; do
         say "launcher for $id"
         mkdir -p "$WORK/launcher-$id"
-        LAUNCHER_SRC="$src/engine/launcher/wpe-launcher.c" LAUNCHER_INTERP="/tmp/$(appid $id)/ld-linux.so.3" OUT_DIR="$WORK/launcher-$id" bash "$src/tools/build-launcher.sh" | sed "s/^/   /"
+        WPE_BUILD_ROOT="$BR" LAUNCHER_SRC="$src/engine/launcher/wpe-launcher.c" LAUNCHER_INTERP="/tmp/$(appid $id)/ld-linux.so.3" OUT_DIR="$WORK/launcher-$id" bash "$src/tools/build-launcher.sh" | sed "s/^/   /"
     done
 }
 
@@ -114,7 +120,7 @@ do_engine32() {
 # ---- backend: direct GPU presentation libraries (NDK), built from the clone --------------------------------------
 do_backend() {
     say "libWPEBackend-webos.so + libwpeb-owner.so"
-    ( cd "$src" && rm -rf build/webos-backend && WEBOS_NDK="$NDK" bash tools/build-webos-backend.sh ) > "$WORK/backend.log" 2>&1 || { tail "$WORK/backend.log"; exit 1; }
+    ( cd "$src" && rm -rf build/webos-backend && WEBOS_NDK="$NDK" BR_OUT="$BR/br-out" bash tools/build-webos-backend.sh ) > "$WORK/backend.log" 2>&1 || { tail "$WORK/backend.log"; exit 1; }
     ls -l "$src/build/webos-backend/libWPEBackend-webos.so" "$src/build/webos-backend/libwpeb-owner.so" | sed "s/^/   /"
 }
 
