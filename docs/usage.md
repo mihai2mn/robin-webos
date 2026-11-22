@@ -56,7 +56,7 @@ The zooms are stored in `zooms.json` in the profile folder (up to 500 sites). Be
 | `{"wpebShow": "home" \| "panel" \| "quick" \| "side" \| "zoom" \| "tabs"}` | open that screen a few seconds after start (screenshots, tests) |
 | `{"wpebShmVideo": "1"}` | opt into hardware video when running with `{"wpebPresent": "shm"}` |
 | `{"wpebVideoBackend": "starfish" \| "ndl"}` | select the hardware video backend (default: `starfish`, with `ndl` fallback) |
-| `{"wpebEnv": {"NAME": "value"}}` | allowlisted engine environment prefixes: `WEBKIT_*` (excluding `WEBKIT_EXEC_PATH` and `WEBKIT_INJECTED_BUNDLE_PATH`), `JSC_*`, `WPE_BROWSER_DEBUG*` (e.g. `WPE_BROWSER_DEBUG_CONSOLE=1`, `WPE_BROWSER_DEBUG_ENGINE=64`), `GST_DEBUG`, `G_TLS_*`, `MSE_*` |
+| `{"wpebEnv": {"NAME": "value"}}` | allowlisted engine environment prefixes: `WEBKIT_*` (excluding `WEBKIT_EXEC_PATH` and `WEBKIT_INJECTED_BUNDLE_PATH`), `JSC_*`, `WPE_BROWSER_DEBUG*` (e.g. `WPE_BROWSER_DEBUG_CONSOLE=1`, `WPE_BROWSER_DEBUG_ENGINE=64`), `GST_DEBUG*`, `G_TLS_*`, `MSE_*`. An app id ending in `.dev` passes all of them. A release app id passes only the harmless ones (`JSC_*`, `MSE_*`, `WPE_BROWSER_DEBUG_CONSOLE`, `_AUTOPLAY`, `_ENGINE`, `_MESSAGES`, `_REQUESTS`, `_FRAMES`, `_UBO_LOG`, `_MEDIA_AREA`; see `browser/engine_env.hpp`) unless the file `<data folder>/dev-switches` exists (create it with a shell on the TV; a launch parameter cannot). Names it refuses are logged. |
 
 ## Logs
 

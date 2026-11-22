@@ -90,6 +90,7 @@ struct View {
     double scale = 1.0;
     bool shown = false;
     bool fullscreen = false;
+    guint confirm_idle = 0;  // the pending confirm_fullscreen (removed with the view: it holds the View pointer)
 };
 
 namespace {
@@ -109,6 +110,7 @@ void on_status(void *user, int32_t status, uint32_t width, uint32_t height)
 gboolean confirm_fullscreen(gpointer data)
 {
     auto *view = static_cast<View *>(data);
+    view->confirm_idle = 0;
     if (view->fullscreen)
         wpe_view_backend_dispatch_did_enter_fullscreen(view->backend);
     else
@@ -120,13 +122,16 @@ bool on_fullscreen(void *data, bool fullscreen)
 {
     auto *view = static_cast<View *>(data);
     view->fullscreen = fullscreen;
-    g_idle_add(confirm_fullscreen, view);
+    if (!view->confirm_idle)  // one confirmation answers the latest request
+        view->confirm_idle = g_idle_add(confirm_fullscreen, view);
     return true;
 }
 
 void destroy_view(gpointer data)
 {
     auto *view = static_cast<View *>(data);
+    if (view->confirm_idle)
+        g_source_remove(view->confirm_idle);
     // Frees the wpeb_webos_view too (it is the view backend's implementation).
     wpe_view_backend_destroy(view->backend);
     delete view;

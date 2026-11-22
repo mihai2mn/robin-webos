@@ -114,11 +114,15 @@ public:
             pat.pop_back();
         }
         r.pattern = r.match_case ? pat : lower(pat);
+        has_exceptions_ = has_exceptions_ || r.exception;
         rules_.push_back(std::move(r));
         return true;
     }
 
     size_t size() const { return rules_.size(); }
+
+    // Longer addresses are cut to this before matching (a page chooses the address of the window it opens).
+    static constexpr size_t kMaxTarget = 2048;
 
     // True when a popup rule blocks a window opened by `opener` that goes to `target` (an exception rule that also
     // matches wins). An empty target is the blank window a script fills in later.
@@ -128,6 +132,8 @@ public:
             return false;
         if (target.empty())
             target = "about:blank";
+        if (target.size() > kMaxTarget)  // a page picks the address: the cost of a match is bounded by its length
+            target.resize(kMaxTarget);
         const std::string target_lc = lower(target);
         const std::string t_host = host_of(target_lc), o_host = host_of(lower(opener));
         const bool third = !t_host.empty() && !o_host.empty() && site_of(t_host) != site_of(o_host);
@@ -139,6 +145,8 @@ public:
                 return false;
             if (!hit)
                 hit = &r;
+            if (!has_exceptions_)  // nothing can overrule it: no need to look at the rest
+                break;
         }
         if (hit && which)
             *which = hit->pattern.c_str();
@@ -221,36 +229,65 @@ private:
         return !(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.' || c == '%');
     }
 
-    // pat[pi..] against url[ui..]; '*' any run, '^' a separator or the end.
-    static bool here(const std::string &pat, size_t pi, const std::string &url, size_t ui, bool end_anchor)
+    // pat[b..e) (a run without '*') against url at ui: the end of the match, or npos. '^' is a separator or the end.
+    static size_t seg_at(const std::string &pat, size_t b, size_t e, const std::string &url, size_t ui)
     {
-        for (;;) {
-            if (pi == pat.size())
-                return !end_anchor || ui == url.size();
-            const char c = pat[pi];
-            if (c == '*') {
-                while (pi < pat.size() && pat[pi] == '*')
-                    ++pi;
-                if (pi == pat.size())
-                    return true;
-                for (size_t k = ui; k <= url.size(); ++k)
-                    if (here(pat, pi, url, k, end_anchor))
-                        return true;
-                return false;
-            }
-            if (c == '^') {
+        for (size_t pi = b; pi < e; ++pi) {
+            if (pat[pi] == '^') {
                 if (ui == url.size())
-                    return here(pat, pi + 1, url, ui, end_anchor);
+                    continue;
                 if (!separator(url[ui]))
-                    return false;
-                ++pi;
+                    return std::string::npos;
                 ++ui;
                 continue;
             }
-            if (ui >= url.size() || url[ui] != c)
-                return false;
-            ++pi;
+            if (ui >= url.size() || url[ui] != pat[pi])
+                return std::string::npos;
             ++ui;
+        }
+        return ui;
+    }
+
+    // The whole pattern against url from ui ('*' any run). floating: it may start at any position >= ui (an
+    // unanchored pattern). Greedy: each run between two '*' is taken at its first fit and never revisited (a later
+    // fit can only leave less of the address), so the cost is at most (address length x pattern length) however
+    // many '*' there are, where trying every split of the address for every '*' grows with the length cubed.
+    static bool glob(const std::string &pat, const std::string &url, size_t ui, bool floating, bool end_anchor)
+    {
+        const size_t n = pat.size(), npos = std::string::npos;
+        size_t pi = 0;
+        bool star = floating;
+        for (;;) {
+            while (pi < n && pat[pi] == '*') {
+                star = true;
+                ++pi;
+            }
+            if (pi == n)
+                return star || !end_anchor || ui == url.size();
+            size_t se = pat.find('*', pi);
+            if (se == npos)
+                se = n;
+            const bool last = se == n;
+            if (!star) {
+                const size_t e = seg_at(pat, pi, se, url, ui);
+                if (e == npos || (last && end_anchor && e != url.size()))
+                    return false;
+                ui = e;
+            } else if (last && end_anchor) {
+                for (size_t k = ui; k <= url.size(); ++k)
+                    if (seg_at(pat, pi, se, url, k) == url.size())
+                        return true;
+                return false;
+            } else {
+                size_t e = npos;
+                for (size_t k = ui; k <= url.size() && e == npos; ++k)
+                    e = seg_at(pat, pi, se, url, k);
+                if (e == npos)
+                    return false;
+                ui = e;
+            }
+            star = false;
+            pi = se;
         }
     }
 
@@ -278,19 +315,15 @@ private:
                 return false;
             const size_t hb = scheme + 3, he = std::min(url.find_first_of("/?#", hb), url.size());
             for (size_t i = hb; i < he; ++i)
-                if ((i == hb || url[i - 1] == '.') && here(r.pattern, 0, url, i, r.end_anchor))
+                if ((i == hb || url[i - 1] == '.') && glob(r.pattern, url, i, false, r.end_anchor))
                     return true;
             return false;
         }
-        if (r.start_anchor)
-            return here(r.pattern, 0, url, 0, r.end_anchor);
-        for (size_t i = 0; i <= url.size(); ++i)
-            if (here(r.pattern, 0, url, i, r.end_anchor))
-                return true;
-        return false;
+        return glob(r.pattern, url, 0, !r.start_anchor, r.end_anchor);
     }
 
     std::vector<Rule> rules_;
+    bool has_exceptions_ = false;
 };
 
 }  // namespace popup

@@ -73,7 +73,14 @@ struct Tab {
     uint32_t opener = 0;
     int64_t born_us = 0;
     bool pop_under_candidate = false;
+    bool script_opened = false;               // not opened by a link click: its first addresses can still make it a pop-under candidate
     bool memory_kill = false;                 // the memory guard is ending this tab's web process (reported as "used too much memory")
+    // The page-side (emulated) fullscreen messages (on_emulated_fullscreen): the last state sent to the UI (-1 none), the state
+    // the page last asked for, when the UI was last told, and the timer that tells it a changed state after kFsMinGapUs.
+    int fs_sent = -1, fs_want = -1;
+    int64_t fs_us = 0;
+    guint fs_timer = 0;
+    guint32 load_started_ms = 0;              // when this tab's last load started (the timings in the log)
 };
 
 struct Engine {
@@ -467,6 +474,11 @@ void on_progress(WebKitWebView *view, GParamSpec *, gpointer)
 
 void on_load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer)
 {
+    if (event == WEBKIT_LOAD_COMMITTED)  // a new document: what the UI was last told about its fullscreen no longer holds
+        if (Tab *t = tab_by_id(tab_of_web_view(view))) {
+            t->fs_sent = -1;
+            t->memory_kill = false;  // a page is alive: a memory kill that ended nothing must not label a later crash
+        }
     WpeLoad l {};
     switch (event) {
     case WEBKIT_LOAD_STARTED: l.event = WPE_LOAD_STARTED; break;
@@ -493,14 +505,15 @@ void on_load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer)
     }
 
     // Page timings for the log (TV diagnostics: which site, how long to first commit / full load).
-    static guint32 started = 0;
+    Tab *timed = tab_by_id(tab);
     const char *uri = webkit_web_view_get_uri(view);
     if (event == WEBKIT_LOAD_STARTED) {
-        started = now_ms();
+        if (timed)
+            timed->load_started_ms = now_ms();
         log_msg("tab %u load started: %.200s", tab, uri ? uri : "");
     } else {
         log_msg("tab %u load %s after %u ms: %.200s", tab, event == WEBKIT_LOAD_COMMITTED ? "committed" : "finished",
-            now_ms() - started, uri ? uri : "");
+            timed ? now_ms() - timed->load_started_ms : 0, uri ? uri : "");
     }
 }
 
@@ -573,9 +586,16 @@ constexpr const char *kScrollScript = R"JS((function () {
     // The element that scrolls the content: the document, or (web apps, sites with a fixed layout) the largest
     // element that scrolls vertically and covers most of the screen. Spatial navigation only scrolls the box that holds
     // the focused link, so with nothing focusable on screen such a box never moves under the arrow keys.
+    // The search below is a getComputedStyle per element (up to 5000): its result is kept for the document and used while that
+    // element is still in the page and still scrolls; "none found" is kept for 2 s. A resize drops both.
+    var scrollerCache = null, noScrollerAt = 0;
+    addEventListener('resize', function () { scrollerCache = null; noScrollerAt = 0; });
     function scroller() {
         var doc = document.scrollingElement || document.documentElement;
         if (doc && doc.scrollHeight > doc.clientHeight + 4) return doc;
+        if (scrollerCache && scrollerCache.isConnected && scrollerCache.scrollHeight > scrollerCache.clientHeight + 4) return scrollerCache;
+        scrollerCache = null;
+        if (noScrollerAt && Date.now() - noScrollerAt < 2000) return doc;
         var best = null, bestArea = innerWidth * innerHeight * 0.3;
         var all = document.body ? document.body.getElementsByTagName('*') : [];
         for (var i = 0; i < all.length && i < 5000; i++) {
@@ -586,13 +606,15 @@ constexpr const char *kScrollScript = R"JS((function () {
             var area = el.clientWidth * el.clientHeight;
             if (area > bestArea) { best = el; bestArea = area; }
         }
+        scrollerCache = best;
+        noScrollerAt = best ? 0 : Date.now();
         return best || doc;
     }
     // Up / Down that changed nothing: spatial navigation moved no focus, nothing scrolled and the page did not take
     // the key (defaultPrevented: web apps with their own remote handling). Down then scrolls the content box itself;
     // Up does too unless the content is at its top, where it brings the toolbar (wpebEdge). Typing never counts.
     addEventListener('keydown', function (ev) {
-        if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+        if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown' || ev.defaultPrevented) return;
         var a = document.activeElement;
         if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return;
         var y = window.scrollY, s = scroller(), st = s ? s.scrollTop : 0;
@@ -688,6 +710,8 @@ gboolean on_fullscreen_changed(WebKitWebView *view, gpointer entered)
 {
     const uint32_t id = tab_of_web_view(view);
     WpeFlag flag = {GPOINTER_TO_UINT(entered)};
+    if (Tab *t = tab_by_id(id))
+        t->fs_sent = -1;  // the UI's state changed by WebKit's own fullscreen: the next emulated message is a change
     log_msg("tab %u %s fullscreen", id, flag.value ? "entered" : "left");
     send_msg(WPE_ENGINE_FULLSCREEN, id, &flag, sizeof(flag));
     return FALSE; // let it happen
@@ -767,6 +791,19 @@ gboolean load_later(gpointer data)
 
 bool popup_navigation_blocked(WebKitWebView *view, const char *uri);
 void popup_opener_moves(WebKitWebView *view, const char *uri);
+
+// The browser has no download UI and no place to put a file: a response WebKit would save (Content-Disposition:
+// attachment: WebKit's default decide-policy turns it into a download, and an unhandled decide-destination saves it under
+// the user's download directory) is cancelled here, with a log line (the address without its query).
+void on_download_started(WebKitNetworkSession *, WebKitDownload *download, gpointer)
+{
+    WebKitURIRequest *request = webkit_download_get_request(download);
+    const char *uri = request ? webkit_uri_request_get_uri(request) : nullptr;
+    std::string shown = uri ? uri : "";
+    shown.resize(shown.find_first_of("?#") == std::string::npos ? std::min<size_t>(shown.size(), 120) : shown.find_first_of("?#"));
+    log_msg("download refused (not supported): %.120s", shown.c_str());
+    webkit_download_cancel(download);
+}
 
 gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer)
 {
@@ -868,9 +905,13 @@ std::string media_limit_script()
         if (!strcmp(v, "off"))
             return {};
         char *end = nullptr;
-        if (uint64_t p = strtoull(v, &end, 10)) pixels = p;
+        const uint64_t p = strtoull(v, &end, 10);
+        if (p) pixels = p;
         if (end && *end == '@') fps = strtoull(end + 1, &end, 10);
-        vp9 = strstr(v, "+vp9") != nullptr;
+        // "+vp9" belongs to a given limit ("PIXELS@FPS+vp9": a lower limit allows VP9 only when asked to); a value that only
+        // carries other flags ("+nocap264") leaves the default alone.
+        if (p || strstr(v, "+vp9"))
+            vp9 = strstr(v, "+vp9") != nullptr;
         log_msg("media limit: %" PRIu64 " pixels, %" PRIu64 " fps%s", pixels, fps, vp9 ? ", VP9 allowed" : "");
     }
     const char *dm = getenv("WPE_BROWSER_DEBUG_MEDIA");
@@ -881,6 +922,34 @@ std::string media_limit_script()
     const std::string marker = "__WPEB_MEDIA__";
     script.replace(script.find(marker), marker.size(), cfg);
     return script;
+}
+
+// A tab that is no longer shown must not go on playing (memory, bandwidth, sound): when a document becomes hidden, every
+// <video>/<audio> in it, in open shadow trees too, is paused. Runs in every frame (a player in an iframe is its own
+// document), in an isolated world of its own so the page cannot see or disable it. It only ever pauses: nothing is resumed
+// when the document is shown again. Closed shadow trees are out of reach. (The tab switch's own pause of the top document,
+// kPause in the engine, stays.)
+constexpr const char *kPauseHiddenScript = R"JS((function () {
+  function pauseAll(root) {
+    var media = root.querySelectorAll('video,audio');
+    for (var i = 0; i < media.length; i++) { try { media[i].pause(); } catch (e) {} }
+    var all = root.querySelectorAll('*');
+    for (var j = 0; j < all.length; j++) if (all[j].shadowRoot) pauseAll(all[j].shadowRoot);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') pauseAll(document);
+  }, true);
+})();)JS";
+
+void add_pause_when_hidden(WebKitWebView *web_view)
+{
+    WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(web_view);
+    if (!ucm || g_strcmp0(getenv("WPE_BROWSER_DEBUG_PAUSE_HIDDEN"), "0") == 0)
+        return;
+    WebKitUserScript *script = webkit_user_script_new_for_world(kPauseHiddenScript, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+        WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, "wren-pause-hidden", nullptr, nullptr);
+    webkit_user_content_manager_add_script(ucm, script);
+    webkit_user_script_unref(script);
 }
 
 void add_media_limits(WebKitWebView *web_view)
@@ -1024,14 +1093,45 @@ void on_hybrid_message(WebKitUserContentManager *, JSCValue *value, gpointer dat
 
 // compat.js's emulated fullscreen (a hardware-plane video stretched over the page) tells the UI the same thing WebKit's own
 // fullscreen does, so the toolbar goes away and the page gets the whole screen. "1" entered, "0" left.
+// Any page or frame can post to the handler (it lives in the page's own world, which compat.js needs), so the UI hears of a
+// state only when it differs from what it was told last, and of changes at most every kFsMinGapUs: the last asked-for state
+// is sent when the gap has passed. One log line per state sent, none per message. (The engine cannot tell whether the
+// page had a user action: compat.js checks that before it posts.)
+constexpr int64_t kFsMinGapUs = 500000;
+
+void fs_send(Tab *tab)
+{
+    if (tab->fs_want < 0 || tab->fs_want == tab->fs_sent)
+        return;
+    tab->fs_sent = tab->fs_want;
+    tab->fs_us = g_get_monotonic_time();
+    WpeFlag flag = {static_cast<uint32_t>(tab->fs_sent)};
+    log_msg("tab %u %s fullscreen (emulated)", tab->id, flag.value ? "entered" : "left");
+    send_msg(WPE_ENGINE_FULLSCREEN, tab->id, &flag, sizeof(flag));
+}
+
+gboolean on_fs_timer(gpointer data)
+{
+    if (Tab *tab = tab_by_id(GPOINTER_TO_UINT(data))) {
+        tab->fs_timer = 0;
+        fs_send(tab);
+    }
+    return G_SOURCE_REMOVE;
+}
+
 void on_emulated_fullscreen(WebKitUserContentManager *, JSCValue *value, gpointer data)
 {
     gchar *text = jsc_value_to_string(value);
-    const uint32_t id = GPOINTER_TO_UINT(data);
-    if (text && (text[0] == '1' || text[0] == '0') && !text[1]) {
-        WpeFlag flag = {static_cast<uint32_t>(text[0] == '1')};
-        log_msg("tab %u %s fullscreen (emulated)", id, flag.value ? "entered" : "left");
-        send_msg(WPE_ENGINE_FULLSCREEN, id, &flag, sizeof(flag));
+    Tab *tab = tab_by_id(GPOINTER_TO_UINT(data));
+    if (tab && text && (text[0] == '1' || text[0] == '0') && !text[1]) {
+        tab->fs_want = text[0] == '1';
+        if (tab->fs_want != tab->fs_sent && !tab->fs_timer) {
+            const int64_t wait = tab->fs_us + kFsMinGapUs - g_get_monotonic_time();
+            if (wait <= 0)
+                fs_send(tab);
+            else
+                tab->fs_timer = g_timeout_add(static_cast<guint>(wait / 1000 + 1), on_fs_timer, GUINT_TO_POINTER(tab->id));
+        }
     }
     g_free(text);
 }
@@ -1135,6 +1235,7 @@ void add_scroll_reporter(WebKitWebView *web_view, uint32_t id)
 {
     add_site_quirks(web_view);
     add_media_limits(web_view);
+    add_pause_when_hidden(web_view);
     add_hybrid_video(web_view, id);
     add_debug_script(web_view);
     add_console_reporter(web_view, id); // after the limits, so it wraps them and logs what pages are told
@@ -1291,7 +1392,8 @@ WebKitWebView *on_create(WebKitWebView *view, WebKitNavigationAction *action, gp
         return nullptr;
     tab->opener = opener;
     tab->born_us = g_get_monotonic_time();
-    tab->pop_under_candidate = webkit_navigation_action_get_navigation_type(action) != WEBKIT_NAVIGATION_TYPE_LINK_CLICKED
+    tab->script_opened = webkit_navigation_action_get_navigation_type(action) != WEBKIT_NAVIGATION_TYPE_LINK_CLICKED;
+    tab->pop_under_candidate = tab->script_opened
         && ubo_popup_third_party(view, webkit_uri_request_get_uri(webkit_navigation_action_get_request(action)));
     WpeTabCreated c { opener };
     send_msg(WPE_ENGINE_TAB_CREATED, id, &c, sizeof(c));
@@ -1359,12 +1461,13 @@ long web_process_footprint_kb()
                     gchar *status = nullptr;
                     if (g_file_get_contents(status_path, &status, nullptr, nullptr)) {
                         long rss = 0, swap = 0;
-                        for (gchar **l = g_strsplit(status, "\n", 0), **it = l; *it; ++it) {
+                        gchar **lines = g_strsplit(status, "\n", 0);
+                        for (gchar **it = lines; *it; ++it) {
                             long v;
                             if (sscanf(*it, "VmRSS: %ld", &v) == 1) rss = v;
                             else if (sscanf(*it, "VmSwap: %ld", &v) == 1) swap = v;
-                            if (!*(it + 1)) { g_strfreev(l); break; }
                         }
+                        g_strfreev(lines);
                         best = std::max(best, rss + swap);
                         g_free(status);
                     }
@@ -1386,9 +1489,18 @@ gboolean memory_guard_tick(gpointer)
     static const long avail_floor_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_AVAIL_MB", "110").c_str()) * 1024;
     static const long swap_pct = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_SWAP_PCT", "12").c_str());
     static gint64 last_kill_us = 0;
+    // One discard at a time: what it frees shows only in the next measurement, so the tick after a request only looks (the
+    // trigger is evaluated again on the tick after that).
+    static bool awaiting_measurement = false;
     MemInfo m;
     if (!read_meminfo(m))
         return G_SOURCE_CONTINUE;
+    if (awaiting_measurement) {
+        awaiting_measurement = false;
+        log_msg("memory guard: after the discard request %ld MB available, swap %ld of %ld MB free: measured, no further request on this tick",
+            m.avail_kb / 1024, m.swap_free_kb / 1024, m.swap_total_kb / 1024);
+        return G_SOURCE_CONTINUE;
+    }
     const bool swap_gone = m.swap_total_kb <= 0 || m.swap_free_kb * 100 < m.swap_total_kb * swap_pct;
     // The web process (all tabs) is also watched on its own: at 70% of WebKit's own limit, background tabs go before WebKit's kill threshold
     // ends every tab at once (2026-11-20: all five tabs were reset together at the threshold while the TV was not yet out of memory).
@@ -1402,8 +1514,24 @@ gboolean memory_guard_tick(gpointer)
     // The pages of all tabs live in ONE web process (no process swap, no COOP): ending it ends every tab, so while there are background
     // tabs the UI is asked to close the least recently shown one (WPE_ENGINE_DISCARD_REQUEST); only with none left is the shown
     // tab's process ended (the UI reloads it).
+    // With one tab the system-wide numbers alone say nothing about the page: ending it frees what it holds, so a small page (or no
+    // web process at all) is left alone; the pressure is someone else's. WPE_BROWSER_DEBUG_MEM_GUARD_FLOOR_MB (default 200).
+    if (g.tabs.size() <= 1) {
+        static const long floor_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_FLOOR_MB", "200").c_str()) * 1024;
+        static gint64 last_skip_log_us = 0;
+        const long footprint_kb = web_process_footprint_kb();
+        if (footprint_kb < floor_kb) {
+            if (now - last_skip_log_us > 60 * G_USEC_PER_SEC) {
+                last_skip_log_us = now;
+                log_msg("memory guard: %ld MB available, but the web process holds only %ld MB (below %ld MB): leaving the only tab alone",
+                    m.avail_kb / 1024, footprint_kb / 1024, floor_kb / 1024);
+            }
+            return G_SOURCE_CONTINUE;
+        }
+    }
     last_kill_us = now;
     if (g.tabs.size() > 1) {
+        awaiting_measurement = true;
         log_msg("memory guard: %ld MB available, swap %ld of %ld MB free: asking the UI to discard a background tab", m.avail_kb / 1024,
             m.swap_free_kb / 1024, m.swap_total_kb / 1024);
         send_msg(WPE_ENGINE_DISCARD_REQUEST, 0, nullptr, 0);
@@ -1571,6 +1699,8 @@ void tab_close(uint32_t id)
     g_signal_handlers_disconnect_by_data(webkit_web_view_get_back_forward_list(it->second.web_view), it->second.web_view);
     webkit_web_view_try_close(it->second.web_view);
     g_object_unref(it->second.web_view);
+    if (it->second.fs_timer)
+        g_source_remove(it->second.fs_timer);
     g.tabs.erase(it);
     if (g.active == id)
         g.active = 0;
@@ -2085,6 +2215,12 @@ bool popup_navigation_blocked(WebKitWebView *view, const char *uri)
     const std::string opener_uri = o ? o : "";
     if (!popups_guarded(opener_uri))
         return false;
+    // window.open('') and then w.location = <ad>: the address was not known when the window was created, so it is judged
+    // here, on the window's own navigations in its first seconds (the same window popup_opener_moves watches).
+    if (from && tab->script_opened && !tab->pop_under_candidate && g_get_monotonic_time() - tab->born_us < 3000000 && ubo_popup_third_party(from->web_view, uri)) {
+        tab->pop_under_candidate = true;
+        log_msg("tab %u: opened by script, now going to another site: a pop-under candidate", tab->id);
+    }
     const char *which = nullptr;
     if (!ubo.popups.blocks(uri, opener_uri, &which))
         return false;
@@ -2102,6 +2238,13 @@ void popup_opener_moves(WebKitWebView *view, const char *uri)
     const char *cur = webkit_web_view_get_uri(view);
     if (cur && g_strcmp0(cur, uri) == 0)
         return;
+    // A change of the fragment only stays in the same document (a single-page app's route, a sign-in page's own link):
+    // that is not the opener moving on.
+    if (cur) {
+        const std::string a(cur, strcspn(cur, "#")), b(uri, strcspn(uri, "#"));
+        if (a == b)
+            return;
+    }
     const int64_t now = g_get_monotonic_time();
     std::vector<uint32_t> under;
     for (auto &[tid, tab] : g.tabs)
@@ -2413,20 +2556,31 @@ int main(int, char **)
     // on heavy pages. Without settings WebKit sizes its limit from the physical RAM (it sees all 2.6 GB), so pressure
     // handling only starts when memchute is already killing apps. Must be set before the session exists.
     // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=0: WebKit's own.
-    // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=<n>: the process limit; the thresholds below are fractions of it (conservative / strict) and
-    // the kill threshold stays off (a killed tab is worse than a slow one).
+    // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=<n>: the process limit; the thresholds below are fractions of it (conservative / strict / kill).
+    // The kill threshold (1.3 x the limit, WPE_BROWSER_DEBUG_MEM_KILL=0: off) ends a web process that goes on growing while the TV swaps.
     {
         const long limit_mb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "520").c_str());
         if (limit_mb > 0) {
             WebKitMemoryPressureSettings *mp = webkit_memory_pressure_settings_new();
             webkit_memory_pressure_settings_set_memory_limit(mp, static_cast<guint>(limit_mb));
-            // strict first: the setter asserts conservative < strict, and the default strict is below 0.5
-            webkit_memory_pressure_settings_set_strict_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.55").c_str()));
-            webkit_memory_pressure_settings_set_conservative_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.35").c_str()));
+            // The setters silently ignore a value that breaks conservative < strict < kill (g_return_if_fail), and each checks
+            // against what is set so far: conservative goes to a low value first so any strict can follow, then the real
+            // conservative, then (below) the kill threshold. A value that did not take is logged.
+            const double conservative = atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.35").c_str());
+            const double strict = atof(env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.55").c_str());
+            webkit_memory_pressure_settings_set_conservative_threshold(mp, 0.01);
+            webkit_memory_pressure_settings_set_strict_threshold(mp, strict);
+            webkit_memory_pressure_settings_set_conservative_threshold(mp, conservative);
+            if (webkit_memory_pressure_settings_get_strict_threshold(mp) != strict || webkit_memory_pressure_settings_get_conservative_threshold(mp) != conservative)
+                log_msg("memory pressure: conservative %.2f / strict %.2f rejected (need 0 < conservative < strict < 1): using %.2f / %.2f", conservative, strict,
+                    webkit_memory_pressure_settings_get_conservative_threshold(mp), webkit_memory_pressure_settings_get_strict_threshold(mp));
             // The kill threshold (a multiple of the limit, WebKit measures resident + swapped): a web process that goes on growing past
             // its limit while the TV is already swapping (2026-11-20: 585 MB at a 420 MB limit, swap full, the whole TV frozen) is
             // ended, and the UI reloads the tab (browser/main.cpp: crashed tabs). 0 = never.
-            webkit_memory_pressure_settings_set_kill_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_KILL", "1.3").c_str()));
+            const double kill = atof(env_or("WPE_BROWSER_DEBUG_MEM_KILL", "1.3").c_str());
+            webkit_memory_pressure_settings_set_kill_threshold(mp, kill);
+            if (webkit_memory_pressure_settings_get_kill_threshold(mp) != kill)
+                log_msg("memory pressure: kill threshold %.2f rejected (0 or above strict %.2f)", kill, webkit_memory_pressure_settings_get_strict_threshold(mp));
             webkit_memory_pressure_settings_set_poll_interval(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_POLL_S", "2").c_str()));
             webkit_network_session_set_memory_pressure_settings(mp);  // the network process
             g.context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", mp, nullptr));  // the web processes
@@ -2437,6 +2591,7 @@ int main(int, char **)
     }
     if (!g.context) g.context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, nullptr));
     g.session = webkit_network_session_new(data_dir.c_str(), cache_dir.c_str());
+    g_signal_connect(g.session, "download-started", G_CALLBACK(on_download_started), nullptr);
     webkit_cookie_manager_set_persistent_storage(webkit_network_session_get_cookie_manager(g.session),
         (data_dir + "/cookies.sqlite").c_str(), WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
 

@@ -46,6 +46,30 @@ int main() {
     check(!browser::usable_tree(data, &bad) && bad == data + "/webkit", "read-only folder is reported: " + bad);
     ::chmod((data + "/webkit").c_str(), 0700);
 
+    // The profile check looks at the folder, its files and webkit/'s files only.
+    {
+        const std::string p = root + "/org.example.profile";
+        check(browser::make_dir(p + "/webkit/cache/deep"), "profile folder with a deep cache");
+        std::ofstream(p + "/history.json") << "[]";
+        std::ofstream(p + "/webkit/cookies.sqlite") << "x";
+        std::ofstream(p + "/webkit/cache/deep/entry") << "x";
+        ::chmod((p + "/webkit/cache/deep/entry").c_str(), 0444);
+        check(browser::usable_profile_tree(p, &bad), "a read-only file deep in the cache does not matter");
+        check(!browser::usable_tree(p, &bad), "(the full walk would have failed on it)");
+        ::chmod((p + "/history.json").c_str(), 0444);
+        check(!browser::usable_profile_tree(p, &bad) && bad == p + "/history.json", "a read-only profile file is reported: " + bad);
+        ::chmod((p + "/history.json").c_str(), 0644);
+        ::chmod((p + "/webkit/cookies.sqlite").c_str(), 0444);
+        check(!browser::usable_profile_tree(p, &bad) && bad == p + "/webkit/cookies.sqlite", "a read-only cookies.sqlite is reported: " + bad);
+        std::string w;
+        check(browser::own_usable_profile_dir(p, &w) == p + "-" + std::to_string(::getuid()) && w.find("cookies.sqlite") != std::string::npos,
+              "then the per-uid folder is used: " + w);
+        ::chmod((p + "/webkit/cookies.sqlite").c_str(), 0644);
+        ::chmod((p + "/webkit/cache/deep/entry").c_str(), 0644);
+        w.clear();
+        check(browser::own_usable_profile_dir(p, &w) == p && w.empty(), "repaired: the profile folder is used again");
+    }
+
     std::ofstream(root + "/plain") << "x";
     check(!browser::make_dir(root + "/plain"), "make_dir rejects an existing file");
 
