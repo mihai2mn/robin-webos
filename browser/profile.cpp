@@ -12,8 +12,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 #include <fstream>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -37,9 +40,17 @@ std::string read_file(const std::string &path) {
     return ss.str();
 }
 
+// Every profile write (the worker pool's every-2-seconds flush and the main thread's flush_now at Suspend/Stop) goes
+// through write_ordered: one mutex, so two writers never touch a file at once, and a per-file generation, so a snapshot
+// taken earlier never lands after a newer one.
+std::mutex g_write_mu;
+std::unordered_map<std::string, uint64_t> g_written_gen;  // path -> generation of the snapshot on disk (g_write_mu)
+std::atomic<uint64_t> g_snapshot_gen{0};                  // handed out when a part is serialised
+std::atomic<uint64_t> g_tmp_seq{0};
+
 // Writes `data` next to `path` and renames it over: a crash never leaves a half-written profile.
 bool write_atomic(const std::string &path, const std::string &data) {
-    const std::string tmp = path + ".tmp";
+    const std::string tmp = path + ".tmp." + std::to_string(static_cast<long>(::getpid())) + "." + std::to_string(g_tmp_seq.fetch_add(1));
     FILE *f = std::fopen(tmp.c_str(), "wb");
     if (f == nullptr) return false;
     const bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size() && std::fflush(f) == 0 &&
@@ -50,6 +61,31 @@ bool write_atomic(const std::string &path, const std::string &data) {
         return false;
     }
     return true;
+}
+
+// True when written, or when a newer snapshot of this file is already on disk (then there is nothing left to write).
+bool write_ordered(const std::string &path, const std::string &data, uint64_t gen) {
+    std::lock_guard<std::mutex> lock(g_write_mu);
+    uint64_t &done = g_written_gen[path];
+    if (done >= gen) return true;
+    if (!write_atomic(path, data)) return false;
+    done = gen;
+    return true;
+}
+
+// A file that exists but cannot be read as JSON of the wanted kind is moved to <file>.corrupt (the last one is replaced),
+// so the next save does not overwrite the only copy a person could still repair.
+nlohmann::json parse_or_keep(const std::string &path, bool want_array) {
+    const std::string text = read_file(path);
+    if (text.empty()) return nullptr;
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+    if (want_array ? j.is_array() : j.is_object()) return j;
+    const std::string aside = path + ".corrupt";
+    if (std::rename(path.c_str(), aside.c_str()) == 0)
+        WNK_LOGW(kCat, "%s is not valid, kept as %s", path.c_str(), aside.c_str());
+    else
+        WNK_LOGW(kCat, "%s is not valid (could not keep it aside: %s)", path.c_str(), std::strerror(errno));
+    return nullptr;
 }
 
 std::string str(const nlohmann::json &j, const char *key) {
@@ -88,38 +124,37 @@ void Profile::load(const std::string &dir) {
     dir_ = dir;
     ::mkdir(dir_.c_str(), 0700);
 
-    auto parse = [](const std::string &text) { return nlohmann::json::parse(text, nullptr, false); };
-    if (auto j = parse(read_file(path(kSettings))); j.is_object()) {
+    if (auto j = parse_or_keep(path(kSettings), false); j.is_object()) {
         settings.show_bookmarks_bar = j.value("show_bookmarks_bar", settings.show_bookmarks_bar);
         settings.search_engine = std::clamp(j.value("search_engine", 0), 0, static_cast<int>(kSearchEngines.size()) - 1);
         settings.zoom = std::clamp(j.value("zoom", 0), 0, static_cast<int>(kZoomLevels.size()) - 1);
         settings.restore_session = j.value("restore_session", false);
         settings.sharp_text = j.value("sharp_text", settings.sharp_text);
     }
-    if (auto j = parse(read_file(path(kBookmarks))); j.is_array()) {
+    if (auto j = parse_or_keep(path(kBookmarks), true); j.is_array()) {
         for (const auto &b : j) {
             if (!b.is_object() || str(b, "url").empty()) continue;
             bookmarks_.push_back({str(b, "title"), str(b, "url"), num(b, "added")});
         }
     }
-    if (auto j = parse(read_file(path(kHistory))); j.is_array()) {
+    if (auto j = parse_or_keep(path(kHistory), true); j.is_array()) {
         for (const auto &h : j) {
             if (!h.is_object() || str(h, "url").empty()) continue;
             history_.push_back({str(h, "title"), str(h, "url"), num(h, "time")});
         }
         std::stable_sort(history_.begin(), history_.end(), [](const HistoryEntry &a, const HistoryEntry &b) { return a.time > b.time; });
     }
-    if (auto j = parse(read_file(path(kSession))); j.is_object() && j["tabs"].is_array()) {
+    if (auto j = parse_or_keep(path(kSession), false); j.is_object() && j["tabs"].is_array()) {
         for (const auto &t : j["tabs"]) {
             if (t.is_object()) session_.push_back({str(t, "title"), str(t, "url")});
         }
         session_active_ = static_cast<size_t>(std::max<int64_t>(0, num(j, "active")));
     }
-    if (auto j = parse(read_file(path(kIcons))); j.is_object()) {
+    if (auto j = parse_or_keep(path(kIcons), false); j.is_object()) {
         for (const auto &[host, url] : j.items())
             if (url.is_string() && is_http_url(url.get<std::string>())) icons_[host] = url.get<std::string>();
     }
-    if (auto j = parse(read_file(path(kZooms))); j.is_object()) {
+    if (auto j = parse_or_keep(path(kZooms), false); j.is_object()) {
         for (const auto &[raw_host, val] : j.items()) {
             if (!val.is_number_integer()) continue;
             const int permille = val.get<int>();
@@ -373,14 +408,18 @@ void Profile::flush(wnk::async::WorkerPool &pool, double now_ms) {
     if (dirty_ == 0 || dir_.empty() || now_ms - last_flush_ms_ < kFlushIntervalMs) return;
     last_flush_ms_ = now_ms;
     // Serialise here (main thread owns the data), write on a worker.
-    std::vector<std::pair<std::string, std::string>> files;
+    struct Snapshot {
+        std::string path, data;
+        uint64_t gen;
+    };
+    std::vector<Snapshot> files;
     for (unsigned part : {kSettings, kBookmarks, kHistory, kSession, kIcons, kZooms}) {
-        if (dirty_ & part) files.emplace_back(path(part), serialize(part));
+        if (dirty_ & part) files.push_back({path(part), serialize(part), g_snapshot_gen.fetch_add(1) + 1});
     }
     dirty_ = 0;
     pool.submit([files = std::move(files)](const wnk::async::CancellationToken &) {
-        for (const auto &[p, data] : files) {
-            if (!write_atomic(p, data)) WNK_LOGW(kCat, "could not save %s: %s", p.c_str(), std::strerror(errno));
+        for (const auto &s : files) {
+            if (!write_ordered(s.path, s.data, s.gen)) WNK_LOGW(kCat, "could not save %s: %s", s.path.c_str(), std::strerror(errno));
         }
     });
 }
@@ -388,7 +427,7 @@ void Profile::flush(wnk::async::WorkerPool &pool, double now_ms) {
 void Profile::flush_now() {
     if (dir_.empty()) return;
     for (unsigned part : {kSettings, kBookmarks, kHistory, kSession, kIcons, kZooms}) {
-        if ((dirty_ & part) && !write_atomic(path(part), serialize(part)))
+        if ((dirty_ & part) && !write_ordered(path(part), serialize(part), g_snapshot_gen.fetch_add(1) + 1))
             WNK_LOGW(kCat, "could not save %s", path(part).c_str());
     }
     dirty_ = 0;
