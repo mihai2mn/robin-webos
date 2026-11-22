@@ -329,10 +329,22 @@
         // Not a snapshot of the style attribute: a page that changes its own inline style while fullscreen keeps its change, and a
         // page whose CSP forbids inline styles (setAttribute('style') is blocked, CSSOM is not) gets its CSSOM-set styles back.
         const saved = new Map();
+        // Longhands only: a shorthand read from an inline style that has just its longhands (padding-top: 56.25%) answers '' and, restored,
+        // would wipe them. Every shorthand written here sets one value on all of its longhands.
+        const LONGHANDS = {
+            margin: ['margin-top', 'margin-right', 'margin-bottom', 'margin-left'],
+            padding: ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'],
+            border: ['border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width'],
+            overflow: ['overflow-x', 'overflow-y'],
+            mask: ['mask-image', '-webkit-mask-image'],
+            '-webkit-mask': ['-webkit-mask-image'],
+            transition: ['transition-property'],
+        };
+        const longhands = props => props.flatMap(([k, v]) => LONGHANDS[k] ? LONGHANDS[k].map(l => [l, v]) : [[k, v]]);
         const put = (node, props) => {
             let m = saved.get(node);
             if (!m) saved.set(node, m = new Map());
-            for (const [k, v] of props) {
+            for (const [k, v] of longhands(props)) {
                 if (!m.has(k)) m.set(k, { orig: node.style.getPropertyValue(k), prio: node.style.getPropertyPriority(k) });
                 node.style.setProperty(k, v, 'important');
                 m.get(k).ours = node.style.getPropertyValue(k);
