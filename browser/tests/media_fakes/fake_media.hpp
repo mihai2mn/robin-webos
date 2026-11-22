@@ -32,11 +32,13 @@ struct State {
     std::atomic<int> feeds{0};
     std::atomic<int> bad_reads{0};
     std::atomic<browser::LgMediaPlayer *> lg{nullptr};
+    std::vector<void *> lg_tokens;  // mu; the event token of every LG load, in order
     void reset() {
         std::lock_guard<std::mutex> l(mu);
         events.clear();
         lg_available = true; lg_load_ok = true; ndl_load_ok = true;
         feed_sleep_us = 0; full_every = 0; feeds = 0; bad_reads = 0;
+        lg_tokens.clear();
     }
     void add(Event e) { std::lock_guard<std::mutex> l(mu); events.push_back(std::move(e)); }
     std::vector<Event> snapshot() { std::lock_guard<std::mutex> l(mu); return events; }

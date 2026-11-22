@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "lg_media_player.hpp"
 
+#include "lg_event_tokens.hpp"
+
 #include "wnk/log.hpp"
 #include "wpe_media_ipc.h"
 #include "wnk/media/starfish_backend.hpp"
@@ -131,8 +133,9 @@ std::string base64(const std::vector<uint8_t> &bytes) {
     return out;
 }
 
+// data: the Load's token, not the player: a pipeline that is being (or was) unloaded keeps calling with its own (lg_event_tokens.hpp).
 void event_callback(int type, int64_t num, const char *str, void *data) {
-    static_cast<LgMediaPlayer *>(data)->on_event(type, num, str);
+    lg_event_tokens().dispatch(data, [&](LgMediaPlayer *p) { p->on_event(type, num, str); });
 }
 
 // The firmware's object is larger than the header's declaration says (its padding is a guess on LG's side): give it
@@ -258,8 +261,11 @@ bool LgMediaPlayer::load(const std::string &app_id, const std::string &window_id
     frames_ = 0;
     error_ = 0;
     stats_at_ms_ = 0;
-    if (!api_->Load(payload, &event_callback, this)) {
+    event_token_ = lg_event_tokens().issue(this);
+    if (!api_->Load(payload, &event_callback, event_token_)) {
         *error = "StarfishMediaAPIs::Load refused the stream";
+        lg_event_tokens().retire(event_token_);
+        event_token_ = nullptr;
         api_->~StarfishMediaAPIs();
         api_ = nullptr;
         return false;
@@ -479,6 +485,10 @@ void LgMediaPlayer::pause(bool paused) {
 void LgMediaPlayer::unload() {
 #if defined(WNK_SDL_WEBOS)
     if (api_ == nullptr) return;
+    // From here on the old pipeline's events (an error while it is taken down, its last frame counts) no longer reach this player,
+    // whose next Load resets and counts them anew.
+    lg_event_tokens().retire(event_token_);
+    event_token_ = nullptr;
     StarfishMediaAPIs *api = api_;
     api_ = nullptr;
     const int64_t fed = fed_;

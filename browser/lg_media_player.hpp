@@ -66,6 +66,7 @@ public:
 
 private:
     StarfishMediaAPIs *api_ = nullptr;
+    void *event_token_ = nullptr;  // the current Load's token for its events (lg_event_tokens.hpp); null without a pipeline
     std::atomic<bool> load_completed_{false};
     bool playing_ = false, paused_ = false, seek_pending_ = true;
     bool has_audio_ = false;
