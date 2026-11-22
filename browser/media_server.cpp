@@ -374,11 +374,13 @@ void MediaServer::serve(int fd, uint64_t id) {
         uint64_t generation;
         bool eos = false;  // the stream's end, behind its last unit (pts: last, so the other stream goes first)
         uint64_t start_seq = 0;  // feeder: the start of feed (arm_seq) this unit was last judged for (a unit the decoder refused is not judged twice)
+        uint64_t seq = 0;        // arrival order (next_seq): a unit the feeder gives back goes in again where it was
     };
     std::mutex qm;
     std::condition_variable qcv;
     std::deque<Unit> queues[2];  // [0] video, [1] audio
     uint64_t generation = 0;     // qm; a flush or load drops what was queued before it
+    uint64_t next_seq = 0;       // qm; Unit::seq of the next unit queued
     uint64_t arm_seq = 0;        // qm; counts the starts of a feed (load, reload, flush): the feeder arms its start filter for each
     uint64_t arm_gen = 0;        // qm; units of an older generation do not belong to that start
     bool stop = false;
@@ -451,7 +453,7 @@ void MediaServer::serve(int fd, uint64_t id) {
                 }
             }
             if (u.eos) {
-                queues[pick].pop_front();
+                queues[pick].pop_front();  // u is gone from here on
                 if (eos_generation != g) ended[0] = ended[1] = pushed_eos = false, eos_generation = g;
                 ended[pick] = true;
                 ql.unlock();
@@ -475,6 +477,10 @@ void MediaServer::serve(int fd, uint64_t id) {
                 ql.lock();
                 continue;
             }
+            // The unit leaves the queue before qm is let go: FLUSH, LOAD and UNLOAD clear the queues under qm alone, which freed the
+            // buffer the decoder was reading (LG's Feed gets its address). A unit the decoder refuses goes back where it was.
+            Unit unit = std::move(u);
+            queues[pick].pop_front();
             ql.unlock();
             bool full = false;
             {
@@ -482,22 +488,27 @@ void MediaServer::serve(int fd, uint64_t id) {
                 if (owner_.load() == id && backend_ && (use_lg_ || ndl_loaded_)) {
                     if (use_lg_) {
                         if (pick == 0 || lg_.has_audio())
-                            full = lg_.feed(pick == 1, u.packet.data.data(), u.packet.data.size(), u.packet.pts_us) ==
+                            full = lg_.feed(pick == 1, unit.packet.data.data(), unit.packet.data.size(), unit.packet.pts_us) ==
                                    LgMediaPlayer::Feed::Full;
                     } else if (pick == 0 || backend_audio.load()) {
-                        full = backend_->feed(u.packet) == wnk::media::MediaBackend::Feed::Full;
+                        full = backend_->feed(unit.packet) == wnk::media::MediaBackend::Feed::Full;
                     }
                 }
             }
             ql.lock();
             if (full && generation == g) {
+                // Back in front of what came after it (by arrival: a retry may have put its replay in front meanwhile).
+                auto &q = queues[pick];
+                auto at = q.begin();
+                while (at != q.end() && at->seq < unit.seq) ++at;
+                q.insert(at, std::move(unit));
                 ++full_waits;
                 blocked_until[pick] = Clock::now() + std::chrono::milliseconds(10);
                 if (owner_.load() == id && replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
                 if (owner_.load() == id && use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
                 continue;
             }
-            if (!queues[pick].empty() && queues[pick].front().generation == g) {
+            if (generation == g) {
                 // Keep what the decoder was given until its first picture shows (a failed start is repeated with it).
                 if (replay_ok && use_lg_) {
                     if (lg_.frames_presented() > 0 || replay_bytes > kReplayMax) {
@@ -505,11 +516,10 @@ void MediaServer::serve(int fd, uint64_t id) {
                         replay_bytes = 0;
                         replay_ok = false;
                     } else {
-                        replay_bytes += queues[pick].front().packet.data.size();
-                        replay.push_back(queues[pick].front());
+                        replay_bytes += unit.packet.data.size();
+                        replay.push_back(std::move(unit));
                     }
                 }
-                queues[pick].pop_front();
             }
             if (pick == 0) ++units;
             if (owner_.load() == id && replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
@@ -778,6 +788,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             u.packet.data.assign(payload.begin(), payload.end());
             std::lock_guard<std::mutex> ql(qm);
             u.generation = generation;
+            u.seq = next_seq++;
             queues[audio ? 1 : 0].push_back(std::move(u));
             qcv.notify_all();
             continue;
@@ -824,6 +835,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             u.eos = true;
             std::lock_guard<std::mutex> ql(qm);
             u.generation = generation;
+            u.seq = next_seq++;
             queues[audio ? 1 : 0].push_back(std::move(u));
             qcv.notify_all();
             break;
