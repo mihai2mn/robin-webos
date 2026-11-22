@@ -126,7 +126,7 @@ do_backend() {
 
 
 # ---- webkit32: libWPEWebKit = pristine 2.54.3 + patches/wpewebkit/2.54.3/0001..N, built in a PRIVATE COPY of the build tree -------
-# The shared in-tree build (WK_SHARED, used by every agent via build/jit254/wk254.sh) is not trusted to match the series: files get
+# The shared in-tree build (WK_SHARED, shared between several people and scripts) is not trusted to match the series: files get
 # patched temporarily there. So: (1) a pristine source tree from the Buildroot download plus the repo's series in order; (2) a copy
 # of the shared tree (cp -a keeps mtimes, so ninja stays incremental; bind-mounted at the SAME path in the container, so the absolute
 # paths in build.ninja stay valid and the shared tree is never touched); (3) every source file that differs from the pristine tree is
@@ -284,7 +284,7 @@ do_ui() {
             -e WEBOS_NDK="$NDK" -w /src/browser webos-browser-build:1 sh -c "
             set -e
             cmake -S . -B build/webos-$id -G 'Unix Makefiles' -DCMAKE_TOOLCHAIN_FILE=\"\$WEBOS_NDK/share/buildroot/toolchainfile.cmake\" \
-                -DCMAKE_BUILD_TYPE=Release -DWPEB_APPID=$app -DWPEB_TITLE=\"$(title_of $id)\" -DWPEB_ENGINE_STAGE=/build/${WORK#$BR/}/stage-$id/engine > /tmp/cfg.log 2>&1 || { tail -25 /tmp/cfg.log; exit 1; }
+                -DCMAKE_BUILD_TYPE=Release ${SOURCE_URL:+-DWNK_SOURCE_URL=$SOURCE_URL} -DWPEB_APPID=$app -DWPEB_TITLE=\"$(title_of $id)\" -DWPEB_ENGINE_STAGE=/build/${WORK#$BR/}/stage-$id/engine > /tmp/cfg.log 2>&1 || { tail -25 /tmp/cfg.log; exit 1; }
             cmake --build build/webos-$id -j\$(nproc) > /tmp/build.log 2>&1 || { grep -E 'error|Error' /tmp/build.log | head -20; exit 1; }
             cmake --build build/webos-$id --target wnk-ipks > /tmp/ipk.log 2>&1 || { tail -30 /tmp/ipk.log; exit 1; }
             ls -l build/webos-$id/dist/" 2>&1 | tail -6 | sed 's/^/   /'
@@ -356,7 +356,7 @@ do_sums() {
       echo "ids $IDS  version $VERSION"
       echo "date $(date -u +%FT%TZ)"
       echo "WK254 libWPEWebKit (stripped) md5 $(md5sum "$WORK/stage-${IDS%% *}/engine/lib/libWPEWebKit-2.0.so.1" | cut -d' ' -f1)"
-      echo "STAGE_BASE $STAGE_BASE  STAGE64 $STAGE64  uBO: built from the clone ($(cat "$WORK/ubo/COMMIT" 2>/dev/null))"
+      echo "inputs: 32-bit engine stage $(basename "$(dirname "$STAGE_BASE")"), 64-bit engine stage $(basename "$(dirname "$STAGE64")"); uBO: built from the clone ($(cat "$WORK/ubo/COMMIT" 2>/dev/null))"
       echo "kit $(git -C "$src/third_party/webos-native-app-kit" log -1 --format=%h)"; } > "$STAGE_OUT/BUILD-INFO.txt"
 }
 
