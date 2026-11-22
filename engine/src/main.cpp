@@ -915,6 +915,34 @@ std::string media_limit_script()
     return script;
 }
 
+// A tab that is no longer shown must not go on playing (memory, bandwidth, sound): when a document becomes hidden, every
+// <video>/<audio> in it, in open shadow trees too, is paused. Runs in every frame (a player in an iframe is its own
+// document), in an isolated world of its own so the page cannot see or disable it. It only ever pauses: nothing is resumed
+// when the document is shown again. Closed shadow trees are out of reach. (The tab switch's own pause of the top document,
+// kPause in the engine, stays.)
+constexpr const char *kPauseHiddenScript = R"JS((function () {
+  function pauseAll(root) {
+    var media = root.querySelectorAll('video,audio');
+    for (var i = 0; i < media.length; i++) { try { media[i].pause(); } catch (e) {} }
+    var all = root.querySelectorAll('*');
+    for (var j = 0; j < all.length; j++) if (all[j].shadowRoot) pauseAll(all[j].shadowRoot);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') pauseAll(document);
+  }, true);
+})();)JS";
+
+void add_pause_when_hidden(WebKitWebView *web_view)
+{
+    WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(web_view);
+    if (!ucm || g_strcmp0(getenv("WPE_BROWSER_DEBUG_PAUSE_HIDDEN"), "0") == 0)
+        return;
+    WebKitUserScript *script = webkit_user_script_new_for_world(kPauseHiddenScript, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+        WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, "wren-pause-hidden", nullptr, nullptr);
+    webkit_user_content_manager_add_script(ucm, script);
+    webkit_user_script_unref(script);
+}
+
 void add_media_limits(WebKitWebView *web_view)
 {
     static const std::string source = media_limit_script();
@@ -1198,6 +1226,7 @@ void add_scroll_reporter(WebKitWebView *web_view, uint32_t id)
 {
     add_site_quirks(web_view);
     add_media_limits(web_view);
+    add_pause_when_hidden(web_view);
     add_hybrid_video(web_view, id);
     add_debug_script(web_view);
     add_console_reporter(web_view, id); // after the limits, so it wraps them and logs what pages are told
