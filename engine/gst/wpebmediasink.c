@@ -828,8 +828,12 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
         const gboolean known = self->painted_area_valid || self->have_area;
         const WpebMediaArea a = self->painted_area_valid ? self->painted_area : self->area;
         g_mutex_unlock(&self->lock);
+        /* Flushed (the backend serializes with g_video_lock): a static page paints no frame after this one to carry it. */
         if (known)
-            video_window_place(self->vid, width, height, a.x, a.y, a.width, a.height, 1); self->unflushed_at_us = 0; /* backend serializes with g_video_lock; flushed: a static page paints no frame after this one to carry it */
+            video_window_place(self->vid, width, height, a.x, a.y, a.width, a.height, 1);
+        g_mutex_lock(&self->lock);
+        self->unflushed_at_us = 0; /* lock: area_painted and place_flush_due read and write it on other threads */
+        g_mutex_unlock(&self->lock);
     }
     self->load = load;
     gboolean sent = send_msg(self, WPEB_MEDIA_LOAD, 0, &load, sizeof(load));
