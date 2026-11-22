@@ -10,7 +10,7 @@ Rebased from the 2.50.5 set and regenerated exactly against 2.54.3 (no fuzz). Dr
 0004 also re-enables the baseline JIT and the DFG on ARMv7 Linux (hardfp and softfp): 2.54 turns both off on every
 32-bit build, which would cost the TV the JIT tiers 2.50.5 has. Upstream no longer tests 32-bit JIT.
 
-0015-0021 are the 32-bit ARMv7 JIT/DFG bring-up on 2.54 (build/jit254/REPORT.md sec. 20-21):
+0015-0021 are the 32-bit ARMv7 JIT/DFG bring-up on 2.54 (see docs/jit-armv7.md):
 
 - 0015 makes the 32-bit baseline JIT and DFG compile again; 0016 turns them on at runtime (Options.h/OptionsList.h).
 - 0017 stops the baseline DataIC path downcasting a handler-IC cache to the repatching form (memory corruption in

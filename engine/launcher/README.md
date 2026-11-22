@@ -55,5 +55,4 @@ line.
 Static, plain C, no dependencies beyond libc: it is the first thing the UI execs, before the private-loader link
 exists, so it has to work on the TV's own glibc (and on webOS 4's).
 
-Status: **all six acceptance tests PASS on the TV**, plus 9/9 PC tests. Design, verified findings and test detail:
-[`build/bridge64/ui-launch/LAUNCHER.md`](../../build/bridge64/ui-launch/LAUNCHER.md).
+Status: **all six acceptance tests PASS on the TV**, plus 9/9 PC tests. Design and findings: see [engine64.md](../../docs/engine64.md) and [architecture.md](../../docs/architecture.md).

@@ -1,7 +1,7 @@
 From: Wren <wren@localhost>
 Subject: [PATCH] JSC: keep the RegExp (YARR) JIT off on ARMv7
 
-Patch 0016 enabled useRegExpJIT by default on ARMv7. Soak on the TV (build/jit254/REPORT.md sec. 23): a framework docs
+Patch 0016 enabled useRegExpJIT by default on ARMv7. Soak on the TV (the maintainer's JIT bring-up report, not in this repository): a framework docs
 site crashes its web process (clean exit from main, UI reports a crash) ~2 s after load, 6/6 with the regexp JIT, 0/6 with
 JSC_useJIT=0 or JSC_useRegExpJIT=0; useDFGJIT=0 and useWebAssembly=0 do not help. Restore the 2.54 default
 (64-bit only); the Baseline JIT and DFG stay on.

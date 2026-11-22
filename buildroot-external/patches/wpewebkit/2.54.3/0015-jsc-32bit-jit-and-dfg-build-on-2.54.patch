@@ -16,7 +16,7 @@ Linux), and the 32-bit code paths stopped compiling. Fixes, each matching the 64
   32-bit; MapStorage for 32-bit (empty JSValue for a null storage); string equality calls the operation instead
   of a 64-bit-only thunk; the 64-bit-only Array.prototype.sort nodes are guarded.
 
-Written by a DSH Agent Teams session and reviewed; build/jit254/REPORT.md and REVIEW-NOTES.md have the details.
+Reviewed before it was committed. The maintainer's JIT bring-up report (not in this repository) has the details.
 ---
 diff --git a/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h b/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h
 index d764ed66..94741c96 100644

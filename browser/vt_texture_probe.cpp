@@ -2,11 +2,11 @@
 // EXPERIMENT: does the app that OWNS the video get frames from libvt as a GL texture?
 // Enabled only by WPE_BROWSER_DEBUG_VT_TEXTURE=<media url> / {"wpebVtTexture":"<url>"}. See the header.
 //
-// The arrangement (docs/lg-chromium-media.md §6, build/video/PLAN.md §4.6):
+// The arrangement (docs/lg-chromium-media.md §6, the maintainer's video notes):
 //   VT_CreateVideoWindow -> its id becomes StarfishMediaAPIs Load option.windowId -> the pipeline decodes INTO
 //   that VT window -> VT_UpdateOutputTexture(our texture) fills a GL texture in OUR context.
 //
-// Review fixes folded in (orchestrator, 2026-11-20):
+// Review fixes folded in (2026-11-20):
 //   1. dump_png reads through an FBO bound to tex_ (GLES2 has no glGetTexImage); the FBO status is logged,
 //      because a libvt-filled texture may not be colour-renderable -- that is itself an answer.
 //   2. Load uses the URI transport (the pipeline fetches the URL itself); BUFFERSTREAM without Feed would

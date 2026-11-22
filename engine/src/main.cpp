@@ -2600,7 +2600,7 @@ int main(int, char **)
         (data_dir + "/cookies.sqlite").c_str(), WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
 
     // WPE_BROWSER_DEBUG_CACHE_MODEL: web (WebKit's default for browsers), doc (document viewer: no memory cache between pages),
-    // primary (a few resources). Measured on the TV: see build/jit254/REPORT.md (round 20).
+    // primary (a few resources). Measured on the TV (maintainer's notes, not in this repository).
     {
         const std::string cm = env_or("WPE_BROWSER_DEBUG_CACHE_MODEL", "web");
         if (cm == "doc") webkit_web_context_set_cache_model(g.context, WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);

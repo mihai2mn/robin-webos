@@ -7,7 +7,7 @@
 #   bash tools/pack-engine64.sh ipk                  add-on ipk: engine64/ only, nothing else changes
 #   bash tools/pack-engine64.sh replace              replace variant: engine/wpe-engine -> the launcher, engine/ ->
 #                                                    engine32/ (one-at-a-time: the 32-bit and 64-bit engines do not
-#                                                    fit together, see build/bridge64/engine-port/PACKAGING.md)
+#                                                    fit together, see docs/engine64.md)
 #   bash tools/pack-engine64.sh study                size table + strip savings of the staged tree (no ipk)
 #   bash tools/pack-engine64.sh report               what is staged and what it would add to the TV
 #   STAGE=...  LAUNCHER=...  OUT=...  VERSION=0.3.3-ubo3  DEVICE_NAME=/mnt/lg/appstore ...
