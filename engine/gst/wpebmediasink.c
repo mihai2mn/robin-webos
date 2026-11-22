@@ -162,7 +162,8 @@ struct _WpebVideoSink {
     int video_width, video_height; /* the coded picture, for the window's source region */
     gboolean have_window;
     gint playing;      /* PAUSED_TO_PLAYING .. PLAYING_TO_PAUSED (atomic) */
-    gboolean deferred; /* streaming thread: the LOAD (and the window) wait for this video's first played unit (see set_caps) */
+    gint deferred;     /* atomic: the LOAD (and the window) wait for this video's next played unit (see set_caps, load_video) */
+    gint lost;         /* atomic: another video took the page's window and LG's decoder; taken back at this one's next play */
     int deferred_width, deferred_height;
     char vid[128]; /* the window's id (WpebMediaLoad.window_id of the load that opened it) */
     GByteArray *parameter_sets; /* Annex B */
@@ -171,6 +172,12 @@ struct _WpebVideoSink {
     gboolean tracks_sent;
     WpebMediaLoad load;   /* the last LOAD sent (its window, HDR and the envelope the UI declared from it) */
 };
+
+/* The videos of this process decide one after the other whether to take the page's window: see load_video. */
+static GMutex g_open_lock;
+/* g_open_lock: the sink whose LOAD named the page's current window, with a reference: stop() runs on WebKit's main thread and must
+ * not wait for g_open_lock (an open can take a second and a half), so it does not clear this; the next owner replaces it. */
+static WpebVideoSink *g_window_owner;
 
 /* The envelope the UI declares to LG for a LOAD (browser/lg_media_player.cpp, the same rule): H.264 that fits FHD
  * as 1920x1080 (larger declarations are refused by some firmware), else the decoder's maximum; H.264 at its rate
@@ -693,7 +700,8 @@ static gboolean wpeb_video_sink_start(GstBaseSink *sink)
     g_atomic_int_set(&self->fd, fd);
     g_mutex_lock(&self->lock);
     self->codec = 0;
-    self->deferred = FALSE;
+    g_atomic_int_set(&self->deferred, 0);
+    g_atomic_int_set(&self->lost, 0);
     self->nctl = 0; /* messages queued for the previous connection are stale */
     memset(&self->load, 0, sizeof(self->load));
     self->sent = 0;
@@ -745,7 +753,7 @@ static gboolean wpeb_video_sink_stop(GstBaseSink *sink)
  * of a page preroll within milliseconds of each other, and each asked "is the window taken?" before the other's existed, so
  * both opened, the second open closed the first one's window and the loser's LOAD (without a window) still took LG's decoder
  * (TV, 2026-11-22). Held across the question and the open (and the LOAD); taken before any other lock of a sink. */
-static GMutex g_open_lock;
+/* (g_open_lock and g_window_owner: declared after struct _WpebVideoSink) */
 
 /* Opens the page's video window (or keeps the one this sink has), places it and sends the LOAD. Streaming thread: set_caps, or
  * render() for a load that waited (see set_caps). g_open_lock held. */
@@ -768,6 +776,25 @@ static gboolean load_video(WpebVideoSink *self, WpebMediaLoad load, int width, i
         g_strlcpy(self->vid, load.window_id, sizeof(self->vid));
     self->have_window = have_window;
     g_mutex_unlock(&self->lock);
+    if (have_window && g_window_owner && g_window_owner != self) {
+        /* This video takes the page's window (its open closed the other's) and LG's decoder from the previous owner. That one's
+         * LOAD may still be held by the UI (it waits up to a second for the audio side's answer) and would take the decoder back
+         * once it completes, after ours (TV, 2026-11-22): it is cancelled with an UNLOAD before ours goes out. The other video
+         * stops showing; it takes the window back at its next play (change_state). */
+        WpebVideoSink *was = g_window_owner;
+        g_mutex_lock(&was->lock);
+        was->have_window = FALSE;
+        was->vid[0] = '\0';
+        g_mutex_unlock(&was->lock);
+        g_atomic_int_set(&was->lost, 1);
+        send_ctl(was, WPEB_MEDIA_UNLOAD, NULL, 0);
+        GST_INFO_OBJECT(self, "took the page's video window and LG's decoder from %" GST_PTR_FORMAT, was);
+    }
+    if (have_window && g_window_owner != self) {
+        if (g_window_owner)
+            gst_object_unref(g_window_owner);
+        g_window_owner = WPEB_VIDEO_SINK(gst_object_ref(self));
+    }
     if (have_window) {
         GST_INFO_OBJECT(self, "video window %s on the page surface", load.window_id);
         /* At once, not on the next painted frame: the window is new and LG's pipeline is about to show the first
@@ -846,7 +873,7 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
             || (!envelope_60(was->codec, was->fps_milli) && envelope_60(load.codec, load.fps_milli));
         if (!grow)
             return TRUE;
-        if (self->deferred) { /* no LOAD went out yet: the one sent when this video plays carries the new envelope */
+        if (g_atomic_int_get(&self->deferred)) { /* no LOAD went out yet: the one sent when this video plays carries the new envelope */
             hdr_from_caps(caps, &load.hdr);
             self->load = load;
             self->deferred_width = width, self->deferred_height = height;
@@ -875,13 +902,13 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
         !g_getenv("WPE_BROWSER_DEBUG_NO_VIDEO_WINDOW") && video_window.shown_window_busy()) {
         GST_INFO_OBJECT(self, "the page's video window is another video's: the LOAD waits for this one to play");
         self->load = load;
-        self->deferred = TRUE;
+        g_atomic_int_set(&self->deferred, 1);
         self->deferred_width = width;
         self->deferred_height = height;
         g_mutex_unlock(&g_open_lock);
         return TRUE;
     }
-    self->deferred = FALSE;
+    g_atomic_int_set(&self->deferred, 0);
     const gboolean ok = load_video(self, load, width, height);
     g_mutex_unlock(&g_open_lock);
     return ok;
@@ -926,10 +953,10 @@ static int64_t media_time_us(const GstSegment *segment, GstBuffer *buffer, int64
 static GstFlowReturn wpeb_video_sink_render(GstBaseSink *sink, GstBuffer *buffer)
 {
     WpebVideoSink *self = WPEB_VIDEO_SINK(sink);
-    if (self->deferred) {
-        /* This video plays now (render runs in PLAYING; the first unit is the prerolled keyframe): the newest playing video
-         * takes the page's window and LG's decoder (see set_caps). */
-        self->deferred = FALSE;
+    if (g_atomic_int_compare_and_exchange(&self->deferred, 1, 0)) {
+        /* This video plays now (render runs in PLAYING; for a video that never played the first unit is the prerolled keyframe;
+         * one that lost the window while it was paused resumes where it stopped, and LG shows from its next keyframe): the
+         * newest playing video takes the page's window and LG's decoder (see set_caps). */
         GST_INFO_OBJECT(self, "playing: taking the page's video window and LG's decoder");
         g_mutex_lock(&g_open_lock);
         const gboolean loaded = load_video(self, self->load, self->deferred_width, self->deferred_height);
@@ -1020,6 +1047,14 @@ static GstStateChangeReturn wpeb_video_sink_change_state(GstElement *element, Gs
     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
         paused = 0;
         g_atomic_int_set(&self->playing, 1);
+        if (g_atomic_int_compare_and_exchange(&self->lost, 1, 0)) {
+            /* Another video took the page's window while this one was not playing: this one plays now and takes it back at its
+             * next unit (render). The window was the other's to close: ours is gone, so the load opens a new one. */
+            g_mutex_lock(&self->lock);
+            self->deferred_width = self->video_width, self->deferred_height = self->video_height;
+            g_mutex_unlock(&self->lock);
+            g_atomic_int_set(&self->deferred, 1);
+        }
         send_ctl(self, WPEB_MEDIA_PAUSE, &paused, sizeof(paused));
         break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
