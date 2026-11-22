@@ -141,7 +141,8 @@ public:
     std::condition_variable keys_changed;
     std::map<std::string, OpenCDMSession*> sessions; // open sessions by id (not owning)
 
-    bool ensure_provisioned();   // call with cdm_lock held
+    std::mutex provision_mutex;
+    bool ensure_provisioned();   // call WITHOUT cdm_lock held (it takes it itself around the CDM calls, not around the network)
     void schedule_refresh(OpenCDMSession*);
     void post(std::function<void()>);
     void release(OpenCDMSession*);
@@ -221,12 +222,19 @@ bool Context::start()
 }
 
 // Fetches this device's Widevine certificate once; it is kept in the storage directory afterwards.
+// The caller must NOT hold cdm_lock: the network POST (up to 20 s) runs without it, so playback of other sessions is not stalled;
+// concurrent callers queue on provision_mutex and find the device provisioned when their turn comes.
 bool Context::ensure_provisioned()
 {
-    if (cdm->isProvisioned())
-        return true;
+    std::lock_guard<std::mutex> one(provision_mutex);
     std::string request;
-    Cdm::Status status = cdm->getProvisioningRequest(&request);
+    Cdm::Status status;
+    {
+        std::lock_guard<std::recursive_mutex> lock(cdm_lock);
+        if (cdm->isProvisioned())
+            return true;
+        status = cdm->getProvisioningRequest(&request);
+    }
     if (status != Cdm::kSuccess || request.empty()) {
         log(false, "provisioning: no request (%d)", status);
         return false;
@@ -241,6 +249,7 @@ bool Context::ensure_provisioned()
         log(false, "provisioning: %s", reply.error.c_str());
         return false;
     }
+    std::lock_guard<std::recursive_mutex> lock(cdm_lock);
     status = cdm->handleProvisioningResponse(reply.body);
     if (status != Cdm::kSuccess || !cdm->isProvisioned()) {
         log(false, "provisioning: reply refused (%d)", status);
@@ -569,13 +578,18 @@ OpenCDMError opencdm_construct_session(struct OpenCDMSystem* system, const Licen
     else
         return ERROR_INVALID_ARG;
 
-    std::lock_guard<std::recursive_mutex> lock(context->cdm_lock);
     if (!context->ensure_provisioned())
         return ERROR_FAIL;
+    std::unique_lock<std::recursive_mutex> lock(context->cdm_lock);
     std::string id;
     Cdm::Status status = context->cdm->createSession(Cdm::kTemporary, &id);
-    if (status == Cdm::kNeedsDeviceCertificate && context->ensure_provisioned())
-        status = context->cdm->createSession(Cdm::kTemporary, &id);
+    if (status == Cdm::kNeedsDeviceCertificate) {
+        lock.unlock();   // the provisioning POST runs without the CDM lock
+        const bool provisioned = context->ensure_provisioned();
+        lock.lock();
+        if (provisioned)
+            status = context->cdm->createSession(Cdm::kTemporary, &id);
+    }
     if (status != Cdm::kSuccess || id.empty()) {
         log(false, "createSession failed (%d)", status);
         return ERROR_FAIL;
