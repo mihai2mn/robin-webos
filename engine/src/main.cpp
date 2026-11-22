@@ -74,6 +74,11 @@ struct Tab {
     int64_t born_us = 0;
     bool pop_under_candidate = false;
     bool memory_kill = false;                 // the memory guard is ending this tab's web process (reported as "used too much memory")
+    // The page-side (emulated) fullscreen messages (on_emulated_fullscreen): the last state sent to the UI (-1 none), the state
+    // the page last asked for, when the UI was last told, and the timer that tells it a changed state after kFsMinGapUs.
+    int fs_sent = -1, fs_want = -1;
+    int64_t fs_us = 0;
+    guint fs_timer = 0;
 };
 
 struct Engine {
@@ -467,6 +472,9 @@ void on_progress(WebKitWebView *view, GParamSpec *, gpointer)
 
 void on_load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer)
 {
+    if (event == WEBKIT_LOAD_COMMITTED)  // a new document: what the UI was last told about its fullscreen no longer holds
+        if (Tab *t = tab_by_id(tab_of_web_view(view)))
+            t->fs_sent = -1;
     WpeLoad l {};
     switch (event) {
     case WEBKIT_LOAD_STARTED: l.event = WPE_LOAD_STARTED; break;
@@ -688,6 +696,8 @@ gboolean on_fullscreen_changed(WebKitWebView *view, gpointer entered)
 {
     const uint32_t id = tab_of_web_view(view);
     WpeFlag flag = {GPOINTER_TO_UINT(entered)};
+    if (Tab *t = tab_by_id(id))
+        t->fs_sent = -1;  // the UI's state changed by WebKit's own fullscreen: the next emulated message is a change
     log_msg("tab %u %s fullscreen", id, flag.value ? "entered" : "left");
     send_msg(WPE_ENGINE_FULLSCREEN, id, &flag, sizeof(flag));
     return FALSE; // let it happen
@@ -1024,14 +1034,45 @@ void on_hybrid_message(WebKitUserContentManager *, JSCValue *value, gpointer dat
 
 // compat.js's emulated fullscreen (a hardware-plane video stretched over the page) tells the UI the same thing WebKit's own
 // fullscreen does, so the toolbar goes away and the page gets the whole screen. "1" entered, "0" left.
+// Any page or frame can post to the handler (it lives in the page's own world, which compat.js needs), so the UI hears of a
+// state only when it differs from what it was told last, and of changes at most every kFsMinGapUs: the last asked-for state
+// is sent when the gap has passed. One log line per state sent, none per message. (The engine cannot tell whether the
+// page had a user action: compat.js checks that before it posts.)
+constexpr int64_t kFsMinGapUs = 500000;
+
+void fs_send(Tab *tab)
+{
+    if (tab->fs_want < 0 || tab->fs_want == tab->fs_sent)
+        return;
+    tab->fs_sent = tab->fs_want;
+    tab->fs_us = g_get_monotonic_time();
+    WpeFlag flag = {static_cast<uint32_t>(tab->fs_sent)};
+    log_msg("tab %u %s fullscreen (emulated)", tab->id, flag.value ? "entered" : "left");
+    send_msg(WPE_ENGINE_FULLSCREEN, tab->id, &flag, sizeof(flag));
+}
+
+gboolean on_fs_timer(gpointer data)
+{
+    if (Tab *tab = tab_by_id(GPOINTER_TO_UINT(data))) {
+        tab->fs_timer = 0;
+        fs_send(tab);
+    }
+    return G_SOURCE_REMOVE;
+}
+
 void on_emulated_fullscreen(WebKitUserContentManager *, JSCValue *value, gpointer data)
 {
     gchar *text = jsc_value_to_string(value);
-    const uint32_t id = GPOINTER_TO_UINT(data);
-    if (text && (text[0] == '1' || text[0] == '0') && !text[1]) {
-        WpeFlag flag = {static_cast<uint32_t>(text[0] == '1')};
-        log_msg("tab %u %s fullscreen (emulated)", id, flag.value ? "entered" : "left");
-        send_msg(WPE_ENGINE_FULLSCREEN, id, &flag, sizeof(flag));
+    Tab *tab = tab_by_id(GPOINTER_TO_UINT(data));
+    if (tab && text && (text[0] == '1' || text[0] == '0') && !text[1]) {
+        tab->fs_want = text[0] == '1';
+        if (tab->fs_want != tab->fs_sent && !tab->fs_timer) {
+            const int64_t wait = tab->fs_us + kFsMinGapUs - g_get_monotonic_time();
+            if (wait <= 0)
+                fs_send(tab);
+            else
+                tab->fs_timer = g_timeout_add(static_cast<guint>(wait / 1000 + 1), on_fs_timer, GUINT_TO_POINTER(tab->id));
+        }
     }
     g_free(text);
 }
@@ -1571,6 +1612,8 @@ void tab_close(uint32_t id)
     g_signal_handlers_disconnect_by_data(webkit_web_view_get_back_forward_list(it->second.web_view), it->second.web_view);
     webkit_web_view_try_close(it->second.web_view);
     g_object_unref(it->second.web_view);
+    if (it->second.fs_timer)
+        g_source_remove(it->second.fs_timer);
     g.tabs.erase(it);
     if (g.active == id)
         g.active = 0;
