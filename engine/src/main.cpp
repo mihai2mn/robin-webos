@@ -80,6 +80,7 @@ struct Tab {
     int fs_sent = -1, fs_want = -1;
     int64_t fs_us = 0;
     guint fs_timer = 0;
+    guint32 load_started_ms = 0;              // when this tab's last load started (the timings in the log)
 };
 
 struct Engine {
@@ -504,14 +505,15 @@ void on_load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer)
     }
 
     // Page timings for the log (TV diagnostics: which site, how long to first commit / full load).
-    static guint32 started = 0;
+    Tab *timed = tab_by_id(tab);
     const char *uri = webkit_web_view_get_uri(view);
     if (event == WEBKIT_LOAD_STARTED) {
-        started = now_ms();
+        if (timed)
+            timed->load_started_ms = now_ms();
         log_msg("tab %u load started: %.200s", tab, uri ? uri : "");
     } else {
         log_msg("tab %u load %s after %u ms: %.200s", tab, event == WEBKIT_LOAD_COMMITTED ? "committed" : "finished",
-            now_ms() - started, uri ? uri : "");
+            timed ? now_ms() - timed->load_started_ms : 0, uri ? uri : "");
     }
 }
 
