@@ -14,6 +14,11 @@ players see only a smaller buffered range behind the playhead (seeking back past
 
 keep comes from SourceBufferPrivate::platformMaximumBackBufferDuration(): invalid (off) in WebCore, and on the GStreamer
 port MSE_MAX_BACK_BUFFER_SECONDS (default 30, minimum 3 when set, 0 = off).
+
+Seek back out of the buffered media: the player re-fetches from the new position while what it had buffered ahead of the old
+one stays far beyond the playhead, so the re-fetched segments came on top of it (about +90 MB at 4K on the TV). When the playhead
+is found more than 5 s behind its position at the previous check and is not inside the buffered media, the data more than
+`keep` seconds beyond it is removed too (never the range being played; a seek inside the buffer removes nothing).
 ---
 --- a/Source/WebCore/platform/graphics/SourceBufferPrivate.h
 +++ b/Source/WebCore/platform/graphics/SourceBufferPrivate.h
@@ -26,11 +31,13 @@ port MSE_MAX_BACK_BUFFER_SECONDS (default 30, minimum 3 when set, 0 = off).
      WEBCORE_EXPORT uint64_t contentSize() const;
      void resetTimestampOffsetInTrackBuffers();
      virtual void startChangingType();
-@@ -251,6 +253,7 @@
+@@ -251,6 +253,9 @@
      void trySignalAllSamplesInTrackEnqueued(TrackBuffer&, TrackID);
      MediaTime findPreviousSyncSamplePresentationTime(const MediaTime&);
      bool evictCodedFramesInternal(uint64_t newDataSize, const MediaTime& currentTime);
 +    void evictBackBufferInternal(const MediaTime& currentTime);
++    void evictFarAheadAfterSeekInternal(const MediaTime& currentTime, const MediaTime& keep);
++    MediaTime m_lastBackBufferCheckTime { MediaTime::invalidTime() }; // dispatcher only
      void removeCodedFramesInternal(const MediaTime& start, const MediaTime& end, const MediaTime& currentMediaTime);
      bool evictFrames(uint64_t newDataSize, const MediaTime& currentTime);
      bool hasTooManySamples() const;
@@ -66,7 +73,7 @@ port MSE_MAX_BACK_BUFFER_SECONDS (default 30, minimum 3 when set, 0 = off).
          // The buffer is full, but we will be able to evict the content prior appending.
          ensureWeakOnDispatcher([newDataSize, currentTime](auto& buffer) {
              buffer.evictCodedFramesInternal(newDataSize, currentTime);
-@@ -729,6 +742,33 @@
+@@ -729,6 +742,73 @@
      return returnValue;
  }
  
@@ -77,7 +84,16 @@ port MSE_MAX_BACK_BUFFER_SECONDS (default 30, minimum 3 when set, 0 = off).
 +    // Same removal as the first phase of evictFrames(): from the start of the buffered media up to the last
 +    // sync sample before currentTime (never into the GOP being played), here also at most currentTime - keep.
 +    MediaTime keep = platformMaximumBackBufferDuration();
-+    if (!keep.isValid() || !keep.isFinite() || !currentTime.isFinite() || currentTime <= keep)
++    if (!keep.isValid() || !keep.isFinite() || !currentTime.isFinite())
++        return;
++
++    // The playhead moved back since the last check (a seek): see evictFarAheadAfterSeekInternal().
++    bool jumpedBack = m_lastBackBufferCheckTime.isValid() && currentTime + MediaTime(5, 1) < m_lastBackBufferCheckTime;
++    m_lastBackBufferCheckTime = currentTime;
++    if (jumpedBack)
++        evictFarAheadAfterSeekInternal(currentTime, keep);
++
++    if (currentTime <= keep)
 +        return;
 +
 +    MediaTime rangeStart = minimumBufferedTime();
@@ -94,6 +110,37 @@ port MSE_MAX_BACK_BUFFER_SECONDS (default 30, minimum 3 when set, 0 = off).
 +    computeEvictionData();
 +#if !RELEASE_LOG_DISABLED
 +    DEBUG_LOG(LOGIDENTIFIER, "back buffer: removed [", rangeStart, ", ", rangeEnd, "), ", initialBufferedSize - evictionData().contentSize, " bytes, currentTime = ", currentTime);
++#endif
++}
++
++void SourceBufferPrivate::evictFarAheadAfterSeekInternal(const MediaTime& currentTime, const MediaTime& keep)
++{
++    assertIsCurrent(m_dispatcher.get());
++
++    // After a seek back out of the buffered media the player re-fetches from the new position, while what it had
++    // buffered ahead of the old position stays, far beyond the playhead: the re-fetched data would come on top of
++    // it. Keep `keep` seconds ahead of the new playhead and drop the rest. Never the range being played: when every
++    // track has currentTime buffered (a seek inside the buffer, nothing is re-fetched) nothing is removed.
++    bool playheadBuffered = true;
++    iterateTrackBuffers([&](TrackBuffer& trackBuffer) {
++        if (!trackBuffer.buffered().contain(currentTime))
++            playheadBuffered = false;
++    });
++    if (playheadBuffered)
++        return;
++
++    MediaTime rangeStart = currentTime + keep;
++    MediaTime rangeEnd = maximumBufferedTime();
++    if (!rangeEnd.isValid() || !rangeEnd.isFinite() || rangeStart >= rangeEnd)
++        return;
++
++#if !RELEASE_LOG_DISABLED
++    uint64_t initialBufferedSize = evictionData().contentSize;
++#endif
++    removeCodedFramesInternal(rangeStart, rangeEnd, currentTime);
++    computeEvictionData();
++#if !RELEASE_LOG_DISABLED
++    DEBUG_LOG(LOGIDENTIFIER, "seek back: removed far-ahead [", rangeStart, ", ", rangeEnd, "), ", initialBufferedSize - evictionData().contentSize, " bytes, currentTime = ", currentTime);
 +#endif
 +}
 +

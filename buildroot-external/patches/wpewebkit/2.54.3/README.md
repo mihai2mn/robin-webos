@@ -29,3 +29,6 @@ Rebased from the 2.50.5 set and regenerated exactly against 2.54.3 (no fuzz). Dr
 - 0026 keeps at most `MSE_MAX_BACK_BUFFER_SECONDS` seconds (default 30, minimum 3, 0 = off) of played media behind the playhead for
   plain `MediaSource` on GStreamer: `evictCodedFrames()` (before every append) queues the first phase of the usual eviction
   (start of the buffer up to min(currentTime - keep, last sync sample before currentTime)). No updateend, byte limits unchanged.
+  After a seek back out of the buffered media (playhead > 5 s behind the previous check and not inside the buffer) it also drops
+  data more than the same number of seconds beyond the playhead, so the re-fetched segments do not come on top of it (4K: about
+  +90 MB at once before). A seek inside the buffer removes nothing.
