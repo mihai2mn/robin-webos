@@ -17,7 +17,7 @@
 #
 # Inputs that are NOT built here (each has its own script; the package records which it used, build/release/BUILD-INFO.txt):
 #   STAGE_BASE  tools/stage-engine.sh output (libs, glibc, GStreamer, fonts, certs, licences): build/engine-stage-jit/engine
-#   WK254       the in-tree WebKit 2.54.3 build with patches/wpewebkit/2.54.3/0001..0021 (tools/build-engine.sh with
+#   WK254       the in-tree WebKit 2.54.3 build with patches/wpewebkit/2.54.3/0001..0026, every file of the directory (tools/build-engine.sh with
 #               WEBKIT_VERSION=2.54.3, then ninja; wk254.sh): libWPEWebKit, WPE{Web,Network,GPU}Process, injected bundle.
 #               The stripped libWPEWebKit has md5 a281cdbc88005b5338e401dc226f7613 (= the TV's engine254jit); NOT rebuilt here
 #               (a WebKit build takes hours; `tools/build-engine.sh start` with WEBKIT_VERSION=2.54.3 rebuilds it from the patch series).

@@ -238,8 +238,8 @@ cat > "$OUT/etc/fonts/fonts.conf" <<'EOF'
   <alias><family>sans-serif</family><prefer><family>DejaVu Sans</family></prefer></alias>
   <alias><family>serif</family><prefer><family>DejaVu Serif</family></prefer></alias>
   <alias><family>monospace</family><prefer><family>DejaVu Sans Mono</family></prefer></alias>
-  <!-- Grayscale antialiasing: subpixel (LCD) text shows coloured fringes on a TV panel. SHM mode also gets this
-       from WebKit patch 0003; direct mode (libwpe API, no WPEPlatform settings) only from here. -->
+  <!-- Grayscale antialiasing: subpixel (LCD) text shows coloured fringes on a TV panel. Direct mode (libwpe API,
+       no WPEPlatform settings) gets it only from here. -->
   <match target="font"><edit name="rgba" mode="assign"><const>none</const></edit></match>
 </fontconfig>
 EOF

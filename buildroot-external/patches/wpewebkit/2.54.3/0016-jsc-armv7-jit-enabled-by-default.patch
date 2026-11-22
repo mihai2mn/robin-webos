@@ -6,6 +6,9 @@ switched the JIT off at runtime on 32-bit ARMv7 even though patch 0004 compiles 
 armv7LinuxJITSupported() that repeats the compile-time predicate of 0004 word for word (CPU(ARM_THUMB2) &&
 (CPU(ARM_HARDFP) || CPU(ARM_SOFTFP_VFP)) && OS(LINUX)) and use it in the three defaults. Folds to false everywhere else,
 so no default changes on 64-bit or other 32-bit platforms.
+
+NOTE: patch 0023 undoes the useRegExpJIT part of this one (the RegExp JIT stays off on ARMv7); the useJIT and
+useDFGJIT defaults set here are still in force.
 ---
 diff --git a/Source/JavaScriptCore/runtime/Options.h b/Source/JavaScriptCore/runtime/Options.h
 --- a/Source/JavaScriptCore/runtime/Options.h

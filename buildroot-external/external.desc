@@ -1,2 +1,2 @@
 name: WEBOS_BROWSER
-desc: WPE WebKit and dependencies for a webOS 6+ native browser (armv7 softfp, glibc 2.28)
+desc: WPE WebKit and dependencies for a webOS native browser (armv7 softfp, glibc 2.28; tested on webOS 5.3)

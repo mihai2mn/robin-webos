@@ -32,7 +32,7 @@ number 0.3.3 of the base it was made from.
   remembered per site** ([usage.md](docs/usage.md)).
 - **Memory limits** for the web and network processes, no back/forward page cache by default, and a declared
   memory need in the app's `appinfo.json`.
-- **Reproducible release packaging**: `tools/package-release.sh` builds the ipk from a clean clone of a commit
+- **Clean-clone release packaging** (not bit-for-bit reproducible: the toolchain image, the filter lists and the staged base are not pinned): `tools/package-release.sh` builds the ipk from a clean clone of a commit
   ([building.md](docs/building.md)).
 
 ## Tested hardware
