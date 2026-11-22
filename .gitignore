@@ -19,3 +19,8 @@ __pycache__/
 !browser/icons/*.png
 /tools/tvdrive/tvdrive-out/
 /tools/tvdrive/proof/
+
+# test-tool output at the repo root
+/tvdrive-out/
+/lead-*
+/v-*
