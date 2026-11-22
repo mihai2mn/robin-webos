@@ -50,7 +50,7 @@ tools/ubo/test/run.sh        # desktop test with the system's WPE WebKit
 ```
 
 `tools/package-release.sh` puts `engine/ubo/` and `engine/lib/web-extensions/` in the package.
-`WREN_UBO=0` in the engine's environment disables the ad blocker; `WREN_UBO_LOG=1` logs each blocked,
+`WREN_UBO=0` in the engine's environment disables the ad blocker (until compat.js is loaded independently of the extension, it also keeps compat.js from loading: its wren:// route and the extension are both off); `WREN_UBO_LOG=1` logs each blocked,
 redirected or rewritten request, `WREN_UBO_LOG=2` every request with the type it was given.
 
 Desktop test (WPE WebKit 2.54, 2026-11-19): network blocking, `redirect=` for scripts and images, `removeparam`,

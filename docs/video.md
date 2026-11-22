@@ -53,7 +53,8 @@ WebKit's own fullscreen leaves the page black and the video plane at its old pla
 painted as a hole. So for a video that is on the hardware plane, or that the fullscreen rule moves there, and for any
 element that contains such a video, `engine/ubo/compat.js` does not use WebKit's fullscreen. It emulates it:
 
-- **A gesture is needed**, as for the real one. A script without a user action gets the normal rejection.
+- **A gesture is needed**, as for the real one: compat.js rejects a script without a user action, and only then tells the
+  engine. The engine itself cannot check it (the message handler is reachable by any frame of the page).
 - The element is stretched over the whole screen with fixed positioning and a black background. A `<video>` is
   scaled to fit. In a container, the videos inside it are made to fill it too, because the page's `:fullscreen` CSS
   cannot match an emulated fullscreen.
@@ -97,8 +98,8 @@ one for every kind of player.
 - **Audio has not been heard.** It was checked in logs only: the load, PCM and volume calls and their return values.
 - An unmuted short clip inside an article moves to the hardware plane, which does not scroll exactly with the page.
 - One hardware video at a time. A second one loses its picture.
-- Autoplay is allowed only for muted videos (WebKit policy). An unmuted `autoplay` video waits for a user action.
-  `WPE_BROWSER_DEBUG_AUTOPLAY=allow` is for tests.
+- Autoplay is allowed with sound in every tab (a TV page was opened on purpose, and a player whose `play()` is rejected tears
+  itself down). `WPE_BROWSER_DEBUG_AUTOPLAY=policy` restores muted-only autoplay (except in tabs opened on YouTube); for tests.
 - Test pages need a server with HTTP range support.
 - The 64-bit engine has no hardware video ([engine64.md](engine64.md)).
 - Memory: the page cache is off by default and the web and network processes have pressure limits (520 MB by
