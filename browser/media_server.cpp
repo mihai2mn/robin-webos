@@ -573,9 +573,13 @@ void MediaServer::serve(int fd, uint64_t id) {
 
     bool force_ndl = false;  // the last attempt after LG's pipeline failed to start: the Starfish backend's decoder
     int retries = 0;
-    const auto do_load = [&](const WpebMediaLoad &l) {
+    // What do_load did. Lost: a reload (retry or recovery) found the decoder no longer this stream's: a newer stream's Load or the UI
+    // took it while the reload waited without mutex_, and taking it back would leave that stream without a picture.
+    enum class Loaded { Yes, No, Lost };
+    const auto do_load = [&](const WpebMediaLoad &l, bool reload) -> Loaded {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!backend_) return;
+        if (!backend_) return Loaded::No;
+        if (reload && owner_.load() != id) return Loaded::Lost;
         auto &b = *backend_;
         key_codec = l.codec;
         wnk::media::StreamFormat f;
@@ -649,6 +653,18 @@ void MediaServer::serve(int fd, uint64_t id) {
         replay_ok = use_lg_;
         arm_gen = generation;  // the units from here on start a feed
         ++arm_seq;
+        return use_lg_ || ndl_loaded_ ? Loaded::Yes : Loaded::No;
+    };
+    // A reload found the decoder taken (Loaded::Lost): the stream goes on as one whose decoder a newer Load took (its units are
+    // consumed and dropped by the feeder, as before the reload).
+    const auto lost_decoder = [&](const char *what) {
+        std::lock_guard<std::mutex> ql(qm);
+        replay.clear();
+        replay_bytes = 0;
+        replay_ok = false;
+        ready = true;
+        qcv.notify_all();
+        WNK_LOGI(kCat, "stream %llu: %s dropped: another stream holds the decoder now", static_cast<unsigned long long>(id), what);
     };
     // The LG pipeline failed before showing a picture (TV, 2026-11-20: "fail to create AVProxy" for a page's main video right after its
     // ads, while another app still held a decoder or the ad's pipeline was still being released): load it again after a pause, with
@@ -658,6 +674,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         if (!pending_valid || owner_.load() != id) return;  // a stream the newest Load took the decoder from must not take it back
         const int code = lg_.error();
         ++retries;
+        bool lost = false;
         std::deque<Unit> again;
         {
             std::lock_guard<std::mutex> ql(qm);
@@ -670,18 +687,29 @@ void MediaServer::serve(int fd, uint64_t id) {
         WNK_LOGW(kCat, "stream %llu: LG pipeline error %d before its first picture: attempt %d to load it again in %d ms%s", static_cast<unsigned long long>(id),
                  code, retries + 1, delay_ms, retries >= 2 ? " (Starfish backend)" : "");
         {
+            // use_lg_ is the owner's: a stream that lost the decoder meanwhile leaves it (and the pipeline) to the new owner.
             std::lock_guard<std::mutex> lock(mutex_);
-            if (owner_.load() == id) lg_.unload();
-            use_lg_ = false;
+            if (owner_.load() != id) {
+                lost = true;
+            } else {
+                lg_.unload();
+                use_lg_ = false;
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-        if (retries >= 2) force_ndl = true;
-        do_load(pending);
+        if (!lost) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            if (retries >= 2) force_ndl = true;
+        }
+        const Loaded r = lost ? Loaded::Lost : do_load(pending, true);
+        if (r == Loaded::Lost) {
+            lost_decoder("the retry");
+            return;
+        }
         {
             std::lock_guard<std::mutex> ql(qm);
             // What was fed goes first again (per stream in order), ahead of what came meanwhile.
             for (auto it = again.rbegin(); it != again.rend(); ++it) queues[it->packet.type == wnk::media::TrackType::Audio ? 1 : 0].push_front(std::move(*it));
-            ready = use_lg_ || ndl_loaded_;
+            ready = r == Loaded::Yes;
             qcv.notify_all();
         }
     };
@@ -709,20 +737,32 @@ void MediaServer::serve(int fd, uint64_t id) {
             std::lock_guard<std::mutex> ql(qm);
             ready = false;
         }
+        bool lost = false;
         {
+            // As in do_retry: only the owner unloads the pipeline and clears use_lg_.
             std::lock_guard<std::mutex> lock(mutex_);
-            if (owner_.load() == id) lg_.unload();
-            use_lg_ = false;
+            if (owner_.load() != id) {
+                lost = true;
+            } else {
+                lg_.unload();
+                use_lg_ = false;
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
-        need_key_at = Clock::now().time_since_epoch().count();
-        need_key = true;
-        do_load(pending);
+        if (!lost) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            need_key_at = Clock::now().time_since_epoch().count();
+            need_key = true;
+        }
+        const Loaded r = lost ? Loaded::Lost : do_load(pending, true);
+        if (r == Loaded::Lost) {
+            lost_decoder("the reload");
+            return;
+        }
         {
             std::lock_guard<std::mutex> ql(qm);
             replay_ok = false;  // no replay for a stream that has shown pictures
             replay.clear();
-            ready = use_lg_ || ndl_loaded_;
+            ready = r == Loaded::Yes;
             if (!ready) {
                 // No decoder any more: nothing will consume the queues, which are not capped. Closing the connection makes the web process's
                 // sink fail its next write ("Hardware video service lost"): the page gets a media error instead of a stall.
@@ -742,7 +782,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         if (audio_state == AudioState::Unknown && waited)
             WNK_LOGW(kCat, "stream %llu: no word from the audio side: video only", static_cast<unsigned long long>(id));
         load_pending = false;
-        do_load(pending);
+        do_load(pending, false);
         set_ready(true);
     };
 
