@@ -182,6 +182,23 @@
         on: false,
         current: () => document.fullscreenElement || document.webkitFullscreenElement || null,
     };
+    // A muted, controls-less video that is laid out at thumbnail size (by the page's own styles).
+    const isThumb = v => {
+        if (!v.muted || v.controls) return false;
+        const r = v.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && r.width <= 320 && r.height <= 180;
+    };
+    // Whether a video is, or is inside (through shadow hosts and slots), the fullscreen element: only those go to the hardware plane with it.
+    const inFullscreen = v => {
+        const fs = policy.current();
+        if (!fs) return false;
+        for (let n = v; n;) {
+            if (n === fs) return true;
+            const p = n.assignedSlot || n.parentNode;
+            n = p instanceof ShadowRoot ? p.host : p;
+        }
+        return false;
+    };
     // Engine-provided settings (hybrid_video_script() fills this with {on: true}; an older engine leaves it undefined).
     if (envelope) Object.assign(policy, envelope);
     // Readings of the page (the engine log prints them: hybrid video: …): the policy's decisions, the transitions, and
@@ -229,7 +246,8 @@
         if (keep) why = v.hasAttribute('wren-hw') ? 'page' : '';
         else if (!policy.on) why = v.__wrenPreview ? '' : 'off';
         else if (v.__wrenEmeActive) why = 'protected';
-        else if (policy.current()) why = 'fullscreen';
+        // A thumbnail-sized muted preview inside the player (a seek-bar preview) does not take the decoder from the main picture.
+        else if (inFullscreen(v) && !isThumb(v)) why = 'fullscreen';
         else if (v.controls && !v.muted) why = 'controls';
         // Sound only plays on the hardware plane: a software video's audio would go to PulseAudio, and webOS 5 TVs have no PulseAudio
         // server (it is silent); LG's media pipeline plays the page's audio (AAC, or decoded Opus/Vorbis as PCM) next to the hardware
@@ -569,6 +587,9 @@
         const work = [];
         for (const v of allVideos()) {
             if (!v.isConnected || v.getAttribute('wren-policy') === 'page' || !policy.on) continue;
+            // Only the fullscreen element's own videos change with the transition (and, on the way out, those that were hardware only for it):
+            // a preview elsewhere on the page is not reloaded onto the single decoder beside the main video.
+            if (v.getAttribute('wren-policy') !== 'fullscreen' && !inFullscreen(v)) continue;
             // An MSE stream (blob: source) cannot be reloaded: load() detaches its MediaSource and the site's player breaks.
             // It keeps the player it started with; the new decision applies on its next natural load.
             if (String(v.currentSrc || v.src || '').startsWith('blob:')) { log({ reload: false, reason: 'mse' }); continue; }
