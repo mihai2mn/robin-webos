@@ -118,8 +118,24 @@ do_backend() {
 # of the shared tree (cp -a keeps mtimes, so ninja stays incremental; bind-mounted at the SAME path in the container, so the absolute
 # paths in build.ninja stay valid and the shared tree is never touched); (3) every source file that differs from the pristine tree is
 # overwritten in the copy; (4) ninja in the copy (ccache is in the container's environment as in wk254.sh); (5) the copy must then differ
-# from the pristine tree in 0 files, or this phase fails. Stage takes libWPEWebKit, the helpers and the injected bundle from the copy.
+# from the pristine tree in 0 files (and miss none), or this phase fails (wk_diff). Stage takes libWPEWebKit, the helpers and the injected bundle from the copy.
 # Disk: the copy is ~6 GB (removed with `webkit32 clean`).
+# wk_diff <pristine> <copy>: the source files of <pristine> that differ in <copy> or are missing there, one relative path per line.
+# (A file only in the copy is build output or a file a patch deleted: not listed.) diff's own failure (exit 2, e.g. an unreadable
+# file) is an error here: it is never read as "0 differing".
+wk_diff() {
+    local pr=$1 c=$2 out rc=0 line d n
+    out=$(LC_ALL=C diff -rq "$pr" "$c" 2>"$WORK/wk-diff.err") || rc=$?
+    [ "$rc" -le 1 ] || { echo "diff exit $rc: $(head -3 "$WORK/wk-diff.err")" >&2; return 2; }
+    out=$(printf '%s\n' "$out" | grep -a -e '^Files ' -e "^Only in $pr" || true)
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            "Files $pr/"*" and $c/"*" differ") line=${line#"Files $pr/"}; echo "${line%% and $c/*}" ;;
+            "Only in $pr"*": "*) line=${line#"Only in "}; d=${line%%: *}; n=${line#*: }; d=${d#"$pr"}; d=${d#/}; echo "${d:+$d/}$n" ;;
+        esac
+    done <<<"$out"
+}
 do_webkit32() {
     local tb=$BR/dl/wpewebkit/wpewebkit-2.54.3.tar.xz pr=$WORK/wk-pristine
     [ "${1:-}" = clean ] && { rm -rf "$WK_TREE" "$pr"; return; }
@@ -138,9 +154,9 @@ do_webkit32() {
         ( exec 9>"$BR/.wk254.lock"; flock 9; cp -a "$WK_SHARED" "$WK_TREE" )
     fi
     say "comparing the copy with the pristine sources"
-    ( cd "$pr" && diff -rq . "$WK_TREE" 2>/dev/null | grep -E '^Files .* differ$' | sed -E 's/^Files \.\/(.*) and .* differ$/\1/' ) > "$WORK/wk-differing.txt" || true
+    wk_diff "$pr" "$WK_TREE" > "$WORK/wk-differing.txt" || { echo "the comparison of the copy with the pristine sources failed" >&2; exit 1; }
     echo "   $(wc -l < "$WORK/wk-differing.txt") differing source files"; sed 's/^/     /' "$WORK/wk-differing.txt" | head -20
-    while read -r f; do cp "$pr/$f" "$WK_TREE/$f"; done < "$WORK/wk-differing.txt"
+    while read -r f; do mkdir -p "$(dirname "$WK_TREE/$f")"; cp -a "$pr/$f" "$WK_TREE/$f"; done < "$WORK/wk-differing.txt"
     # Cortex-A55 code generation is the default (measured: JS -12%, nothing slower; tools/a55-probe ran every flag set on the TV).
     # WK_CPU="" builds for the toolchain's Cortex-A9 default again. Re-configuring the cache changes every compile line: a full rebuild.
     local cpu=${WK_CPU-"-march=armv8-a+crc -mfpu=neon-fp-armv8 -mtune=cortex-a55"} fl
@@ -155,7 +171,13 @@ do_webkit32() {
         bash -c 'cd /build/br-out/build/wpewebkit-2.54.3 && export PATH=/build/br-out/host/bin:$PATH && if [ -n "$FULL" ]; then ninja -t clean >/dev/null; fi && ninja -j${JOBS_WK:-24}' > "$WORK/webkit32-ninja.log" 2>&1 \
         || { tail -25 "$WORK/webkit32-ninja.log"; exit 1; }
     tail -1 "$WORK/webkit32-ninja.log" | cut -c1-120
-    ( cd "$pr" && diff -rq . "$WK_TREE" 2>/dev/null | grep -cE '^Files .* differ$' || true ) | sed 's/^/   differing files after the sync: /'
+    # The promised check: after the sync the copy must have no source file that differs from, or is missing against, the pristine tree.
+    wk_diff "$pr" "$WK_TREE" > "$WORK/wk-differing-after.txt" || { echo "the final comparison of the copy with the pristine sources failed" >&2; exit 1; }
+    if [ -s "$WORK/wk-differing-after.txt" ]; then
+        echo "FAIL: $(wc -l < "$WORK/wk-differing-after.txt") source files of the build copy still differ from pristine 2.54.3 + the series:" >&2
+        head -20 "$WORK/wk-differing-after.txt" | sed 's/^/     /' >&2; exit 1
+    fi
+    echo "   differing files after the sync: 0"
     rm -rf "$pr"
 }
 
