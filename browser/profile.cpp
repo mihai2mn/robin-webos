@@ -299,6 +299,11 @@ size_t Profile::clear_history(uint32_t seconds) {
 }
 
 void Profile::set_session(std::vector<SessionTab> tabs, size_t active) {
+    // Called after every chrome refresh: a session that did not change is not written again (an fsync every 2 s for nothing).
+    if (active == session_active_ && tabs.size() == session_.size() &&
+        std::equal(tabs.begin(), tabs.end(), session_.begin(),
+                   [](const SessionTab &a, const SessionTab &b) { return a.title == b.title && a.url == b.url; }))
+        return;
     session_ = std::move(tabs);
     session_active_ = active;
     dirty_ |= kSession;

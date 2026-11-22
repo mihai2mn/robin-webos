@@ -125,6 +125,27 @@ int main() {
               "right types are read and clamped");
     }
 
+    // 5. An unchanged session is not written again; a changed one is.
+    {
+        browser::Profile p;
+        p.load(dir + "/session");
+        p.set_session({{"A", "https://a.example/"}, {"B", "https://b.example/"}}, 1);
+        p.flush_now();
+        const std::string file = dir + "/session/session.json";
+        check(fs::exists(file), "a new session is written");
+        fs::remove(file);
+        p.set_session({{"A", "https://a.example/"}, {"B", "https://b.example/"}}, 1);
+        p.flush_now();
+        check(!fs::exists(file), "the same session again is not written");
+        p.set_session({{"A", "https://a.example/"}, {"B", "https://b.example/"}}, 0);
+        p.flush_now();
+        check(fs::exists(file), "another active tab is written");
+        fs::remove(file);
+        p.set_session({{"A", "https://a.example/"}, {"B2", "https://b.example/"}}, 0);
+        p.flush_now();
+        check(fs::exists(file), "another title is written");
+    }
+
     std::error_code ec;
     fs::remove_all(dir, ec);
     return failures == 0 ? 0 : 1;
