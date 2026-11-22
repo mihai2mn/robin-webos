@@ -277,7 +277,11 @@ class App : public wnk::app::Delegate {
         if (id == active_ && tabs_.size() > 1) {
             TabId next = then != 0 && then != id && tab(then) != nullptr ? then : 0;
             if (next == 0) next = tabs_[index + 1 < tabs_.size() ? index + 1 : index - 1].id;
+            // The tab being closed still has its view while the next is shown, but it is leaving: it must not count against
+            // the live-tab limit, nor be the one discarded to make room.
+            closing_tab_ = id;
             activate(next);
+            closing_tab_ = 0;
         }
         release_video_of(id, "tab closed");
         if (live) engine_.tab_close(id);
@@ -490,6 +494,12 @@ class App : public wnk::app::Delegate {
         close_overlays();
         std::vector<TabId> ids;
         for (const Tab &t : tabs_) ids.push_back(t.id);
+        // The New Tab page is made and shown first: closing the old tabs then never has to show (load, or discard another
+        // for) a neighbour that is closed a moment later.
+        Tab fresh;
+        fresh.id = next_id_++;
+        tabs_.push_back(fresh);
+        activate(fresh.id);
         for (TabId id : ids) close_tab(id);
     }
 
@@ -1241,7 +1251,7 @@ class App : public wnk::app::Delegate {
     bool discard_background_tab(TabId except, const char *why) {
         Tab *victim = nullptr;
         for (Tab &x : tabs_) {
-            if (x.live && x.id != except && x.id != active_ && (victim == nullptr || x.last_shown_ms < victim->last_shown_ms))
+            if (x.live && x.id != except && x.id != active_ && x.id != closing_tab_ && (victim == nullptr || x.last_shown_ms < victim->last_shown_ms))
                 victim = &x;
         }
         if (victim == nullptr) return false;
@@ -1272,7 +1282,8 @@ class App : public wnk::app::Delegate {
 
     void open_in_engine(Tab &t, const std::string &url) {
         // Discard the least recently shown background tabs first (they keep URL and title).
-        size_t live = static_cast<size_t>(std::count_if(tabs_.begin(), tabs_.end(), [](const Tab &x) { return x.live; }));
+        size_t live = static_cast<size_t>(
+            std::count_if(tabs_.begin(), tabs_.end(), [&](const Tab &x) { return x.live && x.id != closing_tab_; }));
         while (live >= kMaxLiveTabs && discard_background_tab(t.id, "too many open pages")) --live;
         engine_.tab_open(t.id, url);
         t.live = true;
@@ -1657,6 +1668,7 @@ class App : public wnk::app::Delegate {
     bool focused_once_ = false;
     int32_t last_x_ = 0, last_y_ = 0;
     int restarts_ = 0;
+    TabId closing_tab_ = 0;  // close_tab: the tab being closed while its neighbour is shown (not counted, not discarded)
     double engine_started_ms_ = 0;  // when start_engine last ran
     static constexpr double kCrashLoopMs = 20000;
     double crash_at_ms_ = -1e9;  // the last web-process crash
