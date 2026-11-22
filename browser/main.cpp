@@ -357,7 +357,7 @@ class App : public wnk::app::Delegate {
             engine_.reload(t->id);
     }
     // A tab whose web process died: load its page again in a new one, unless it died again within
-    // kCrashLoopMs of the last automatic reload (then the user decides, with Green).
+    // kCrashLoopMs of the last automatic reload (then the user decides, with Hold OK → Reload).
     void reload_crashed(Tab &t) {
         t.crashed = false;
         WNK_LOGI(kCat, "tab %u: reloading after its web process crashed", t.id);
@@ -1407,7 +1407,7 @@ class App : public wnk::app::Delegate {
             t->crashed = !looping;
             const bool memory = code == 1;  // WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT: the engine's memory guard or WebKit's kill threshold
             if (looping) {
-                if (id == active_) ctx_->ui().toast("This page stopped again (" + msg + "). Press Green to reload.", 6000);
+                if (id == active_) ctx_->ui().toast("This page stopped again (" + msg + "). Hold OK and choose Reload.", 6000);
             } else if (id == active_) {
                 if (memory) ctx_->ui().toast("This page used too much memory and was reloaded.", 6000);
                 reload_crashed(*t);
