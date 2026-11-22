@@ -125,11 +125,15 @@ class EngineClient {
     void send_text(uint32_t type, TabId tab, const std::string &text);
     void handle(const uint8_t *buf, size_t n, int fd);
     void lost(const std::string &why);
+    void stalled(uint32_t type);
     void unmap();
+    // How long send() waits for room in the socket before the engine counts as stuck (it is killed and reported lost).
+    static constexpr uint64_t kSendDeadlineMs = 500;
 
     EngineCallbacks cb_;
     int sock_ = -1;
     pid_t pid_ = -1;
+    std::string stall_why_;  // send() gave up on a stuck engine: poll() reports it lost with this reason
     uint8_t *frames_ = nullptr;
     size_t frames_size_ = 0;
     uint32_t slot_bytes_ = 0;

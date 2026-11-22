@@ -8,6 +8,7 @@
 #include "media_server.hpp"
 
 #include "fake_media.hpp"
+#include "lg_event_tokens.hpp"
 #include "wnk/log.hpp"
 #include "wpe_media_ipc.h"
 
@@ -82,6 +83,11 @@ bool LgMediaPlayer::load(const std::string &, const std::string &window_id, Code
         return false;
     }
     api_ = reinterpret_cast<StarfishMediaAPIs *>(this);  // never dereferenced here
+    event_token_ = lg_event_tokens().issue(this);       // as the real load: each Load's events carry its own token
+    {
+        std::lock_guard<std::mutex> l(fake::state().mu);
+        fake::state().lg_tokens.push_back(event_token_);
+    }
     playing_ = paused_ = false;
     seek_pending_ = true;
     has_audio_ = audio != nullptr;
@@ -114,6 +120,8 @@ void LgMediaPlayer::pause(bool paused) {
 }
 void LgMediaPlayer::unload() {
     if (api_ == nullptr) return;
+    lg_event_tokens().retire(event_token_);
+    event_token_ = nullptr;
     api_ = nullptr;
     fake::state().add({"lg.unload"});
 }
@@ -395,6 +403,55 @@ static void test_pause_during_held_load() {  // finding 7
     check(paused_after_load(0), "f7: a pause sent while the Load was held applies once it loads");
 }
 
+// An event from the pipeline of the n-th LG load (0-based), as LG delivers it: through the callback with that Load's data.
+// MEDIA_TEST_OLD_EVENT_ROUTING=1 delivers it the way it was before the tokens (the data was the player itself), for comparison.
+static void lg_event_of_load(size_t n, int type, int64_t num) {
+    void *token = nullptr;
+    {
+        std::lock_guard<std::mutex> l(fake::state().mu);
+        if (n < fake::state().lg_tokens.size()) token = fake::state().lg_tokens[n];
+    }
+    if (std::getenv("MEDIA_TEST_OLD_EVENT_ROUTING")) {
+        fake::state().lg.load()->on_event(type, num, "");
+        return;
+    }
+    browser::lg_event_tokens().dispatch(token, [&](browser::LgMediaPlayer *p) { p->on_event(type, num, ""); });
+}
+
+// Stream A plays on LG's pipeline, stream B's Load takes the decoder (A's pipeline is unloaded, B's loaded on the same player).
+static void two_loads(Server &s, Client &a, Client &b) {
+    (void)s;
+    a.load("wA");
+    a.audio_none();
+    for (uint64_t i = 0; i < 5; ++i) a.unit(i);
+    wait_until([] { return accepted_after_load(0).size() >= 5; }, 2000ms);
+    b.load("wB");
+    b.audio_none();
+    wait_until([] { return count("lg.load", "wB") == 1; }, 2000ms);
+}
+
+static void test_late_error_of_unloaded_pipeline() {  // finding 4
+    Server s("lateerror");
+    Client a(s.path), b(s.path);
+    two_loads(s, a, b);
+    lg_event_of_load(0, 1, 100);  // A's pipeline reports an error while it is taken down
+    for (uint64_t i = 0; i < 5; ++i) b.unit(i);
+    std::this_thread::sleep_for(1200ms);  // a retry would have run by now (poll 100 ms + 500 ms delay)
+    check(!fake_log::contains("stream 2: LG pipeline error") && lg_loads_ok() == 2,
+          "f4: an error of the unloaded pipeline does not make the next load retry (" + std::to_string(lg_loads_ok()) + " LG loads)");
+}
+
+static void test_late_frames_of_unloaded_pipeline() {  // finding 4
+    Server s("lateframes");
+    Client a(s.path), b(s.path);
+    two_loads(s, a, b);
+    lg_event_of_load(0, 2, 50);   // A's pipeline's last frame counts
+    lg_event_of_load(1, 1, 100);  // B's own pipeline fails before its first picture
+    for (uint64_t i = 0; i < 5; ++i) b.unit(i);
+    const bool retried = wait_until([] { return fake_log::contains("stream 2: LG pipeline error 100 before its first picture"); }, 2000ms);
+    check(retried, "f4: frames the unloaded pipeline presented do not count for the next load (its early error is retried)");
+}
+
 static void test_area_after_release() {  // finding 10
     Server s("arearelease");
     Client a(s.path);
@@ -445,7 +502,8 @@ int main(int argc, char **argv) {
         {"loadfail", test_first_load_fails_closes}, {"seekreplay", test_retry_after_seek_replays_since_seek},
         {"replayall", test_retry_replays_everything_in_order}, {"pauseretry", test_pause_across_retry},
         {"pauseheld", test_pause_during_held_load}, {"arearelease", test_area_after_release},
-        {"areaother", test_area_of_other_stream},
+        {"areaother", test_area_of_other_stream},   {"lateerror", test_late_error_of_unloaded_pipeline},
+        {"lateframes", test_late_frames_of_unloaded_pipeline},
     };
     for (const auto &[name, fn] : tests)
         if (only.empty() || only == name) fn();
