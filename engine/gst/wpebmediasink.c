@@ -461,8 +461,8 @@ static void area_flush_pending_locked(WpebVideoSink *self, gboolean nonblock)
  * 2026-11-22). So when the window of a paused video changes size, LG alone (not WebKit: the page sees no play/pause event and its
  * currentTime does not move) plays for WPEB_NUDGE_MS with the audio muted, then pauses again. One nudge per burst of size changes
  * (placements during a fullscreen transition come several frames in a row): it starts WPEB_NUDGE_SETTLE_MS after the last one.
- * LG's own position then leads WebKit's by about WPEB_NUDGE_MS (nothing tells LG to go back; see REPORT). Off with
- * WPE_BROWSER_DEBUG_NO_PAUSED_NUDGE=1. Any thread (area_painted, change_state); the timers run on the main loop. */
+ * LG's own position then leads WebKit's by about WPEB_NUDGE_MS (known limit: nothing tells LG to go back). DEFAULT OFF: on
+ * only with WPE_BROWSER_DEBUG_PAUSED_NUDGE=1 (WPE_BROWSER_DEBUG_NO_PAUSED_NUDGE=1 still wins): in the TV test it did not fire. Any thread (area_painted, change_state); the timers run on the main loop. */
 #define WPEB_NUDGE_SETTLE_MS 200
 static guint nudge_ms(void)
 {
@@ -481,6 +481,7 @@ static gboolean nudge_eligible(WpebVideoSink *self)
 }
 
 static void send_ctl_raw(WpebVideoSink *self, uint32_t type, const void *data, uint32_t size);
+static gboolean nudge_enabled(void);
 
 static void nudge_restore_volume(WpebVideoSink *self)
 {
@@ -520,7 +521,7 @@ static gboolean nudge_settle_cb(gpointer data)
         return G_SOURCE_REMOVE;
     }
     g_atomic_int_set(&self->nudge_armed, 0);
-    if (nudge_eligible(self) && !g_getenv("WPE_BROWSER_DEBUG_NO_PAUSED_NUDGE") &&
+    if (nudge_eligible(self) && nudge_enabled() &&
         g_atomic_int_compare_and_exchange(&self->nudging, 0, 1)) {
         const WpebMediaVolume mute = {0, 1};
         const uint32_t play = 0;
@@ -536,9 +537,16 @@ static gboolean nudge_settle_cb(gpointer data)
 }
 
 /* A placement of this paused video changed the window's size. Any thread. */
+static gboolean nudge_enabled(void)
+{
+    /* Off unless asked for: on the TV it did not fire (2026-11-22), and LG's position leads by the nudge length afterwards. */
+    const char *on = g_getenv("WPE_BROWSER_DEBUG_PAUSED_NUDGE");
+    return on && !strcmp(on, "1") && !g_getenv("WPE_BROWSER_DEBUG_NO_PAUSED_NUDGE");
+}
+
 static void nudge_schedule(WpebVideoSink *self)
 {
-    if (g_getenv("WPE_BROWSER_DEBUG_NO_PAUSED_NUDGE") || g_atomic_int_get(&self->nudging) || !nudge_eligible(self))
+    if (!nudge_enabled() || g_atomic_int_get(&self->nudging) || !nudge_eligible(self))
         return;
     g_mutex_lock(&self->lock);
     self->nudge_changed_us = g_get_monotonic_time();
