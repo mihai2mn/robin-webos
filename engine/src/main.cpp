@@ -894,9 +894,13 @@ std::string media_limit_script()
         if (!strcmp(v, "off"))
             return {};
         char *end = nullptr;
-        if (uint64_t p = strtoull(v, &end, 10)) pixels = p;
+        const uint64_t p = strtoull(v, &end, 10);
+        if (p) pixels = p;
         if (end && *end == '@') fps = strtoull(end + 1, &end, 10);
-        vp9 = strstr(v, "+vp9") != nullptr;
+        // "+vp9" belongs to a given limit ("PIXELS@FPS+vp9": a lower limit allows VP9 only when asked to); a value that only
+        // carries other flags ("+nocap264") leaves the default alone.
+        if (p || strstr(v, "+vp9"))
+            vp9 = strstr(v, "+vp9") != nullptr;
         log_msg("media limit: %" PRIu64 " pixels, %" PRIu64 " fps%s", pixels, fps, vp9 ? ", VP9 allowed" : "");
     }
     const char *dm = getenv("WPE_BROWSER_DEBUG_MEDIA");
