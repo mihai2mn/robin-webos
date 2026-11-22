@@ -73,6 +73,7 @@ struct Tab {
     uint32_t opener = 0;
     int64_t born_us = 0;
     bool pop_under_candidate = false;
+    bool script_opened = false;               // not opened by a link click: its first addresses can still make it a pop-under candidate
     bool memory_kill = false;                 // the memory guard is ending this tab's web process (reported as "used too much memory")
     // The page-side (emulated) fullscreen messages (on_emulated_fullscreen): the last state sent to the UI (-1 none), the state
     // the page last asked for, when the UI was last told, and the timer that tells it a changed state after kFsMinGapUs.
@@ -1347,7 +1348,8 @@ WebKitWebView *on_create(WebKitWebView *view, WebKitNavigationAction *action, gp
         return nullptr;
     tab->opener = opener;
     tab->born_us = g_get_monotonic_time();
-    tab->pop_under_candidate = webkit_navigation_action_get_navigation_type(action) != WEBKIT_NAVIGATION_TYPE_LINK_CLICKED
+    tab->script_opened = webkit_navigation_action_get_navigation_type(action) != WEBKIT_NAVIGATION_TYPE_LINK_CLICKED;
+    tab->pop_under_candidate = tab->script_opened
         && ubo_popup_third_party(view, webkit_uri_request_get_uri(webkit_navigation_action_get_request(action)));
     WpeTabCreated c { opener };
     send_msg(WPE_ENGINE_TAB_CREATED, id, &c, sizeof(c));
@@ -2158,6 +2160,12 @@ bool popup_navigation_blocked(WebKitWebView *view, const char *uri)
     const std::string opener_uri = o ? o : "";
     if (!popups_guarded(opener_uri))
         return false;
+    // window.open('') and then w.location = <ad>: the address was not known when the window was created, so it is judged
+    // here, on the window's own navigations in its first seconds (the same window popup_opener_moves watches).
+    if (from && tab->script_opened && !tab->pop_under_candidate && g_get_monotonic_time() - tab->born_us < 3000000 && ubo_popup_third_party(from->web_view, uri)) {
+        tab->pop_under_candidate = true;
+        log_msg("tab %u: opened by script, now going to another site: a pop-under candidate", tab->id);
+    }
     const char *which = nullptr;
     if (!ubo.popups.blocks(uri, opener_uri, &which))
         return false;
