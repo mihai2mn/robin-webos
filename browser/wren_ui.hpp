@@ -169,8 +169,9 @@ class HomePage : public wnk::ui::View {
     HomePage(HomeData data, TabHandlers tabs, std::function<void(wnk::ui::Ui &, const std::string &)> open,
              wnk::ui::ClickHandler menu);
     Omnibox &search() { return *search_; }
-    void set_tabs(const std::vector<TabInfo> &tabs, uint32_t active);
-    void set_recents(std::vector<HomeData::Item> recents);
+    // With `ui`, focus that was on a rebuilt chip / card stays at the same place (see refresh_chrome).
+    void set_tabs(wnk::ui::Ui &ui, const std::vector<TabInfo> &tabs, uint32_t active);
+    void set_recents(std::vector<HomeData::Item> recents, wnk::ui::Ui *ui = nullptr);
     void refresh_hints();
     void show_hints(bool on);
 

@@ -1261,18 +1261,13 @@ class App : public wnk::app::Delegate {
     void refresh_chrome() {
         const std::vector<browser::TabInfo> infos = tab_infos();
         auto &ui = ctx_->ui();
-        const bool row_focused = ui.focused() != nullptr && screen_->tabrow_->is_ancestor_of(ui.focused());
+        // Each rebuild keeps focus where it was (same tab, same card): this runs for events of every tab, background ones
+        // included, and must not move what the person is pointing at.
         screen_->tabrow_->rebuild(ui, infos, active_);
-        if (row_focused) {
-            if (auto *chip = screen_->tabrow_->chip(active_)) ui.focus(chip);
-        }
-        const bool home_focused = ui.focused() != nullptr && screen_->home_->is_ancestor_of(ui.focused()) &&
-                                  ui.focused() != &screen_->home_->search().field();
-        screen_->home_->set_tabs(infos, active_);
+        screen_->home_->set_tabs(ui, infos, active_);
         const Tab *t = tab(active_);
         const bool page = t != nullptr && !t->url.empty();
-        if (!page) screen_->home_->set_recents(recents());
-        if (home_focused && !page) ui.focus(&screen_->home_->search().field());
+        if (!page) screen_->home_->set_recents(recents(), &ui);
         screen_->home_->set_visible(!page);
         screen_->page_->set_visible(page);
         screen_->back_->set_active(t != nullptr && t->can_back);

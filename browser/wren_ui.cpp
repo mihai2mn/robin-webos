@@ -646,7 +646,22 @@ TabRow::TabRow(TabHandlers h) : Row(12), h_(std::move(h)) {
     set_height(wnk::ui::Dim::fixed(66));
 }
 
-void TabRow::rebuild(Ui &, const std::vector<TabInfo> &tabs, uint32_t active) {
+void TabRow::rebuild(Ui &ui, const std::vector<TabInfo> &tabs, uint32_t active) {
+    // Focus inside the row survives the rebuild where it was: on the same tab's chip, or on the same button (counted from
+    // the right end, the chips come and go). Only when that chip is gone does it fall to the active tab's.
+    bool had_focus = false;
+    uint32_t focus_tab = 0;
+    size_t from_end = 0;
+    if (View *f = ui.focused(); f != nullptr && is_ancestor_of(f)) {
+        had_focus = true;
+        if (auto *c = dynamic_cast<TabChip *>(f)) {
+            focus_tab = c->tab_id();
+        } else {
+            const auto &ch = children();
+            for (size_t i = 0; i < ch.size(); ++i)
+                if (ch[i].get() == f) from_end = ch.size() - i;
+        }
+    }
     clear_children();
     const float available = 1800 - 30 - (66 + 12) - (240 + 12) - 12;
     const float w = std::clamp(available / static_cast<float>(std::max<size_t>(tabs.size(), 1)) - 12, 150.0f, 390.0f);
@@ -654,6 +669,11 @@ void TabRow::rebuild(Ui &, const std::vector<TabInfo> &tabs, uint32_t active) {
     add<GlassButton>("add", "", [this](Ui &) { h_.new_tab(); }, 66).accessible_label = "New tab";
     add<wnk::ui::View>().set_width(wnk::ui::Dim::fill());
     add<GlassButton>("tabs", "All tabs", [this](Ui &) { h_.show_all(); }, 66);
+    if (!had_focus) return;
+    View *target = focus_tab != 0 ? chip(focus_tab) : nullptr;
+    if (target == nullptr && from_end != 0 && from_end <= children().size()) target = children()[children().size() - from_end].get();
+    if (target == nullptr) target = chip(active);
+    if (target != nullptr) ui.focus(target);
 }
 
 TabChip *TabRow::chip(uint32_t id) {
@@ -735,18 +755,42 @@ HomePage::HomePage(HomeData data, TabHandlers tabs, std::function<void(Ui &, con
     refresh_hints();
 }
 
-void HomePage::set_tabs(const std::vector<TabInfo> &tabs, uint32_t active) {
+void HomePage::set_tabs(Ui &ui, const std::vector<TabInfo> &tabs, uint32_t active) {
+    // A focused chip stays focused (the same tab's), as in TabRow::rebuild.
+    View *f = ui.focused();
+    const bool had_focus = f != nullptr && tabs_->is_ancestor_of(f);
+    uint32_t focus_tab = 0;
+    if (auto *c = dynamic_cast<TabChip *>(f); c != nullptr && had_focus) focus_tab = c->tab_id();
     tabs_->clear_children();
-    for (const TabInfo &t : tabs) tabs_->add<TabChip>(t, t.id == active, true, tabs_h_.activate);
+    TabChip *same = nullptr, *current = nullptr;
+    for (const TabInfo &t : tabs) {
+        auto &c = tabs_->add<TabChip>(t, t.id == active, true, tabs_h_.activate);
+        if (t.id == focus_tab) same = &c;
+        if (t.id == active) current = &c;
+    }
     invalidate();
+    if (had_focus && (same != nullptr || current != nullptr)) ui.focus(same != nullptr ? same : current);
 }
 
-void HomePage::set_recents(std::vector<HomeData::Item> recents) {
+void HomePage::set_recents(std::vector<HomeData::Item> recents, Ui *ui) {
+    // Focus on a recent card stays on the card at that place; with none left it goes to the search field.
+    View *f = ui != nullptr ? ui->focused() : nullptr;
+    const bool had_focus = f != nullptr && recents_->is_ancestor_of(f);
+    size_t focus_index = 0;
+    if (had_focus) {
+        const auto &ch = recents_->children();
+        for (size_t i = 0; i < ch.size(); ++i)
+            if (ch[i].get() == f) focus_index = i;
+    }
     recents_->clear_children();
     if (recents.size() > 4) recents.resize(4);
     for (auto &r : recents) recents_->add<RecentCard>(r, open_);
     recent_label_->set_visible(!recents.empty());
     invalidate();
+    if (!had_focus) return;
+    const auto &ch = recents_->children();
+    if (ch.empty()) ui->focus(&search_->field());
+    else ui->focus(ch[std::min(focus_index, ch.size() - 1)].get());
 }
 
 void HomePage::refresh_hints() {
