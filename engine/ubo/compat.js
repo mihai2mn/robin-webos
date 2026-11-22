@@ -170,6 +170,8 @@
     // that decides the decoders too), so the element is reloaded at its own media time right after the transition
     // into or out of fullscreen (the reporter says so, see the fullscreen wrapper below). Pages that mark a video
     // themselves win: wren-software (in the page) or wren-hw (on the hardware plane).
+    // Set by the fullscreen emulation below: told when a video's decision is made, so one that becomes hardware while a container is fullscreen is filled.
+    let onDecided = null;
     const policy = window.__wrenVideoPolicy = {
         // CSS pixels, both dimensions: at the TV's devicePixelRatio (2) this is half the screen's width and height.
         box: 960 * 540,
@@ -266,6 +268,7 @@
         }
         v.__wrenPreview = false; // the floor's input has been used; the decision owns the attribute from here
         report(v, why ? 'hardware:' + why : 'software');
+        if (onDecided) try { onDecided(v); } catch (e) {}
     };
     window.__wrenVideoPolicy.decide = decide;
     // Every <video> of the document, through shadow roots (the fullscreen emulation below widens it).
@@ -383,21 +386,35 @@
         // A video inside the fullscreen container fills the screen but keeps the page's own stacking: the player's controls are its siblings
         // (or cousins), drawn by the page above it, and a video on top of them would punch its hole through them.
         const FILL_IN = FILL.filter(([k]) => k !== 'z-index');
-        const fillVideo = (v, el) => { strip(v, el); put(v, FILL_IN); };
+        const fillVideo = (v, el) => {
+            const wasStatic = getComputedStyle(v).position === 'static';
+            strip(v, el);
+            put(v, FILL_IN);
+            // A page video that was not positioned has the player's positioned controls above it whatever their DOM order. Fixed, it would
+            // be above them (z-index auto, later in the tree or not): the lowest stacking inside the container (a stacking context by our own
+            // styles; its black background stays behind) puts it back below them. The wrappers between, whose backgrounds would now paint over
+            // the hole, go transparent (a full-screen picture hides them anyway).
+            if (wasStatic && getComputedStyle(v).zIndex === 'auto') {
+                put(v, [['z-index', '-1']]);
+                for (let a = flatParent(v); a && a !== el; a = flatParent(a)) put(a, [['background-color', 'transparent'], ['background-image', 'none']]);
+            }
+        };
+        // A video that is on the hardware plane and is the player's picture: not hidden, not empty, not a thumbnail by the page's own styles.
+        const mainPicture = v => {
+            if (!v.isConnected || saved.has(v) || v.__wrenPolicy !== 'hw' || getComputedStyle(v).display === 'none') return false;
+            const r = v.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && !(r.width <= 320 && r.height <= 180);
+        };
         const isFrame = n => n.tagName === 'IFRAME' || n.tagName === 'FRAME';
         // While a container is fullscreen: a video the page puts into it (a player re-mounting its element, a new source element) is made
         // to fill the screen like the ones that were there at enter().
         let watch = null;
         const fillNew = el => {
             if (el instanceof HTMLVideoElement || isFrame(el)) return;
-            for (const v of videosIn(el)) {
-                if (!v.isConnected || saved.has(v) || v.__wrenPolicy === 'sw') continue;
-                // Only the player's main picture: a thumbnail/preview element (hidden, or small by the page's own styles) stays as the page made it.
-                const r = v.getBoundingClientRect();
-                if (getComputedStyle(v).display === 'none' || r.width * r.height < 0.25 * innerWidth * innerHeight) continue;
-                fillVideo(v, el);
-            }
+            for (const v of videosIn(el)) if (mainPicture(v)) fillVideo(v, el);
         };
+        // A video decided while a container is fullscreen (a new element, or one promoted to the hardware plane by the transition itself).
+        onDecided = v => { if (emu.el && !(emu.el instanceof HTMLVideoElement) && !isFrame(emu.el) && mainPicture(v) && videosIn(emu.el).includes(v)) fillVideo(v, emu.el); };
         const enter = el => {
             const swap = !!emu.el;               // another element asks while one is fullscreen: switch, one change event, no exit
             if (swap) { restoreStyles(); emu.el = null; }
