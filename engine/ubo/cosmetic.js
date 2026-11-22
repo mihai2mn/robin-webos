@@ -21,24 +21,31 @@
     // One style element for everything we hide, kept in the document if a page script removes it.
     const style = document.createElement('style');
     style.setAttribute('data-wren', '');
-    let sheet = data.css || '';
+    const sheet = data.css || '';
+    // New rules go into a style element of their own: reassigning the text of one ever-growing sheet re-parses all of it and restyles the
+    // whole page for every batch.
+    const styles = [style];
     const placeStyle = () => {
         const parent = document.head || document.documentElement;
         if (!parent) return false;
-        if (style.parentNode !== parent) parent.appendChild(style);
+        for (const s of styles) if (s.parentNode !== parent) parent.appendChild(s);
         if (style.textContent !== sheet) style.textContent = sheet;
         return true;
     };
     const addRules = css => {
         if (!css) return;
-        sheet += css;
+        const s = document.createElement('style');
+        s.setAttribute('data-wren', '');
+        s.textContent = css;
+        styles.push(s);
         placeStyle();
     };
 
     // Generic hiding: ask for the rules of classes and ids not seen yet in this document.
     const seenClasses = new Set(), seenIds = new Set();
     let pendingClasses = [], pendingIds = [];
-    const collect = root => {
+    // deep: also the subtree (added nodes). An attribute change concerns the element itself only: a class toggled on <body> must not walk the document.
+    const collect = (root, deep = true) => {
         if (data.generichide || !root || root.nodeType !== 1) return;
         const visit = el => {
             if (el.id && !seenIds.has(el.id)) { seenIds.add(el.id); pendingIds.push(el.id); }
@@ -49,6 +56,7 @@
             }
         };
         visit(root);
+        if (!deep) return;
         const all = root.querySelectorAll('[id],[class]');
         for (let i = 0; i < all.length; i++) visit(all[i]);
     };
@@ -146,11 +154,13 @@
 
     // Work in batches: at most every 100 ms while the document changes.
     let scheduled = false;
+    // The procedural filters run again only when nodes were added or an element's class/id changed (not for every mutation of the page).
+    let needProcedural = true;
     const run = () => {
         scheduled = false;
         placeStyle();
         flushGeneric();
-        if (procedural.length) runProcedural();
+        if (procedural.length && needProcedural) { needProcedural = false; runProcedural(); }
     };
     const schedule = () => {
         if (scheduled) return;
@@ -159,10 +169,10 @@
     };
     const observer = new MutationObserver(records => {
         for (const r of records) {
-            if (r.type === 'attributes') collect(r.target);
-            else for (const n of r.addedNodes) collect(n);
+            if (r.type === 'attributes') { collect(r.target, false); if (r.target !== document.documentElement && r.target !== document.body) needProcedural = true; }
+            else if (r.addedNodes.length) { needProcedural = true; for (const n of r.addedNodes) collect(n); }
             if (r.type === 'childList' && r.removedNodes.length) {
-                for (const n of r.removedNodes) if (n === style) { schedule(); break; }
+                for (const n of r.removedNodes) if (styles.includes(n)) { schedule(); break; }
             }
         }
         schedule();
@@ -182,6 +192,6 @@
     };
     const boot = () => { if (!attach()) setTimeout(boot, 10); };
     boot();
-    addEventListener('DOMContentLoaded', () => { attach(); collect(document.documentElement); run(); }, true);
-    addEventListener('load', () => { attach(); schedule(); }, true);
+    addEventListener('DOMContentLoaded', () => { attach(); collect(document.documentElement); needProcedural = true; run(); }, true);
+    addEventListener('load', () => { attach(); needProcedural = true; schedule(); }, true);
 })();
