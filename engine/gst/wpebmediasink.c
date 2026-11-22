@@ -73,6 +73,8 @@ static struct {
     void (*place)(int sw, int sh, int x, int y, int w, int h);
     void (*place_unflushed)(int sw, int sh, int x, int y, int w, int h);
     void (*close)(void);
+    void (*place_id)(const char *id, int sw, int sh, int x, int y, int w, int h, int commit);
+    void (*close_id)(const char *id);
 } video_window;
 
 static void video_window_init(void)
@@ -86,6 +88,8 @@ static void video_window_init(void)
         video_window.place_unflushed =
             (void (*)(int, int, int, int, int, int))dlsym(lib, "wpeb_webos_video_place_unflushed");
         video_window.close = (void (*)(void))dlsym(lib, "wpeb_webos_video_close");
+        video_window.place_id = (void (*)(const char *, int, int, int, int, int, int, int))dlsym(lib, "wpeb_webos_video_place_id");
+        video_window.close_id = (void (*)(const char *))dlsym(lib, "wpeb_webos_video_close_id");
     }
     GST_INFO("page video window %s", video_window.open ? "available" : "unavailable (no webOS backend in this process)");
     g_once_init_leave(&video_window.once, 1);
@@ -95,9 +99,13 @@ static void video_window_init(void)
  * queue is dispatched on the compositing thread, so a flush from this one (the thread libwpe runs the sink on) cannot
  * dispatch it, and every painted frame of the page carries the move in its own commit: that is what makes the hole
  * and the page's pixels travel together. An app with an older backend has no entry point yet: the old place(). */
-static void video_window_place(int sw, int sh, int x, int y, int w, int h)
+static void video_window_place(const char *vid, int sw, int sh, int x, int y, int w, int h)
 {
-    if (video_window.place_unflushed)
+    /* Our own window by its id: when another tab's sink is still winding down, or this one's page is not the shown one,
+     * the shown page's window is not the one to move. */
+    if (video_window.place_id && vid && vid[0])
+        video_window.place_id(vid, sw, sh, x, y, w, h, 0);
+    else if (video_window.place_unflushed)
         video_window.place_unflushed(sw, sh, x, y, w, h);
     else if (video_window.place)
         video_window.place(sw, sh, x, y, w, h);
@@ -149,6 +157,7 @@ struct _WpebVideoSink {
     guint length_size;
     int video_width, video_height; /* the coded picture, for the window's source region */
     gboolean have_window;
+    char vid[128]; /* the window's id (WpebMediaLoad.window_id of the load that opened it) */
     GByteArray *parameter_sets; /* Annex B */
     GByteArray *scratch;
     gint64 load_time;     /* monotonic µs of the last LOAD (g_caps_lock): the audio sink must decide soon after */
@@ -533,7 +542,7 @@ static void area_painted(WpebVideoSink *self, WpebMediaArea a)
     }
     if (have_window && video_window.place) {
         const int64_t t0 = now_us();
-        video_window_place(vw, vh, a.x, a.y, a.width, a.height);
+        video_window_place(self->vid, vw, vh, a.x, a.y, a.width, a.height);
         self->place_us = now_us() - t0;
     }
     if (WPEB_AREA_DEBUG) {
@@ -701,8 +710,11 @@ static gboolean wpeb_video_sink_stop(GstBaseSink *sink)
         close(self->fd);
     g_atomic_int_set(&self->fd, -1);
     g_mutex_unlock(&self->io_lock);
-    if (self->have_window && video_window.close)
+    if (self->have_window && video_window.close_id && self->vid[0])
+        video_window.close_id(self->vid);
+    else if (self->have_window && video_window.close)
         video_window.close();
+    self->vid[0] = '\0';
     self->have_window = FALSE;
     GST_INFO_OBJECT(self, "stopped after %" G_GUINT64_FORMAT " access units", self->sent);
     return TRUE;
@@ -781,6 +793,7 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
     if (self->have_window && !load.window_id[0])
         self->have_window = FALSE;
     if (self->have_window) {
+        g_strlcpy(self->vid, load.window_id, sizeof(self->vid));
         GST_INFO_OBJECT(self, "video window %s on the page surface", load.window_id);
         /* At once, not on the next painted frame: the window is new and LG's pipeline is about to show the first
          * frame in it (this is the streaming thread: no flush here, see video_window_place). */
@@ -789,7 +802,7 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
         const WpebMediaArea a = self->painted_area_valid ? self->painted_area : self->area;
         g_mutex_unlock(&self->lock);
         if (known)
-            video_window_place(width, height, a.x, a.y, a.width, a.height); /* backend serializes with g_video_lock */
+            video_window_place(self->vid, width, height, a.x, a.y, a.width, a.height); /* backend serializes with g_video_lock */
     }
     self->load = load;
     gboolean sent = send_msg(self, WPEB_MEDIA_LOAD, 0, &load, sizeof(load));

@@ -539,6 +539,7 @@ struct target {
     struct wl_webos_surface_group *group;
     struct wl_keyboard *keyboard;
     struct wl_webos_exported *video; // the page's video window (wpeb_webos_video_open), NULL without one
+    char video_id[128]; // its window id: a sink addresses its own window by it, whichever page is shown by then
     enum wpeb_crop_mode video_crop_mode;
     int video_place_state; // 0=none, 1=window, 2=crop, 3=squash, 4=park (for transition logging)
     struct wpeb_video_plan video_last_plan;
@@ -710,6 +711,21 @@ static void target_remove_role(struct target *t)
 static pthread_mutex_t g_video_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct target *g_shown_target; // the last attached page target (g_video_lock)
 static void target_close_video(struct target *t); // g_video_lock held
+struct target;
+static struct target *g_video_targets[32]; // pages that have a video window with an id (g_video_lock)
+static void video_register(struct target *t, bool on) // g_video_lock held
+{
+    for (size_t i = 0; i < G_N_ELEMENTS(g_video_targets); ++i)
+        if (g_video_targets[i] == t)
+            g_video_targets[i] = NULL;
+    if (!on)
+        return;
+    for (size_t i = 0; i < G_N_ELEMENTS(g_video_targets); ++i)
+        if (!g_video_targets[i]) {
+            g_video_targets[i] = t;
+            return;
+        }
+}
 
 // Attaching and detaching pages of this process run on each page's own WebKit thread; one lock serialises them,
 // so taking the layer from another page (target_attach) never interleaves with that page's own detach.
@@ -1201,6 +1217,8 @@ static const struct wl_webos_exported_listener video_listener = { video_window_i
 
 static void target_close_video(struct target *t)
 {
+    t->video_id[0] = '\0';
+    video_register(t, false);
     if (t->video) {
         wl_webos_exported_destroy(t->video);
         t->video = NULL;
@@ -1229,6 +1247,7 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
     t->video_place_state = 0;
     memset(&t->video_last_plan, 0, sizeof(t->video_last_plan));
     g_video_id[0] = '\0';
+    t->video_id[0] = '\0';
     t->video = wl_webos_foreign_export_element(t->renderer->foreign, t->surface, WL_WEBOS_FOREIGN_WEBOS_EXPORTED_TYPE_VIDEO_OBJECT);
     // The event arrives on the target's queue, which WebKit's compositing thread dispatches.
     wl_proxy_set_queue((struct wl_proxy *)t->video, t->queue);
@@ -1243,6 +1262,8 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
     int ok = g_video_id[0] != '\0';
     if (ok) {
         snprintf(id, size, "%s", g_video_id);
+        snprintf(t->video_id, sizeof(t->video_id), "%s", g_video_id);
+        video_register(t, true);
         LOG("video window ready: id=%s foreign=v%u webos=%d crop_mode=%s (env=%s)",
             g_video_id, t->renderer->foreign_version, t->renderer->webos_major,
             wpeb_crop_mode_name(t->video_crop_mode), crop_env && *crop_env ? crop_env : "auto");
@@ -1257,10 +1278,26 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
 // is its bottom part, see surface_height, so page coordinates move down by the strip above it). `commit`: flush the
 // target's connection now (a caller outside the compositing thread's frame loop needs that; the media sink does not,
 // see wpeb_webos_video_place_unflushed).
-static void video_place(int sw, int sh, int x, int y, int w, int h, gboolean commit)
+// A page's window is found by its id (a sink's own window), or, without one, it is the shown page's: another tab's sink that is
+// still winding down must neither move nor close the window of the page that is shown now (TV, 2026-11-22: a tab closed after the
+// next one had opened its window left that one closed, and the plane stayed where it was).
+static struct target *video_target_by_id(const char *id) // g_video_lock held
+{
+    if (!id || !*id)
+        return g_shown_target;
+    struct target *shown = g_shown_target;
+    if (shown && !strcmp(shown->video_id, id))
+        return shown;
+    for (size_t i = 0; i < G_N_ELEMENTS(g_video_targets); ++i)
+        if (g_video_targets[i] && !strcmp(g_video_targets[i]->video_id, id))
+            return g_video_targets[i];
+    return NULL;
+}
+
+static void video_place(const char *id, int sw, int sh, int x, int y, int w, int h, gboolean commit)
 {
     pthread_mutex_lock(&g_video_lock);
-    struct target *t = g_shown_target;
+    struct target *t = video_target_by_id(id);
     if (t && t->video && w > 0 && h > 0) {
         const int surface_h = surface_height(t->width, t->height);
         // The compositor advertises wl_webos_foreign at version 1 on webOS 5.3, so the proxy version of t->video is 1 and
@@ -1309,7 +1346,7 @@ static void video_place(int sw, int sh, int x, int y, int w, int h, gboolean com
 
 __attribute__((visibility("default"))) void wpeb_webos_video_place(int sw, int sh, int x, int y, int w, int h)
 {
-    video_place(sw, sh, x, y, w, h, TRUE);
+    video_place(NULL, sw, sh, x, y, w, h, TRUE);
 }
 
 // For the media sink (engine/gst/wpebmediasink.c, same process), on every painted frame: the same hole, without the
@@ -1322,7 +1359,14 @@ __attribute__((visibility("default"))) void wpeb_webos_video_place(int sw, int s
 __attribute__((visibility("default"))) void wpeb_webos_video_place_unflushed(int sw, int sh, int x, int y, int w,
                                                                             int h)
 {
-    video_place(sw, sh, x, y, w, h, FALSE);
+    video_place(NULL, sw, sh, x, y, w, h, FALSE);
+}
+
+// The same for the sink that opened the window with this id (wpeb_webos_video_open), whichever page is shown now.
+__attribute__((visibility("default"))) void wpeb_webos_video_place_id(const char *id, int sw, int sh, int x, int y, int w,
+                                                                    int h, int commit)
+{
+    video_place(id, sw, sh, x, y, w, h, commit ? TRUE : FALSE);
 }
 
 // CLOCK_MONOTONIC of the last set_exported_window (0: none), for comparing with the media sink's own timestamps
@@ -1330,6 +1374,16 @@ __attribute__((visibility("default"))) void wpeb_webos_video_place_unflushed(int
 __attribute__((visibility("default"))) int64_t wpeb_webos_video_last_commit_us(void)
 {
     return (int64_t)g_video_commit_at.tv_sec * 1000000 + g_video_commit_at.tv_nsec / 1000;
+}
+
+// Closes the window with this id only (the window of the page that is shown now stays when another page's sink stops).
+__attribute__((visibility("default"))) void wpeb_webos_video_close_id(const char *id)
+{
+    pthread_mutex_lock(&g_video_lock);
+    struct target *t = id && *id ? video_target_by_id(id) : NULL;
+    if (t)
+        target_close_video(t);
+    pthread_mutex_unlock(&g_video_lock);
 }
 
 __attribute__((visibility("default"))) void wpeb_webos_video_close(void)
