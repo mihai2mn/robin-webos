@@ -152,8 +152,10 @@
         if (this instanceof HTMLVideoElement) {
             // Stopped by the software limit: the page's own play() gets the same answer while the limit is still exceeded.
             if (this.__wrenCap) {
-                if (held(this)) return Promise.reject(new DOMException('Too many software videos', 'NotAllowedError'));
-                unhold(this);
+                if (held(this)) {
+                    if (!userActive()) return Promise.reject(new DOMException('Too many software videos', 'NotAllowedError'));
+                    free(this); // somebody asked for it: it plays as a main video would
+                } else if (this.__wrenCap) unhold(this);
             }
             // A software preview (wren-software, WebKit patch 0010) never touches the hardware decoder: let it play.
             if (!isMain(this) && !this.hasAttribute('wren-software') && mainPlaying())
@@ -272,7 +274,21 @@
     // not software. Its stream is given back as release() does for a hidden paused preview, and play() answers NotAllowedError meanwhile.
     const given = except => allVideos().filter(x => x !== except && x.isConnected && x.__wrenPolicy === 'sw' && !x.__wrenReleased &&
         x.getAttribute('wren-policy') !== 'page').length;
-    const held = v => v.__wrenCap === 'size' || (v.__wrenCap === 'budget' && given(v) >= policy.players);
+    // A stop is for videos nobody asked for. The hold ends for good (the cap never stops this element again) when the page's play() comes with a
+    // user activation, or the element is unmuted, gets controls or goes fullscreen: it is then decided as a main video would be (the hardware plane).
+    let lastGesture = 0;
+    for (const ev of ['pointerdown', 'mousedown', 'keydown', 'touchstart', 'click']) addEventListener(ev, e => { if (e.isTrusted) lastGesture = Date.now(); }, true);
+    const userActive = () => navigator.userActivation ? navigator.userActivation.isActive : Date.now() - lastGesture < 5000;
+    const free = v => { // end the hold for good: not software, not stopped; the caller restores the stream
+        v.__wrenCap = null; v.__wrenNoCap = true; v.__wrenPolicy = 'hw'; v.setAttribute('wren-policy', 'asked');
+        if (v.hasAttribute('wren-software')) v.removeAttribute('wren-software');
+        report(v, 'hardware:asked');
+    };
+    const held = v => {
+        if (!v.__wrenCap) return false;
+        if (!v.muted || v.controls || inFullscreen(v)) { free(v); restore(v); return false; }
+        return v.__wrenCap === 'size' || given(v) >= policy.players;
+    };
     const unhold = v => { // the budget has room again (a stopped video's own play() asks)
         v.__wrenCap = null; v.__wrenPolicy = 'sw'; v.setAttribute('wren-policy', 'small');
         if (!v.hasAttribute('wren-software')) v.setAttribute('wren-software', '');
@@ -319,6 +335,7 @@
         // No layout box (not laid out, display:none, zero size: area 0) is not a big box: a hidden muted preview must not take the single
         // hardware decoder. It stays in software for now and is decided again when it first gets a box (ResizeObserver below) and at
         // loadedmetadata; only a real, big box sends it to the hardware plane.
+        else if (v.__wrenNoCap) why = 'asked'; // a stopped video somebody asked for (play() with a user activation, sound, controls): a main video from then on
         else if (first ? boxArea(v) > policy.box : v.__wrenBox > policy.box) why = 'box';
         else if (first && given(v) >= policy.players) { stopVideo(v, 'budget'); return; }
         else why = '';
@@ -723,7 +740,7 @@
         const v = e.target;
         if (!(v instanceof HTMLVideoElement) || !policy.on || !v.__wrenDecided || v.getAttribute('wren-policy') === 'page') return;
         // A software video whose stream is bigger than the limit is stopped whatever its box is (not an MSE stream: it cannot give it back).
-        if (v.__wrenPolicy === 'sw' && v.videoWidth * v.videoHeight > policy.maxPixels && !String(v.currentSrc || v.src || '').startsWith('blob:')) { stopVideo(v, 'size'); return; }
+        if (v.__wrenPolicy === 'sw' && !v.__wrenNoCap && v.videoWidth * v.videoHeight > policy.maxPixels && !String(v.currentSrc || v.src || '').startsWith('blob:')) { stopVideo(v, 'size'); return; }
         if (v.__wrenRechecked) return;
         v.__wrenRechecked = true;
         const area = boxArea(v);
