@@ -1,163 +1,167 @@
-<p align="center"><img src="docs/screenshots/robin-icon.png" width="128" alt="Robin"></p>
+<p align="center">
+  <img src="docs/screenshots/robin-icon.png" width="132" alt="Robin icon: a robin inside a capital R">
+</p>
 
-# Robin: a web browser for LG webOS TVs
+<h1 align="center">Robin</h1>
 
-Robin is a WPE WebKit browser for rooted LG webOS TVs, run from the arrows, OK and Back of the remote. It is based on
-**[Wren by sostk](https://github.com/sostk/webos-wpe-browser)** (version 0.3.3) and is an independent fork. Upstream
-Wren 0.3.3 ships WebKit 2.50.5. Robin ships 2.54.3 with a restored ARMv7 JIT, an ad blocker, a reworked hardware video
-path and a tighter memory budget. These changes are what made everyday browsing usable on the maintainer's LG CX.
-Version 1.0.0 is the first release. It was tested on that one TV.
+<p align="center">
+  A web browser for rooted LG webOS TVs, built to be driven with the remote.<br>
+  Based on <a href="https://github.com/sostk/webos-wpe-browser">Wren</a> by sostk.
+</p>
+
+<p align="center">
+  <a href="https://github.com/mihai2mn/robin-webos/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/mihai2mn/robin-webos?color=F25A10&label=release"></a>
+  <img alt="Tested on LG CX, webOS 5.3" src="https://img.shields.io/badge/tested%20on-LG%20CX%20%C2%B7%20webOS%205.3-0D223A">
+  <img alt="Engine: WPE WebKit 2.54.3" src="https://img.shields.io/badge/engine-WPE%20WebKit%202.54.3-0D223A">
+  <a href="LICENSE"><img alt="Licence: GPL-3.0-or-later" src="https://img.shields.io/badge/licence-GPL--3.0--or--later-0D223A"></a>
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#what-it-does">What it does</a> ·
+  <a href="#limits">Limits</a> ·
+  <a href="#based-on-wren">Credits</a> ·
+  <a href="docs/README.md">Documentation</a>
+</p>
+
+![Robin's home page: a search box, site shortcuts and a row of remote hints](docs/screenshots/home.jpg)
+
+## Why this exists
+
+The browser that ships on an LG CX is old, and most modern sites either break in it or crawl. Wren put a current
+WebKit on the TV. Robin continues from Wren 0.3.3 with a newer engine, an ad blocker, a reworked video path and a
+memory budget that fits the TV. On the CX it was built on, that is the difference between a browser you avoid and
+one you use: pages load, video plays through to the end, and the remote is enough to get around.
+
+Robin 1.0.0 is the first release. It was tested on one TV, an LG CX on webOS 5.3. Read the [limits](#limits) before
+you install.
+
+## What it does
 
 | | |
 |---|---|
-| ![Home page](docs/screenshots/home.jpg) **Home**: search, shortcuts, recent pages, open tabs | ![Browsing](docs/screenshots/browsing.jpg) **Browsing**: ▲ at the top of a page shows the tabs and the toolbar |
-| ![Quick actions](docs/screenshots/quick-actions.jpg) **Hold OK**: quick actions and page zoom | ![Side panel](docs/screenshots/side-panel.jpg) **Menu**: bookmarks, history, zoom, settings |
+| ![A Wikipedia article with the toolbar shown](docs/screenshots/browsing.jpg) | ![The side panel with bookmarks, history, zoom and settings](docs/screenshots/side-panel.jpg) |
+| **Browsing.** Arrows move a pointer and scroll, OK clicks, Back goes back. Press ▲ at the top of a page for tabs and the address bar. | **Side panel.** Bookmarks, history, zoom per site and settings, one key away. |
+| ![The ad blocker page with a list of filter lists and switches](docs/screenshots/adblock.jpg) | ![A video playing full screen](docs/screenshots/video.jpg) |
+| **Ad blocker.** uBlock Origin's filter lists, switchable one by one, plus a box for your own rules. | **Video.** Hardware decoding through the TV's own pipeline, full screen, with the remote's media keys. |
 
-These screenshots are from Wren 0.3.3 and show its name and icon. The layout is the same. They will be replaced.
+- **YouTube works properly.** Videos play on the hardware decoder at full quality, with full screen, seeking and
+  the remote's media keys. On the TV's built-in browser it does not.
+- **A current engine.** WPE WebKit 2.54.3. WebKit 2.54 switched the JavaScript JIT off on all 32-bit builds; Robin's
+  patches bring the ARMv7 Baseline JIT and DFG back ([how](docs/jit-armv7.md)).
+- **An ad blocker** built on Brave's adblock-rust: network rules, redirects, scriptlets, cosmetic and procedural
+  filters, pop-up rules ([details](docs/ad-blocking.md)).
+- **Hardware video** for H.264 and VP9 with AAC or PCM audio, seeking, page volume and mute, and play, pause, stop,
+  rewind and fast-forward from the remote ([details](docs/video.md)).
+- **Memory limits that hold.** The web process is capped, the back/forward page cache is off, and at most two small
+  videos are decoded in software at once.
+- **Zoom remembered per site**, bookmarks, history and tabs that come back after a restart ([usage](docs/usage.md)).
+- **An optional 64-bit engine** in the same package, for experiments. It draws in software and has no hardware video
+  ([details](docs/engine64.md)).
 
-## What you get on a CX today
+### Measured on the CX
 
-Measured on an LG CX (webOS 5.3) with Robin's development package, 2026-11-22:
+All figures are from one LG CX on webOS 5.3, November 2026.
 
-- **A full-length streaming video played to its end on default settings.** The web process peaked at 683 MB against
-  an 832 MB limit. Robin's memory limits and its default of no back/forward page cache are what make this fit.
-- **No black picture on static pages.** Black-picture starts happened in 9 of 62 launches before the fix and in 0 of
-  30 with it.
-- **An ad blocker that costs little.** On four news and reference sites, page load time changed by between +1.6 s and
-  -0.4 s, and memory rose by about 40 MB typically ([docs/ad-blocking.md](docs/ad-blocking.md)).
-- **A newer engine with the JIT back.** WPE WebKit 2.54.3 instead of 2.50.5. WebKit 2.54 turned the JIT off on all
-  32-bit builds; Robin's patch series brings the ARMv7 Baseline JIT and DFG back on the TV's 32-bit userland
-  ([docs/jit-armv7.md](docs/jit-armv7.md)). The RegExp JIT stays off.
-- **Hardware video through LG's Starfish pipeline**, with page volume and mute, seeking, and the remote's play, pause,
-  stop, rewind and fast-forward keys acting on the page's main video ([docs/video.md](docs/video.md)).
-- **Zoom remembered per site** ([docs/usage.md](docs/usage.md)).
-
-Browsing on the CX works for ordinary sites. The limits are listed under
-[Limitations](#limitations-and-known-issues). They are not small. Read them before you install.
-
-## Based on Wren
-
-The browser, its remote-first interface, the Widevine bridge, the Buildroot-based WebKit build, the split between UI
-and engine, and most of the media design are the work of **sostk** and the upstream contributors. Without Wren,
-Robin would not exist. Robin keeps Wren's licence and history. Please look at
-[upstream](https://github.com/sostk/webos-wpe-browser) for the original project, its releases and its supported
-devices. The About screen in Robin's settings says "Based on Wren 0.3.3 by sostk" and links there.
-
-Robin is independent. Upstream has not reviewed, endorsed or tested it, and Robin is not an official Wren release.
-Bugs in Robin belong in [Robin's issue tracker](https://github.com/mihai2mn/robin-webos/issues), not upstream's. Robin
-has its own app ids and installs beside Wren. Robin is not related to other software that happens to be called Robin.
-Inside the code some names still say Wren (the `wren://` page scheme, `WPE_BROWSER_*` variables, file names): they
-were kept on purpose so that nothing that works breaks.
-
-Also used and not ours: [WPE WebKit](https://wpewebkit.org/), the
-[webOS native app kit](https://github.com/Native-Webos/webos-native-app-kit),
-[adblock-rust](https://github.com/brave/adblock-rust) from Brave, and the filter lists and scriptlets of
-[uBlock Origin](https://github.com/gorhill/uBlock), EasyList and others. The full list with licences is in
-[NOTICE.md](NOTICE.md).
-
-## What Robin adds over Wren 0.3.3
-
-- **WPE WebKit 2.54.3** with a patch series ([patches.md](docs/patches.md)) and the ARMv7 JIT work above.
-- **A uBlock Origin style ad blocker** (`engine/ubo`) on adblock-rust: network rules, redirects, scriptlets, generic
-  and site cosmetic filters, procedural filters, pop-up rules, and a **My filters** box on `wren://adblock`
-  ([ad-blocking.md](docs/ad-blocking.md)).
-- **An optional 64-bit (aarch64) engine** in the same package. It runs the 64-bit JIT but draws in software and has no
-  hardware video ([engine64.md](docs/engine64.md)).
-- **Hardware video through Starfish**: H.264 and VP9, AAC audio, other decoded audio (Opus, Vorbis) sent as PCM, page
-  volume and mute, seeking, and a hybrid policy that keeps small muted previews in the page and puts the rest on the
-  hardware plane ([video.md](docs/video.md)).
-- **Remote media keys** and **page zoom per site** ([usage.md](docs/usage.md)).
-- **Memory limits** for the web and network processes, no back/forward page cache by default, and a declared memory
-  need in the app's `appinfo.json`.
-- **Clean-clone release packaging** (not bit-for-bit reproducible: the toolchain image, the filter lists and the
-  staged base are not pinned): `tools/package-release.sh` builds the ipk from a clean clone of a commit
-  ([building.md](docs/building.md)).
-
-The full list, grouped, is in [docs/release-notes-1.0.0.md](docs/release-notes-1.0.0.md).
-
-## Tested hardware
-
-Everything in Robin was tested on one TV: an **LG CX with webOS 5.3** (kernel 4.4.84, about 2.7 GB of RAM).
-Other models and webOS versions are untested. The upstream compatibility notes are in
-[compatibility.md](docs/compatibility.md). They describe upstream's testing of Wren, not Robin's.
+| Test | Result |
+|---|---|
+| A 10-minute streaming video on a real site, default settings | Played to the end. Web process peak 511 MB, limit 832 MB |
+| Video starts on a static page | 0 black pictures in 40 starts (9 in 62 before the fix) |
+| A news page with four autoplaying background videos | About 360 MB with the software-video limit, about 700 MB without |
+| Ad blocker cost on four news and reference sites | Load time between +1.6 s and −0.4 s, about +40 MB of memory |
 
 ## Install
 
-You need a TV with root access (the Homebrew Channel). The ipk is large: **about 230 MB to download and about 546 MB
-installed**, because it carries two engines. The installer needs roughly 380 MB free on the TV's app storage
-(see [building.md](docs/building.md#size)). Free space first.
+You need a TV with root access and the [Homebrew Channel](https://www.webosbrew.org/).
 
-1. Download the ipk from Robin's releases page (TODO(owner): add the link). The files are named
-   `io.github.mihai2mn.robin_1.0.0_arm.ipk` and `io.github.mihai2mn.robin.dev_1.0.0_arm.ipk` (a test copy, shown as
-   "Robin Test", that installs beside the other one). Check them against `MD5SUMS` from the same page.
-2. Install it with the Homebrew Channel's local install or:
+1. Download `io.github.mihai2mn.robin_1.0.0_arm.ipk` from the
+   [latest release](https://github.com/mihai2mn/robin-webos/releases/latest) and check it against `MD5SUMS`.
+2. Install it from the Homebrew Channel, or from a PC:
 
 ```sh
 ares-install -d <your-device> io.github.mihai2mn.robin_1.0.0_arm.ipk
 ```
 
-Robin has its own app ids. It **does not replace** an installed Wren: both can stay on the TV. Wren's bookmarks,
-history and filters stay with Wren. The release notes have the command that copies them to Robin
-([release notes](docs/release-notes-1.0.0.md#keeping-your-wren-data)). To go back to Wren, remove Robin and use Wren
-(see [Going back to Wren](docs/release-notes-1.0.0.md#going-back-to-wren)).
+The package is about 230 MB to download and 550 MB installed, because it carries two engines. Have about 800 MB free
+on the TV's app storage before you start: an install that runs out of space leaves an app that will not open.
 
-The Homebrew Channel repository lists upstream's Wren, not Robin.
+Robin has its own app id, so it installs beside Wren and does not replace it. To bring your Wren bookmarks, history
+and filters across, see [Keeping your Wren data](docs/release-notes-1.0.0.md#keeping-your-wren-data).
 
-## Using it
+The release also has `io.github.mihai2mn.robin.dev_1.0.0_arm.ipk`, a second copy that shows as "Robin Test" and keeps
+its own data. Most people do not need it.
 
-The remote, launch parameters and logs are in [usage.md](docs/usage.md). The 32-bit engine is the default. To try the
-64-bit engine, launch once with `{"wpebEnv":{"WPE_BROWSER_DEBUG_ENGINE":"64"}}`, or put a file named `engine64`
-containing `on` in the app's data folder ([engine64.md](docs/engine64.md)).
+## Limits
 
-## Test tools
+- **One TV model tested.** Other models and webOS versions may work or may not. Reports are welcome.
+- **One hardware video at a time.** The TV has one decoder per app. A second video waits until it is the one playing.
+- **A paused video that goes full screen stays black until you press play.**
+- **Protected (DRM) video was not tested.** Widevine runs at software security level, so services may cap quality
+  or refuse. Robin, like Wren, uses the CDM already on the TV, outside the terms it ships under. Use at your own risk.
+- **Small muted videos above 720p are not played** until you start them yourself. This keeps pages with many
+  background videos inside the memory limit.
+- **The RegExp JIT is off** on the 32-bit engine. It crashed one tested site.
+- **The 64-bit engine is slower to load pages** and has no hardware video.
+- **Cloudflare checks take about a minute** on the TV's processor. Wait for them.
 
-`tools/tvdrive/` drives the dev copy of the app from a PC (screenshots, pointer, remote keys, on-screen keyboard), and
-reads back what the screen and the page did as text (`frames`: static, moving, flicker; `motion.js`: element motion
-from a recorder script). It needs a rooted TV. See [usage.md](docs/usage.md) and [tools/tvdrive/README.md](tools/tvdrive/README.md).
+<details>
+<summary>More known issues</summary>
+
+- An unmuted video goes to the hardware plane so its sound is heard. That plane does not scroll exactly with the page.
+- Full screen for hardware video is emulated: the element is stretched over the screen. An overlay with a very high
+  z-index can still cover it ([details](docs/video.md#fullscreen)).
+- A video scrolled partly off screen is cropped by the compositor on the tested CX. On older webOS it is shrunk into
+  the visible part instead.
+- Audio was verified in the player logs, not by a listening test.
+- The package holds the ICU data and some libraries twice, once per engine.
+- Video test pages need a server that supports HTTP range requests. `python -m http.server` does not.
+
+</details>
 
 ## Reporting a bug
 
-Plug a USB drive into the TV, then in Robin: hold OK, **Settings**, **Help and feedback**, **Save logs to USB**.
-Attach the `robin-logs-….txt` file to a bug report in [Robin's issue tracker](https://github.com/mihai2mn/robin-webos/issues). Logs are cleared when
-the TV restarts, so save them first.
+Plug a USB drive into the TV. In Robin, hold OK, then **Settings**, **Help and feedback**, **Save logs to USB**.
+Attach the `robin-logs-….txt` file to a report in the [issue tracker](https://github.com/mihai2mn/robin-webos/issues).
+Logs are cleared when the TV restarts, so save them first.
 
-The in-app "Report a problem" row shows the same address.
+Please report Robin's bugs here and not to Wren. Upstream has not seen this code.
 
-## Limitations and known issues
+## Based on Wren
 
-- **One TV model tested.** Everything above comes from one LG CX on webOS 5.3.
-- **Audio is not confirmed by ear.** Video with AAC or PCM audio was checked in the engine and player logs (the
-  volume, mute and PCM calls reach LG's pipeline). Nobody has yet listened to it on the TV.
-- **The RegExp JIT is off on the 32-bit engine.** With it on, the web process of one tested site crashed shortly
-  after load. The Baseline JIT and DFG are on. A page load was not faster with the JIT in the tests. See
-  [jit-armv7.md](docs/jit-armv7.md).
-- **The 64-bit engine is software rendered**, sends shared-memory frames only, and has no hardware video. Cold page
-  loads are slower than on the 32-bit engine (Wikipedia: 8.2 s against 4.7 s in the same mode).
-- **Only one hardware video at a time** (LG's pipeline).
-- **The package is large.** The ICU data and some libraries are present twice, once per engine.
-- **Hybrid video trade-off.** An unmuted video goes to the hardware plane so that its sound is heard. That plane does
-  not scroll exactly with the page, and a short clip with sound inside an article also moves there.
-- **Fullscreen of a hardware video is emulated** (the element is stretched over the screen), because WebKit's own fullscreen
-  leaves the video plane behind. Iframe players, trapping containers and gesture rules are handled. An overlay with a high
-  z-index can still cover the video. See [video.md](docs/video.md#fullscreen).
-- **A video scrolled partly off screen** is cropped by the TV's compositor in direct mode on the tested CX. On older
-  webOS the picture is shrunk into the visible part instead. See [video.md](docs/video.md).
-- **Widevine runs at software security level**, so some services cap the quality or refuse to play. Robin was not
-  tested with DRM. Upstream lists no DRM for webOS 5 (the TV's Widevine interface there is version 15.1,
-  which Wren does not use).
-- Robin, like Wren, uses the TV's own provisioned Widevine CDM. This is outside the terms LG and Google ship it under, and the
-  TV's Widevine certificate could in principle be revoked. **Use at your own risk.**
-- Cloudflare security checks ("Verifying you are human") take about a minute on a TV's processor. Wait for
-  them; the site then remembers the pass for a while.
-- Test pages for video must come from a server that supports HTTP range requests. A plain `python -m http.server`
-  does not, and the engine then reports "unexpected 200 status".
+Robin is a fork of **[Wren](https://github.com/sostk/webos-wpe-browser)** by **sostk**, taken at version 0.3.3.
+The browser itself, its remote-first interface, the split between the UI and the engine, the Buildroot-based WebKit
+build, the Widevine bridge and most of the media design are upstream's work. Robin keeps Wren's licence and its full
+commit history. Without Wren there would be no Robin.
 
-## More
+Robin is independent. Upstream has not reviewed, endorsed or tested it, and it is not a Wren release. For the
+original project, its releases and its list of supported TVs, go to
+[upstream](https://github.com/sostk/webos-wpe-browser). The About screen in Robin says "Based on Wren 0.3.3 by sostk".
 
-[Documentation](docs/README.md): using the remote, launch parameters and logs, how it works, building, patches.
-Building a release and the source that must go with it: [docs/building.md](docs/building.md#what-a-release-must-attach-or-link).
+Some internal names still say Wren (the `wren://` page addresses, file names). They were kept so that nothing breaks.
+
+Robin also stands on:
+
+| Project | Used for | Licence |
+|---|---|---|
+| [WPE WebKit](https://wpewebkit.org/) | The browser engine | LGPL-2.1 and BSD |
+| [webOS native app kit](https://github.com/Native-Webos/webos-native-app-kit) | The app shell and packaging | see the kit |
+| [adblock-rust](https://github.com/brave/adblock-rust) by Brave | The ad blocker's matching engine | MPL-2.0 |
+| [uBlock Origin](https://github.com/gorhill/uBlock) | Filter lists, redirects and scriptlets | GPL-3.0 |
+| EasyList, EasyPrivacy, AdGuard and other list authors | Filter lists | each list's own terms |
+| [Big Buck Bunny](https://peach.blender.org/), © Blender Foundation | The video frame in the screenshot above | CC BY 3.0 |
+
+Every bundled component, with its source and licence, is listed in [NOTICE.md](NOTICE.md). The icon was generated
+with an AI image tool at the maintainer's request and traced to vector; it uses no third-party artwork.
+
+## Documentation
+
+- [Using Robin](docs/usage.md): the remote, launch parameters, logs
+- [How it works](docs/architecture.md) and [video](docs/video.md)
+- [Building](docs/building.md) and the [patch series](docs/patches.md)
+- [Release notes for 1.0.0](docs/release-notes-1.0.0.md)
+- [Everything else](docs/README.md)
 
 ## Licence
 
-GPL-3.0-or-later ([LICENSE](LICENSE)). Third-party code, fonts, icons and filter lists keep their own licences: see
-[NOTICE.md](NOTICE.md). Widevine is not included: the browser uses the CDM already on the TV.
+GPL-3.0-or-later, see [LICENSE](LICENSE). Third-party code, fonts, icons and filter lists keep their own licences,
+see [NOTICE.md](NOTICE.md). Widevine is not included.

@@ -76,7 +76,7 @@ Versions: Robin 1.0.0, based on Wren 0.3.3, WPE WebKit 2.54.3.
 - Widevine is at software security level and was not tested with Robin.
 - An overlay with a high z-index can cover an emulated-fullscreen video.
 
-The full list is in the [README](../README.md#limitations-and-known-issues).
+The full list is in the [README](../README.md#limits).
 
 ## Tested hardware
 

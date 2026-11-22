@@ -22,7 +22,8 @@ Nothing found conflicts with GPL-3.0. The gaps found in the first package are cl
 | `toolchain/extra-headers/linux/dma-buf.h` | Linux kernel UAPI | GPL-2.0 WITH Linux-syscall-note | A header, copied so WebKit builds against the 4.4 headers |
 | `browser/fonts`: Manrope | [googlefonts/manrope](https://github.com/googlefonts/manrope) | SIL OFL-1.1 (`browser/fonts/OFL-Manrope.txt`) | Bundled unmodified |
 | `browser/branding/robin-icon.svg`, `robin-icon-1024.png`, `robin-icon-512.png`, `browser/icon.png`, `largeIcon.png`, `browser/icons/robin-mark.png`, `docs/screenshots/robin-icon.png` | this project | GPL-3.0-or-later | The artwork (a bold capital R in orange and cream with a robin inside it) was generated with an AI image tool at the owner's request and vector-traced to the SVG. No third-party artwork was used. The PNG sizes are made from the 1024 px master by `tools/branding/make-icons.py` |
-| `browser/icons/*.svg` (the UI icon set), `docs/screenshots/*.jpg` | upstream | not recorded | Upstream's. The repository does not say where the icon set came from. The screenshots show Wren's name and icon and will be retaken |
+| `browser/icons/*.svg` (the UI icon set) | upstream | not recorded | Upstream's. The repository does not say where the icon set came from |
+| `docs/screenshots/*.jpg` | this project | GPL-3.0-or-later | Taken on the tested TV. They show a Wikipedia article (text CC BY-SA 4.0, Wikipedia's own marks) and, in `video.jpg`, a frame of Big Buck Bunny, (c) Blender Foundation, [peach.blender.org](https://peach.blender.org/), CC BY 3.0 |
 | `tools/ubo/wren-filters.txt`, `wren-scriptlets.js`, `engine/ubo/compat.js`, `cosmetic.js` | Robin | GPL-3.0-or-later | The scriptlets follow uBlock Origin's scriptlet conventions and may contain adapted code. uBlock Origin is GPL-3.0 |
 
 ## Components the app kit brings (shipped in the ipk under `licenses/`)
@@ -100,7 +101,7 @@ header on the day of the build.
 
 The repository describes the TV's Widevine interface (`drm/ocdm-widevine/include/widevine/cdm.h`). It contains no
 Widevine code and no CDM. The provisioning URL in `drm/ocdm-widevine/src/ocdm.cpp` carries Google's public Widevine
-provisioning API key, the same one the TV's own CDM and Chromium use. See the warning in the [README](README.md#limitations-and-known-issues).
+provisioning API key, the same one the TV's own CDM and Chromium use. See the warning in the [README](README.md#limits).
 
 ## Package licence material
 
