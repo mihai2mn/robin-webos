@@ -76,7 +76,7 @@ do_launcher() {
     for id in $IDS; do
         say "launcher for $id"
         mkdir -p "$WORK/launcher-$id"
-        LAUNCHER_SRC="$src/engine/launcher/wpe-launcher.c" LAUNCHER_INTERP="/tmp/$(appid $id)/ld-linux.so.3" OUT_DIR="$WORK/launcher-$id" bash "$repo/tools/build-launcher.sh" | sed "s/^/   /"
+        LAUNCHER_SRC="$src/engine/launcher/wpe-launcher.c" LAUNCHER_INTERP="/tmp/$(appid $id)/ld-linux.so.3" OUT_DIR="$WORK/launcher-$id" bash "$src/tools/build-launcher.sh" | sed "s/^/   /"
     done
 }
 
@@ -329,7 +329,7 @@ EOF
         ( cd "$w/ctl" && tar czf "$w/control.tar.gz" --owner=0 --group=0 control )   # no "./": the TV installer rejects ./ entries
         ( cd "$w/data" && tar czf "$w/data.tar.gz" --owner=0 --group=0 usr )
         local outf=$OUT/${app}_${VERSION}_arm.ipk
-        rm -f "$outf"; ( cd "$w" && python3 "$repo/tools/mkar.py" "$outf" debian-binary control.tar.gz data.tar.gz )   # not `ar rc`: BusyBox ar on the TV rejects "name/"
+        rm -f "$outf"; ( cd "$w" && python3 "$src/tools/mkar.py" "$outf" debian-binary control.tar.gz data.tar.gz )   # not `ar rc`: BusyBox ar on the TV rejects "name/"
         echo "   $outf ($(mb "$(stat -c %s "$outf")") MB, installed $((kb/1024)) MB)"
         rm -rf "$w"
     done
