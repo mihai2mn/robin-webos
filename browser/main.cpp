@@ -1131,6 +1131,7 @@ class App : public wnk::app::Delegate {
         if (history) {
             const size_t n = profile_.clear_history(seconds);
             WNK_LOGI(kCat, "cleared %zu history entries", n);
+            refresh_chrome();  // the Home page's recent tiles
         }
         const uint32_t what = (cookies ? WPE_CLEAR_COOKIES_AND_SITE_DATA : 0u) | (cache ? WPE_CLEAR_CACHE : 0u);
         if (what != 0 && engine_.running()) {
