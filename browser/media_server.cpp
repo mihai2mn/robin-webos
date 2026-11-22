@@ -353,27 +353,11 @@ void MediaServer::accept_loop() {
     }
 }
 
-// Does this access unit start a keyframe? (Annex-B; H.264 IDR slice or HEVC IRAP; a unit the scan cannot read counts as a keyframe,
-// so a feed is never held back for ever.)
+// Can the decoder be (re)started at this access unit? (Annex-B; see StartFilter::restart_point: H.264 IDR or a non-IDR picture behind a
+// recovery-point SEI, HEVC IRAP; a unit the scan cannot read counts, so a feed is never held back for ever.)
 static bool is_keyframe(uint32_t codec, const std::vector<uint8_t> &d) {
-    bool saw_start = false;
-    for (size_t i = 0; i + 3 < d.size(); ++i) {
-        if (d[i] != 0 || d[i + 1] != 0 || d[i + 2] != 1) continue;
-        saw_start = true;
-        if (codec == WPEB_MEDIA_H264) {
-            const int t = d[i + 3] & 0x1f;
-            if (t == 5) return true;
-            if (t == 1) return false;
-        } else if (codec == WPEB_MEDIA_HEVC) {
-            const int t = (d[i + 3] >> 1) & 0x3f;
-            if (t >= 16 && t <= 21) return true;
-            if (t < 16) return false;
-        } else {
-            return true;
-        }
-        i += 2;
-    }
-    return !saw_start;
+    return StartFilter::restart_point(codec == WPEB_MEDIA_H264 ? StartFilter::Codec::H264 : codec == WPEB_MEDIA_HEVC ? StartFilter::Codec::Hevc : StartFilter::Codec::Other,
+                                      d.data(), d.size());
 }
 
 void MediaServer::serve(int fd, uint64_t id) {

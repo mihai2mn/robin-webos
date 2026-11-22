@@ -14,7 +14,24 @@ static std::vector<uint8_t> h264(int type) { return {0, 0, 0, 1, 0x09, 0xf0, 0, 
 static std::vector<uint8_t> hevc(int type) { return {0, 0, 0, 1, 0x46, 0x01, 0, 0, 1, static_cast<uint8_t>(type << 1), 0x01, 0xaf}; }
 static bool d(StartFilter &f, C c, const std::vector<uint8_t> &u, int64_t pts) { return f.drop(c, u.data(), u.size(), pts); }
 
+static std::vector<uint8_t> cat(std::vector<uint8_t> a, const std::vector<uint8_t> &b) { a.insert(a.end(), b.begin(), b.end()); return a; }
+static std::vector<uint8_t> sei_recovery() { return {0, 0, 0, 1, 0x06, 0x06, 0x01, 0x84, 0x80}; }   // payload type 6, size 1
+static std::vector<uint8_t> sei_other() { return {0, 0, 0, 1, 0x06, 0x05, 0x03, 0xaa, 0xbb, 0xcc, 0x80}; }  // payload type 5 (user data)
+static std::vector<uint8_t> slice264(int type) { return {0, 0, 0, 1, static_cast<uint8_t>(0x60 | type), 0x88}; }
+
 int main() {
+    {   // restart points
+        const auto r = [](C c, const std::vector<uint8_t> &u) { return StartFilter::restart_point(c, u.data(), u.size()); };
+        check(r(C::H264, h264(5)), "restart: h264 IDR");
+        check(!r(C::H264, h264(1)), "restart: h264 plain non-IDR is not");
+        check(r(C::H264, cat(sei_recovery(), slice264(1))), "restart: h264 non-IDR with recovery-point SEI");
+        check(r(C::H264, cat(cat({0,0,0,1,0x67,0x42}, {0,0,0,1,0x68,0xce}), cat(sei_recovery(), slice264(1)))), "restart: parameter sets, recovery SEI, non-IDR");
+        check(!r(C::H264, cat(sei_other(), slice264(1))), "restart: non-IDR with another SEI is not");
+        check(r(C::H264, cat(cat(sei_other(), sei_recovery()), slice264(1))), "restart: recovery SEI after another SEI");
+        check(!r(C::H264, cat(slice264(1), sei_recovery())), "restart: SEI behind the slice does not count");
+        check(r(C::Hevc, hevc(21)) && r(C::Hevc, hevc(19)) && !r(C::Hevc, hevc(1)), "restart: hevc IRAP yes, trailing no");
+        check(r(C::Other, h264(1)) && r(C::H264, {1, 2, 3}), "restart: other codec / unreadable unit counts");
+    }
     {   // H.264 IDR start with B pictures: nothing dropped, even a unit with a lower pts
         StartFilter f; f.arm();
         check(!d(f, C::H264, h264(5), 100), "h264 IDR start kept");

@@ -55,6 +55,31 @@ public:
         return false;
     }
 
+    // Can a decoder be (re)started at this unit? H.264: an IDR slice, or a non-IDR slice behind a recovery-point SEI (open GOP: the keyframes
+    // after the first are non-IDR I pictures that carry one; the leading pictures that follow are left out by drop()). HEVC: IRAP (16..21).
+    // Other codecs, and a unit with no start code: yes (a feed is never held back for ever).
+    static bool restart_point(Codec codec, const uint8_t *d, size_t n) {
+        bool saw_start = false, recovery = false;
+        for (size_t i = 0; i + 3 < n; ++i) {
+            if (d[i] != 0 || d[i + 1] != 0 || d[i + 2] != 1) continue;
+            saw_start = true;
+            if (codec == Codec::H264) {
+                const int t = d[i + 3] & 0x1f;
+                if (t == 5) return true;
+                if (t == 1) return recovery;
+                if (t == 6 && sei_has_recovery_point(d + i + 4, n - (i + 4))) recovery = true;
+            } else if (codec == Codec::Hevc) {
+                const int t = (d[i + 3] >> 1) & 0x3f;
+                if (t >= 16 && t <= 21) return true;
+                if (t < 16) return false;
+            } else {
+                return true;
+            }
+            i += 2;
+        }
+        return !saw_start;
+    }
+
     // The type of the first slice NAL unit (H.264: 1..5; HEVC: 0..21), -1 if none is found.
     static int first_vcl_type(Codec codec, const uint8_t *d, size_t n) {
         for (size_t i = 0; i + 3 < n; ++i) {
@@ -74,6 +99,25 @@ public:
     }
 
 private:
+    // H.264 SEI payloads (after the NAL header, up to the next start code): is there a recovery point (payload type 6)?
+    static bool sei_has_recovery_point(const uint8_t *p, size_t n) {
+        size_t i = 0;
+        while (i + 2 <= n) {
+            if (i + 2 < n && p[i] == 0 && p[i + 1] == 0 && p[i + 2] <= 1) return false;  // end of the NAL unit
+            int type = 0;
+            while (i < n && p[i] == 0xff) { type += 255; ++i; }
+            if (i >= n) return false;
+            type += p[i++];
+            size_t size = 0;
+            while (i < n && p[i] == 0xff) { size += 255; ++i; }
+            if (i >= n) return false;
+            size += p[i++];
+            if (type == 6) return true;
+            i += size;
+        }
+        return false;
+    }
+
     enum class State { Idle, First, H264Leading, HevcLeading };
     State state_ = State::Idle;
     int64_t key_pts_ = 0;
