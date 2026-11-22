@@ -902,6 +902,11 @@ void MediaServer::serve(int fd, uint64_t id) {
                 std::lock_guard<std::mutex> ql(qm);
                 arm_gen = generation;  // a seek: what follows starts a feed
                 ++arm_seq;
+                // What a retry repeats is what the decoder was given since the seek: units from before it would be fed first again
+                // (from the old position, and older than the start filter's arm_gen, so not judged by it). The replay stays complete
+                // (replay_ok as it was): the feed after a seek starts over at the new position.
+                replay.clear();
+                replay_bytes = 0;
             }
             std::lock_guard<std::mutex> lock(mutex_);
             if (owner_.load() == id) {
