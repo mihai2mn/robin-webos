@@ -13,14 +13,14 @@
 
 namespace browser {
 
-// Colours the kit theme and the pushed pages (Settings, History, Bookmarks) use: Wren's ink and glass.
+// Colours the kit theme and the pushed pages (Settings, History, Bookmarks) use: the ink and glass look.
 namespace palette {
 inline constexpr wnk::render::Color kFrame = wnk::render::Color::hex(0x0B0E15FF);
 inline constexpr wnk::render::Color kToolbar = wnk::render::Color::hex(0x141924FF);
 inline constexpr wnk::render::Color kHover = wnk::render::Color::hex(0x2A3142FF);
 inline constexpr wnk::render::Color kText = wnk::render::Color::hex(0xF2F4F8FF);
 inline constexpr wnk::render::Color kMuted = wnk::render::Color::hex(0xA9B2C3FF);
-inline constexpr wnk::render::Color kAccent = wnk::render::Color::hex(0xB9D3FFFF);
+inline constexpr wnk::render::Color kAccent = wnk::render::Color::hex(0xF25A10FF);   // the orange of the Robin mark, as wren_ui.hpp kAccent
 inline constexpr wnk::render::Color kCard = wnk::render::Color::hex(0x161B26FF);
 inline constexpr wnk::render::Color kGlass = wnk::render::Color::hex(0xFFFFFF14);
 inline constexpr wnk::render::Color kGlassFocused = wnk::render::Color::hex(0xFFFFFF26);

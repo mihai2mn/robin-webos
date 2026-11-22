@@ -462,7 +462,7 @@ G_MODULE_EXPORT void webkit_web_process_extension_initialize_with_user_data(WebK
     g_variant_get_child(user_data, 0, "&s", &dir);
     g.dir = g_strdup(dir);
     set_state_from(user_data, 1); /* lists and my filters load below, once the core has */
-    /* WPE_BROWSER_DEBUG_UBO_LOG: the same, under a name Wren's launch parameter {"wpebEnv": ...} passes on. */
+    /* WPE_BROWSER_DEBUG_UBO_LOG: the same, under a name Robin's launch parameter {"wpebEnv": ...} passes on. */
     const char *log = g_getenv("WREN_UBO_LOG") ? g_getenv("WREN_UBO_LOG") : g_getenv("WPE_BROWSER_DEBUG_UBO_LOG");
     g.log_all = g_strcmp0(log, "2") == 0;
     g.log = g.log_all || g_strcmp0(log, "1") == 0;

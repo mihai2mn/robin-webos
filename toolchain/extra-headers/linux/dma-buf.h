@@ -2,7 +2,7 @@
 /*
  * Userspace dma-buf interface (include/uapi/linux/dma-buf.h), added in Linux 4.6.
  * Our cross toolchain ships Linux 4.4 headers, matching the TV's kernel, so this file is
- * copied into the sysroot (see NOTES.md). WPE WebKit's GBM code needs it to compile; that
+ * copied into the sysroot (see the development notes (not in the repository)). WPE WebKit's GBM code needs it to compile; that
  * code only runs for GPU buffers, which the engine never creates (SHM rendering).
  */
 #ifndef _DMA_BUF_UAPI_H_

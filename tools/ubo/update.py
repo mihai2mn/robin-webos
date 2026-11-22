@@ -5,7 +5,7 @@
     update.py [UBO_COMMIT]
 
 - lists/: uBlock Origin's default filter lists (the ones uBO enables on a fresh install), with `!#include`
-  resolved and `!#if` evaluated for Wren (WebKit, no HTML filtering), so the compiler sees plain lists.
+  resolved and `!#if` evaluated for Robin (WebKit, no HTML filtering), so the compiler sees plain lists.
 - ubo/: from uBlock Origin's repository at UBO_COMMIT (default: master's head, recorded in ubo/COMMIT): the redirect
   resources (web_accessible_resources/, js/redirect-resources.js) and the scriptlets (js/resources/*.js).
 Licences: uBO and its filters GPL-3.0-or-later; EasyList/EasyPrivacy GPL-3.0-or-later or CC BY-SA 3.0; Peter
@@ -162,15 +162,23 @@ def resolve(url, depth=0):
     return out
 
 
+HEADERS = []
+
+
 def update_lists():
     d = HERE / "lists"
     d.mkdir(exist_ok=True)
+    HEADERS.clear()
     def fetch_list(name, url):
         lines = resolve(url)
         (d / f"{name}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         version = next((l.split(":", 1)[1].strip() for l in lines[:80]
                         if l.lower().startswith(("! version:", "# version:", "! last modified:", "# last modified:", "! updated:"))), "?")
         print(f"{name}: {len(lines)} lines, version {version}")
+        # The lists' own words about who made them and under what terms travel with the compiled data (lists/LICENCES.txt).
+        head = [l.strip() for l in lines[:80] if l.strip().lower().lstrip("!# ").startswith(
+            ("title", "homepage", "licen", "copyright", "credits", "policy", "last modified", "last updated", "version", "expires"))]
+        HEADERS.append((name, url, head))
         return version
 
     manifest = [{"name": n, "url": u, "flags": f, "version": fetch_list(n, u)} for n, u, f in LISTS]
@@ -178,6 +186,11 @@ def update_lists():
     optional = [{"name": n, "url": u, "flags": f, "default": on, "title": t, "about": a, "version": fetch_list(n, u)}
                 for n, u, f, on, t, a in OPTIONAL]
     (d / "optional.json").write_text(json.dumps(optional, indent=1, ensure_ascii=False) + "\n")
+    with open(d / "LICENCES.txt", "w", encoding="utf-8") as f:
+        f.write("Filter lists compiled into this package, as downloaded on the build day: name, address, and the list's own\n"
+                "header lines (title, homepage, licence, copyright). See licenses/ad-blocker/NOTICES.txt for the licence of each.\n")
+        for n, u, head in HEADERS:
+            f.write(f"\n== {n}\n{u}\n" + "\n".join(head) + "\n")
 
 
 def update_ubo(commit):

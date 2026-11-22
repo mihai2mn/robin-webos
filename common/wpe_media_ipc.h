@@ -106,7 +106,7 @@ typedef struct WpebMediaArea {
  * process is LP64. Every member is fixed-width, so the only thing that could differ is alignment and padding --
  * WpebMediaHeader's int64_t pts_us is the one member whose alignment is 8 (it pads to offset 8 on both ABIs, and
  * 4-byte-aligned types all round the same way). Measured identical on armv7 softfp, aarch64 and x86_64
- * (build/bridge64/lead-check/media-wire-check.sh); a change that breaks it is now a compile error instead of two
+ * (checked with a small compile test on all three); a change that breaks it is now a compile error instead of two
  * processes that disagree about a message. */
 #if defined(__cplusplus)
 #define WPEB_MEDIA_STATIC_ASSERT(cond, msg) static_assert(cond, msg)

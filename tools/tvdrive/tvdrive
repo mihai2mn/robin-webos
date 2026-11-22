@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# tvdrive: drive the dev copy of Wren on the LG TV like a person with the remote, with screenshots.
+# tvdrive: drive the dev copy of Robin on the LG TV like a person with the remote, with screenshots.
 # Works from Windows Git Bash and WSL (needs bash, ssh, scp, base64; ffmpeg optional, for small screenshots).
 # See README.md. Env: TVDRIVE_HOST (ssh host, default lgtv), TVDRIVE_OUT (output dir, default ./tvdrive-out),
-# TVDRIVE_APP (app id, default org.sostk.wpebrowser.dev).
+# TVDRIVE_APP (app id, default io.github.mihai2mn.robin.dev).
 set -u
 HOST=${TVDRIVE_HOST:-lgtv}
-APP=${TVDRIVE_APP:-org.sostk.wpebrowser.dev}
+APP=${TVDRIVE_APP:-io.github.mihai2mn.robin.dev}
 OUT=${TVDRIVE_OUT:-$PWD/tvdrive-out}
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RUN=/tmp/$APP
@@ -15,7 +15,7 @@ LOCK_STALE_MIN=25   # a lock older than this is shown as stale (it is never take
 TAG=${TVDRIVE_OWNER:-pid$$}; TAG=${TAG//[^A-Za-z0-9_.-]/_}
 REMOTE_PATH='export PATH=/opt/bin:/opt/sbin:$PATH;'
 
-if [ "$APP" = "org.sostk.wpebrowser" ]; then echo "tvdrive: refusing to touch the real app $APP" >&2; exit 2; fi
+case "$APP" in *.dev) ;; *) echo "tvdrive: refusing to touch the real app $APP (only a *.dev id)" >&2; exit 2 ;; esac
 
 tvssh() { timeout "${TVDRIVE_TIMEOUT:-120}" ssh -o BatchMode=yes -o ConnectTimeout=100 "$HOST" "$@"; }
 tvsh()  { tvssh "$REMOTE_PATH $1"; }

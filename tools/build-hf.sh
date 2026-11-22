@@ -27,7 +27,7 @@ case "${1:-status}" in
       cp /src/toolchain/ct-ng-hf.defconfig /build/ctng-hf/defconfig
       (cd /build/ctng-hf && ct-ng defconfig && ct-ng build.4)
     fi
-    # linux/dma-buf.h appeared in Linux 4.6; WebKit's GBM code includes it (see NOTES.md). The sysroot is read-only.
+    # linux/dma-buf.h appeared in Linux 4.6; WebKit's GBM code includes it (see the development notes (not in the repository)). The sysroot is read-only.
     inc="/build/x-tools/$tuple/$tuple/sysroot/usr/include/linux"
     if [ ! -f "$inc/dma-buf.h" ]; then
       chmod u+w "$inc"

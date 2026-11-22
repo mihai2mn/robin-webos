@@ -25,6 +25,6 @@ Mesa stays bundled, and software stays the browser's default. The opt-in
 `WPE_BROWSER_RENDERER=gpu` selects firmware EGL/GLES for the engine's children.
 
 Recorded C1 measurement (2026-11-10, webOS 6.5.3): default-display and pbuffer
-pixel checks passed on Mali-G51; 720p readback averaged about 16 ms. See NOTES.md
+pixel checks passed on Mali-G51; 720p readback averaged about 16 ms. See the development notes (not in the repository)
 for exact results, root-versus-jail limitations and the separate Skia painting
 failure. The user subsequently stopped TV testing again.

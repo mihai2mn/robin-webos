@@ -2,9 +2,9 @@
 
 These are upstream's notes. Upstream developed and tested on an LG OLED65C1 (webOS 6.5.3, firmware 03.53.45). This fork was
 tested only on an LG CX (webOS 5.3); the rows below are not re-tested for it. Reports are very welcome
-(TODO(owner): this fork's issue tracker; upstream's is the [bug report form](https://github.com/sostk/webos-wpe-browser/issues/new?template=bug_report.yml)).
+(open them in this repository's issue tracker, not upstream's).
 
-| webOS (internal release) | Years | glibc | Wren |
+| webOS (internal release) | Years | glibc | Wren (upstream) |
 |---|---|---|---|
 | 1.x – 2.x | 2014–2015 | 2.14 – 2.19 | not supported |
 | 3.x (3.4 and later) | 2016–2017 | 2.19 | experimental (reported working on an OLED B7, 3.9): bundled glibc 2.28; software video (the compositor has no video windows for LG's player); no DRM |
@@ -20,10 +20,9 @@ package against LG firmware images (the kit's `tools/fw-check.py`, using the web
 finds every library and function the interface needs on webOS 4.4 to 26. That shows the app would start, not how
 well it runs.
 
-DRM: Wren uses the Widevine CDM already on the TV, through the interface of version 16 (webOS 6: 16.3, tested;
+DRM: Wren and Robin use the Widevine CDM already on the TV, through the interface of version 16 (webOS 6: 16.3, tested;
 webOS 22–23: 16.4, untested). Other versions are not used, because their interface differs: webOS 4.5 has 14.0,
 webOS 5 has 15.1 and webOS 24+ has 17.x; webOS 4.0–4.4 has none of this kind. DRM sites then report that the key
 system is unavailable. The TVs from webOS 3.5 on also carry Widevine behind Chromium's public CDM interface
-(version 8 up to webOS 4.5, version 10 from webOS 5), which may later bring DRM to them; see NOTES.md.
+(version 8 up to webOS 4.5, version 10 from webOS 5), which may later bring DRM to them.
 
-Details and measurements: [NOTES.md](../NOTES.md), "2026-11-14 Older and newer webOS".

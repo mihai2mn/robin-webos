@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Wren: a WebKit (WPE) web browser for LG webOS TVs, with tabs, bookmarks, history and settings, in a glass,
+// Robin (based on Wren by sostk): a WebKit (WPE) web browser for LG webOS TVs, with tabs, bookmarks, history and settings, in a glass,
 // D-pad-first TV interface (wren_ui.hpp).
 //
 // This process is the UI: the kit's shell, the Home page (New Tab) or the PageView, and over a page a glass panel
@@ -14,6 +14,7 @@
 // tab. Colour keys, when the remote has them: Red = all tabs, Green = bookmarks, Yellow = quick actions (zoom),
 // Blue = new tab. The Magic Remote pointer is a mouse in pages and its wheel scrolls.
 #include "chrome.hpp"
+#include "version.hpp"
 #include "wren_ui.hpp"
 #include "direct_owner.hpp"
 #include "engine_client.hpp"
@@ -71,7 +72,7 @@ using browser::TabId;
 namespace pal = browser::palette;
 
 constexpr const char *kCat = "browser";
-constexpr const char *kVersion = "0.3.3";
+constexpr const char *kVersion = browser::kAppVersion;
 // Pages are rendered at this fraction of the view's size in 1920x1080 logical units and scaled up by the
 // GPU: CPU rendering at about 1280 px wide keeps scrolling usable, and CSS px at that size read well from a sofa.
 constexpr float kRenderScale = 2.0f / 3.0f;
@@ -1126,7 +1127,7 @@ class App : public wnk::app::Delegate {
         browser::LogExportRequest req;
         req.runtime_dir = runtime_dir(*ctx_);
         const auto &d = ctx_->device();
-        req.header.push_back(std::string("Wren ") + kVersion + ", WPE WebKit " +
+        req.header.push_back(std::string("Robin ") + kVersion + " (based on " + browser::kBasedOn + "), WPE WebKit " +
                              (engine_version_.empty() ? std::string("(not running)") : engine_version_));
         req.header.push_back("TV: " + d.summary());
         WNK_LOGI(kCat, "saving logs to %s", dest.c_str());
@@ -1847,7 +1848,7 @@ bool BrowserScreen::on_back(wnk::ui::Ui &ui) {
 int main(int argc, char **argv) {
     wnk::app::AppConfig config;
     config.fallback_app_id = WPEB_APP_ID_STRING;
-    config.title = "Wren";
+    config.title = "Robin";
     config.font_regular = "fonts/Manrope-Regular.ttf";
     config.font_bold = "fonts/Manrope-SemiBold.ttf";
     config.script_env_prefix = "APP_WPEBROWSER";
@@ -1857,7 +1858,7 @@ int main(int argc, char **argv) {
     config.http = true;
     config.http_cache_bytes = 8u << 20;
     config.image_memory_bytes = 16u << 20;
-    // Wren's ink and glass: kit widgets (TextField, forms, dialogs, toasts) pick these up.
+    // the ink and glass: kit widgets (TextField, forms, dialogs, toasts) pick these up.
     config.theme.background = pal::kFrame;
     config.theme.surface = pal::kToolbar;
     // Form rows (Settings) sit on cards: same colour at rest, a lighter hover when focused.

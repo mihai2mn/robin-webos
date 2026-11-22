@@ -1,10 +1,10 @@
-# How Wren works
+# How Robin works
 
 ## Two processes
 
 The UI and the engine need different toolchains, so they are separate programs:
 
-1. **`browser/`, the UI app** (`org.sostk.wpebrowser`): C++ on the
+1. **`browser/`, the UI app** (`io.github.mihai2mn.robin`): C++ on the
    [webOS native app kit](https://github.com/Native-Webos/webos-native-app-kit), built with the stock webOS NDK.
    It owns the window, the browser chrome, input, and LG's media pipeline (which must run under the app's own
    process to get its media resources), and starts the engine.
@@ -60,7 +60,7 @@ looked up at run time.
 | Path | What |
 |---|---|
 | `browser/` | the UI app: `wren_ui.*` (the glass interface: Home, tab row, overlays), `chrome.*` (buttons, address bar), screens (settings, history, bookmarks), engine client, LG media player, log export, profile, tests |
-| `browser/branding/` | the Wren icon sources (SVG at three detail levels: 512 master, 130 and 80 px) |
+| `browser/branding/` | the Robin icon: the traced SVG, its 1024 px master PNG, and the 512 px PNG; `tools/branding/make-icons.py` (needs Pillow) writes the 512, 130, 96 and 80 px icons from the master |
 | `engine/src/` | `wpe-engine`: WebKit views, settings, site quirks, debug console, IPC with the UI |
 | `engine/gst/` | GStreamer sinks that send encoded audio/video to LG's pipeline |
 | `engine/webos-backend/` | libwpe backend for direct GPU presentation on webOS (wl_webos foreign surfaces) |
@@ -72,4 +72,3 @@ looked up at run time.
 | `third_party/webos-native-app-kit/` | the kit (submodule) and `third_party/patches/` (local kit patches) |
 | `tools/` | build scripts, engine staging, on-TV probes and tests (`eme-test`, `media-tests`, …) |
 | `docs/` | these documents |
-| `NOTES.md` | the full development log: decisions, TV findings, measurements |

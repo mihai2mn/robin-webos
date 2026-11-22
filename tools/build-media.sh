@@ -36,7 +36,7 @@ case "${1:-status}" in
     python3 /src/third_party/webos-native-app-kit/tools/mkipk.py \
       --app-dir "$stage" --out-dir /src/build/media-dist --arch arm
     python3 /src/third_party/webos-native-app-kit/tools/check-package.py \
-      /src/build/media-dist/org.sostk.wpebrowser_0.2.0_arm.ipk \
+      /src/build/media-dist/io.github.mihai2mn.robin_0.2.0_arm.ipk \
       --expected-needed /src/browser/expected-needed.txt --glibc-runtime engine --arch arm
     echo 'PASS: multimedia engine, staged ARM decoder/URL checks and package checks'
     ;;

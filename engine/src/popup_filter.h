@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The "$popup" / "$popunder" network filters of the uBO and EasyList lists, which adblock-rust leaves out (it parses
-// only request types a web process sees; a new window is decided in the UI process, where Wren's engine runs).
+// only request types a web process sees; a new window is decided in the UI process, where Robin's engine runs).
 // engine/ubo/popups.txt is those lines, copied unchanged by tools/ubo/popups.sh; "My filters" lines of the same kind
 // are read too. The window's address is matched as uBO does: against the pattern, with the opener page as the
 // context for $domain= and $3p / $1p. Regular-expression patterns and options other than the ones below drop the

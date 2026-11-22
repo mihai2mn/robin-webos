@@ -41,7 +41,7 @@ Audited and unchanged:
 - **Interpreters:** LLInt and IPInt `.asm` C calls pass only pointers and ints.
 - **JIT-to-JIT conventions:** JSToWasm/WasmToJS argument shuffles don't involve the C ABI.
 - **Math thunks:** the Linux math-thunk wrappers are null, so they're unused.
-- **FP-returning operations:** all 36 reach their results through `callOperation*` → `setupResults` (inventory in NOTES.md).
+- **FP-returning operations:** all 36 reach their results through `callOperation*` → `setupResults`.
 
 Build: `make WPEB_SOFTFP_JIT=y` (external.mk) compiles WebKit alone as Thumb-2 (`-mthumb`), which JSC's ARMv7 JIT needs.
 The rest of the softfp tree stays as it is.

@@ -5,7 +5,7 @@ One bash script (`tvdrive`) plus a small Python helper that runs on the TV (`tvi
 Works from Git Bash and WSL. Needs `ssh`/`scp`/`base64`/`timeout`; `ffmpeg` is optional (small screenshot copies).
 
 Setup: an ssh host called `lgtv` (root on a rooted TV with `/opt/bin/tv` and python3 on the TV). Override with
-`TVDRIVE_HOST`, `TVDRIVE_APP` (default `org.sostk.wpebrowser.dev`; the script refuses the release app id),
+`TVDRIVE_HOST`, `TVDRIVE_APP` (default `io.github.mihai2mn.robin.dev`; the script refuses the release app id),
 `TVDRIVE_OUT` (screenshot folder, default `./tvdrive-out`).
 
 | command | what it does |

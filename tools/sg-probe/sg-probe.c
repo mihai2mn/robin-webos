@@ -2,7 +2,7 @@
 // Surface-group probe: can a second process draw with the TV's GPU (Mali EGL) straight into our app window, the way
 // Chromium's GLSurfaceWayland draws into its window (no readback, no copies)? See docs/webkit-like-chromium.md, part 2.
 //
-//   APPID=org.sostk.wpebrowser ./sg-probe owner [below|above] [seconds] [client-width client-height]
+//   APPID=io.github.mihai2mn.robin ./sg-probe owner [below|above] [seconds] [client-width client-height]
 //
 // owner  = stands in for the browser UI: a normal webOS app window (wl_shell + wl_webos_shell, appId from $APPID).
 //          It creates surface group "wpebprobe" on its surface and layer "page" (z -1 = below the owner, 1 = above),

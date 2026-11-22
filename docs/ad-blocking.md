@@ -1,9 +1,9 @@
 # Ad blocking
 
-Wren uses a uBlock-Origin-compatible ad blocker (`engine/ubo`, `tools/ubo`) loaded as a WebKit web process extension
+Robin uses a uBlock-Origin-compatible ad blocker (`engine/ubo`, `tools/ubo`) loaded as a WebKit web process extension
 (`lib/web-extensions/libwren-ubo.so`), paired with a `$popup`/`$popunder` rule matcher in the engine
 (`engine/src/popup_filter.h`). Settings, optional extra filter lists, allowed hosts, and custom rules are managed on
-`wren://adblock`.
+`wren://adblock` (the internal URL scheme and the `wren-*` names below come from Wren and are kept).
 
 ## How it works
 
@@ -26,7 +26,7 @@ EasyPrivacy, Online Malicious URL Blocklist, Peter Lowe's list. `tools/ubo/updat
 
 My filters: wren://adblock has a "My filters" box for the user's own rules (uBO syntax, trusted). They are kept as
 text in `$WPE_BROWSER_DATA_DIR/ubo-my-filters.txt` and parsed in the web process, never built into the package.
-That is where site-specific fixes belong; the package only ships generic tools for them, such as Wren's scriptlets
+That is where site-specific fixes belong; the package only ships generic tools for them, such as Robin's scriptlets
 (`tools/ubo/wren-scriptlets.js`):
 
 | scriptlet | what it does |

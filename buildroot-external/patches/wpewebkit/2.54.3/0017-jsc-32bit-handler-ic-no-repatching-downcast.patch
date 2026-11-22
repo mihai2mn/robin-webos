@@ -11,7 +11,7 @@ the handler cache in release builds (the guarding ASSERTs compile out):
   slowPathStartLocation.
 - JITInlineCacheGenerator::setUpStubInfo: do not call setUsedRegisters on a handler IC.
 
-See build/jit254/REPORT.md sections 15.3 and 17.4.
+Details are in the maintainer's JIT bring-up report (not in this repository).
 ---
 diff --git a/Source/JavaScriptCore/bytecode/PropertyInlineCache.h b/Source/JavaScriptCore/bytecode/PropertyInlineCache.h
 --- a/Source/JavaScriptCore/bytecode/PropertyInlineCache.h

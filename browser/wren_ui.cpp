@@ -268,7 +268,7 @@ class TabCard : public wnk::ui::View {
         const TextStyle t = style(fonts().semibold, 24, ui.fade(kText)), h = style(fonts().regular, 19, ui.fade(kMuted));
         const std::string title = info_.title.empty() ? (info_.url.empty() ? "New tab" : host_of(info_.url)) : info_.title;
         r.draw_text(t, {x, f.bottom() - 60}, ellipsize(r, t, title, w));
-        r.draw_text(h, {x, f.bottom() - 30}, ellipsize(r, h, info_.url.empty() ? "Wren" : host_of(info_.url), w));
+        r.draw_text(h, {x, f.bottom() - 30}, ellipsize(r, h, info_.url.empty() ? "Robin" : host_of(info_.url), w));
     }
 
  private:
@@ -735,9 +735,9 @@ HomePage::HomePage(HomeData data, TabHandlers tabs, std::function<void(Ui &, con
                    wnk::ui::ClickHandler menu)
     : open_(std::move(open)), tabs_h_(std::move(tabs)) {
     name = "home";
-    mark_ = &add<wnk::ui::ImageView>(icon_dir_url() + "wren-mark.png");
+    mark_ = &add<wnk::ui::ImageView>(icon_dir_url() + "robin-mark.png");
     mark_->set_fit(wnk::ui::ImageFit::Contain);
-    name_ = &add<wnk::ui::Label>("Wren");
+    name_ = &add<wnk::ui::Label>("Robin");
     name_->set_font_size(34).set_bold(true);
     tabs_ = &add<wnk::ui::Row>(6);
     tabs_->set_padding({6, 6, 6, 6});

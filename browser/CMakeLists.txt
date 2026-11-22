@@ -2,14 +2,16 @@
 cmake_minimum_required(VERSION 3.22)
 project(wpebrowser LANGUAGES C CXX)
 
-# The app id: override for a development copy (e.g. -DWPEB_APPID=org.sostk.wpebrowser.dev) so it can be
+# The app id: override for a development copy (e.g. -DWPEB_APPID=io.github.mihai2mn.robin.dev) so it can be
 # installed and launched beside the real app. Everything that names the id at run time uses this same value.
-set(WPEB_APPID "org.sostk.wpebrowser" CACHE STRING "webOS application id")
+set(WPEB_APPID "io.github.mihai2mn.robin" CACHE STRING "webOS application id")
+# The version: one file for the whole repository (appinfo, the About screen, the logs header, tools/package-release.sh).
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" WPEB_VERSION LIMIT_COUNT 1)
 # The title in the launcher: a development copy gets its own, so the two can be told apart on the TV.
-# appinfo requiredMemory (MB): with 1700 webOS closes a suspended background app (YouTube) when Wren starts, which frees ~200 MB; 1200 did
+# appinfo requiredMemory (MB): with 1700 webOS closes a suspended background app (YouTube) when Robin starts, which frees ~200 MB; 1200 did
 # not, 2200 did but slowed the launch by ~8 s (TV, 2026-11-20).
 set(WPEB_REQUIRED_MEMORY 1700 CACHE STRING "appinfo requiredMemory")
-set(WPEB_TITLE "Wren" CACHE STRING "launcher title")
+set(WPEB_TITLE "Robin" CACHE STRING "launcher title")
 
 # The kit: -DWNK_KIT_DIR=..., else $WNK_KIT_DIR, else where it was when tools/new-app.py made this.
 # A relative path is taken from this folder (a git submodule at kit/ would be "kit").
@@ -39,7 +41,7 @@ endif ()
 
 add_executable(wpebrowser main.cpp chrome.cpp screens.cpp profile.cpp storage.cpp private_loader.cpp engine_client.cpp page_view.cpp keys.cpp media_keys.cpp direct_owner.cpp media_server.cpp lg_media_player.cpp wren_ui.cpp log_export.cpp vt_texture_probe.cpp)
 target_include_directories(wpebrowser PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../common")
-target_compile_definitions(wpebrowser PRIVATE WPEB_APP_ID_STRING="${WPEB_APPID}")
+target_compile_definitions(wpebrowser PRIVATE WPEB_APP_ID_STRING="${WPEB_APPID}" WPEB_VERSION_STRING="${WPEB_VERSION}")
 # printf-style mismatches (a %d given a float crashed the app, 2026-11-20) are build errors for the UI target.
 target_compile_options(wpebrowser PRIVATE -Wformat -Werror=format)
 target_link_libraries(wpebrowser PRIVATE wnk_app wnk_media_ndl wnk_media_starfish ${CMAKE_DL_LIBS})
@@ -50,7 +52,7 @@ if (WNK_WEBOS)
 endif ()  # dlopen: libwpeb-owner.so (direct_owner.cpp)
 target_include_directories(wpebrowser SYSTEM PRIVATE "${WNK_KIT_DIR}/third_party")  # nlohmann/json.hpp
 
-# Fonts live in fonts/ next to the executable, on the host and in the ipk: the kit's Atkinson Hyperlegible and Wren's
+# Fonts live in fonts/ next to the executable, on the host and in the ipk: the kit's Atkinson Hyperlegible and Robin's
 # Manrope (both OFL; Manrope from Google Fonts, static weights 300/400/600/700).
 add_custom_command(TARGET wpebrowser POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_directory "${WNK_FONT_DIR}" "$<TARGET_FILE_DIR:wpebrowser>/fonts"
@@ -62,8 +64,8 @@ wnk_add_webos_package(
         TARGET wpebrowser
         APPID ${WPEB_APPID}
         TITLE "${WPEB_TITLE}"
-        VERSION 0.3.3
-        VENDOR "sostk"
+        VERSION ${WPEB_VERSION}
+        VENDOR "mihai2mn"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"
         ICON_COLOR "#0b1020"

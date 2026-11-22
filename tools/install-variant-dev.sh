@@ -8,7 +8,7 @@
 #   OWNER=wren-build bash tools/install-variant-dev.sh restore
 # Host: WSL/Linux with patchelf (Buildroot's host tools), ssh host "lgtv". Run on the TV: nothing but cp/mv.
 set -euo pipefail
-APP=org.sostk.wpebrowser.dev; E=/media/developer/apps/usr/palm/applications/$APP/engine
+APP=io.github.mihai2mn.robin.dev; E=/media/developer/apps/usr/palm/applications/$APP/engine
 OWNER=${OWNER:?OWNER=<the name that holds the lock>}
 PATCHELF=${PATCHELF:-$HOME/webos-browser-build/br-out-aarch64/host/bin/patchelf}
 tv() { timeout "${1:-60}" ssh -o BatchMode=yes -o ConnectTimeout=25 lgtv "$2"; }

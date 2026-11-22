@@ -27,7 +27,7 @@
 #   lib/glibc/ (the tree's glibc 2.44 + loader: mandatory, see REPORT.md §5),
 #   lib/mesa/  (libEGL/libGLESv2 + libgallium + libLLVM: mandatory, SHM presentation is the only mode), gstreamer
 #   plugins, fonts, certificates. Every executable gets PT_INTERP =
-#   /tmp/org.sostk.wpebrowser/ld-linux-aarch64.so.1 (browser/private_loader.cpp creates that link) and
+#   /tmp/io.github.mihai2mn.robin/ld-linux-aarch64.so.1 (browser/private_loader.cpp creates that link) and
 #   RPATH $ORIGIN/lib:$ORIGIN/lib/glibc:$ORIGIN/lib/mesa.
 set -euo pipefail
 project=$(cd "$(dirname "$0")/.." && pwd)
@@ -119,7 +119,7 @@ check_mesa() {
         echo "   Mesa: $(du -sh "$TARGET"/usr/lib/libgallium-*.so 2>/dev/null | cut -f1) (libgallium, softpipe - no libLLVM)"
     fi
 }
-# libpulse comes from the TV (its PulseAudio 9 drops newer clients, NOTES.md); bundling ours breaks sound silence-
+# libpulse comes from the TV (its PulseAudio 9 drops newer clients, the development notes (not in the repository)); bundling ours breaks sound silence-
 # side, so make sure the tree's copy is NOT a dependency candidate for the engine's package.
 check_pulse_not_bundled() {
     if [ -e "$TARGET/usr/lib/libpulse.so.0" ]; then
@@ -326,11 +326,11 @@ cp "$TARGET/etc/ssl/certs/ca-certificates.crt" "$stage/etc/ssl/certs/" || { echo
 # ---- PT_INTERP: the TV has no /lib/ld-linux-aarch64.so.1 ----
 # Everything the engine execs is linked against Buildroot's loader path, which does not exist on the TV, so each
 # exec would fail with ENOENT. Point them at the same link in the app's runtime folder that the 32-bit engine uses
-# (browser/private_loader.cpp): the UI points /tmp/org.sostk.wpebrowser/ld-linux-aarch64.so.1 at our bundled
+# (browser/private_loader.cpp): the UI points /tmp/io.github.mihai2mn.robin/ld-linux-aarch64.so.1 at our bundled
 # lib/glibc/ld-linux-aarch64.so.1 (or at another loader, e.g. the bridge's, with our libc supplied through
 # --library-path / LD_LIBRARY_PATH). patchelf is a Buildroot host package (BR2_PACKAGE_HOST_PATCHELF=y); it exists
 # in host/bin once the tree has been built that far.
-LOADER_LINK=${LOADER_LINK:-/tmp/org.sostk.wpebrowser/ld-linux-aarch64.so.1}
+LOADER_LINK=${LOADER_LINK:-/tmp/io.github.mihai2mn.robin/ld-linux-aarch64.so.1}
 if ! grep -qx 'BR2_PACKAGE_HOST_PATCHELF=y' "$BR_OUT/.config"; then
     echo "BR2_PACKAGE_HOST_PATCHELF is not enabled in $BR_OUT/.config; PT_INTERP cannot be set" >&2
     exit 1

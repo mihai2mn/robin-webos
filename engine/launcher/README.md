@@ -18,10 +18,10 @@ forwards the UI's argv unchanged.
 
 ## Choosing, in order
 
-1. `$WPE_BROWSER_DEBUG_ENGINE=64` / `=32` — reachable from a launch parameter, because Wren's `wpebEnv` passes
+1. `$WPE_BROWSER_DEBUG_ENGINE=64` / `=32` — reachable from a launch parameter, because Robin's `wpebEnv` passes
    `WPE_BROWSER_DEBUG*` names through (`browser/engine_client.cpp:202`):
    ```bash
-   ares-launch -d <device> org.sostk.wpebrowser -p '{"wpebEnv":{"WPE_BROWSER_DEBUG_ENGINE":"64"}}'
+   ares-launch -d <device> io.github.mihai2mn.robin -p '{"wpebEnv":{"WPE_BROWSER_DEBUG_ENGINE":"64"}}'
    ```
 2. `<WPE_BROWSER_DATA_DIR>/engine64` containing `on` — the persistent switch.
 3. Otherwise the 32-bit engine (the default).
@@ -55,5 +55,4 @@ line.
 Static, plain C, no dependencies beyond libc: it is the first thing the UI execs, before the private-loader link
 exists, so it has to work on the TV's own glibc (and on webOS 4's).
 
-Status: **all six acceptance tests PASS on the TV**, plus 9/9 PC tests. Design, verified findings and test detail:
-[`build/bridge64/ui-launch/LAUNCHER.md`](../../build/bridge64/ui-launch/LAUNCHER.md).
+Status: **all six acceptance tests PASS on the TV**, plus 9/9 PC tests. Design and findings: see [engine64.md](../../docs/engine64.md) and [architecture.md](../../docs/architecture.md).

@@ -117,7 +117,7 @@ std::string export_logs(const LogExportRequest &req, const std::string &dest_dir
     std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S %z", &tm);
 
     std::ostringstream o;
-    o << "Wren logs, saved " << when << "\n";
+    o << "Robin logs, saved " << when << "\n";
     for (const std::string &h : req.header) o << h << "\n";
     o << "Web addresses below keep their host and path only (query strings and fragments removed).\n"
          "Please read this file before posting it publicly.\n";
@@ -136,7 +136,7 @@ std::string export_logs(const LogExportRequest &req, const std::string &dest_dir
         if (!body.empty() && body.back() != '\n') o << "\n";
     }
 
-    const std::string path = dest_dir + "/wren-logs-" + stamp + ".txt";
+    const std::string path = dest_dir + "/robin-logs-" + stamp + ".txt";
     std::FILE *f = std::fopen(path.c_str(), "wb");
     if (!f) {
         if (error) *error = std::strerror(errno);
