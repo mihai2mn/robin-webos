@@ -1,8 +1,8 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # The release package: ONE ipk with the UI, the 32-bit WebKit 2.54.3 engine (JIT+DFG), the aarch64 engine behind the
-# engine launcher, and the uBO data. Two variants from the same tree: the dev id (org.sostk.wpebrowser.dev, for
-# testing beside the real app) and the real id (org.sostk.wpebrowser). Builds from a CLEAN CLONE of a commit, so
+# engine launcher, and the uBO data. Two variants from the same tree: the dev id (<APP_ID_BASE>.dev, for
+# testing beside the real app) and the real id (<APP_ID_BASE>, default io.github.mihai2mn.robin). Builds from a CLEAN CLONE of a commit, so
 # uncommitted work in the working tree never ends up in the package. Host only (WSL/Linux + Docker); no TV commands.
 #
 #   bash tools/package-release.sh all                 every phase, both ids -> build/release/*.ipk, MD5SUMS, BUILD-INFO.txt
@@ -39,7 +39,11 @@ OUT=${OUT:-$repo/build/release}
 STAGE_OUT=$OUT.tmp   # the packages are assembled here and move into $OUT only when the whole set was built and checked
 WORK=${WORK:-$BR/release-work}
 IDS=${IDS:-"dev release"}
-VERSION=${VERSION:-0.3.3}
+VERSION=${VERSION:-$(tr -d ' \r\n' < "$repo/VERSION")}   # the repository's VERSION file, also read by browser/CMakeLists.txt
+# The published source and the app id are build parameters, not constants: a different owner or name changes only these.
+SOURCE_REPO=${SOURCE_REPO:-https://github.com/mihai2mn/robin-webos}
+SOURCE_URL=${SOURCE_URL:-$SOURCE_REPO/tree/${RELEASE_TAG:-$COMMIT}}; export SOURCE_URL   # lands in licenses/SOURCE.txt (kit) and is rewritten by add64
+APP_ID_BASE=${APP_ID_BASE:-io.github.mihai2mn.robin}
 STAGE_BASE=${STAGE_BASE:-$HOME/wren/build/engine-stage-jit/engine}
 WK_SHARED=${WK_SHARED:-$BR/br-out/build/wpewebkit-2.54.3}
 WK_TREE=${WK_TREE:-$WORK/wk-tree}
@@ -51,8 +55,8 @@ STRIP64=$BR/br-out-aarch64/host/bin/aarch64-buildroot-linux-gnu-strip
 PATCHELF=${PATCHELF:-$BR/br-out-aarch64/host/bin/patchelf}
 src=$WORK/src
 export TMPDIR=${PKG_TMP:-$WORK/tmp}; mkdir -p "$TMPDIR"
-appid() { case "$1" in dev) echo org.sostk.wpebrowser.dev ;; release) echo org.sostk.wpebrowser ;; *) echo "bad id $1" >&2; exit 2 ;; esac; }
-title_of() { case "$1" in dev) echo "Wren Test" ;; *) echo "Wren" ;; esac; }
+appid() { case "$1" in dev) echo "$APP_ID_BASE.dev" ;; release) echo "$APP_ID_BASE" ;; *) echo "bad id $1" >&2; exit 2 ;; esac; }
+title_of() { case "$1" in dev) echo "Robin Test" ;; *) echo "Robin" ;; esac; }
 mb() { awk -v x="$1" 'BEGIN{printf "%.1f", x/1048576}'; }
 say() { echo "== $(date +%T) $*"; }
 phase=${1:-all}
@@ -249,6 +253,12 @@ do_stage() {
         rm -rf "$WORK/stage-$id"; mkdir -p "$WORK/stage-$id"
         cp -a "$STAGE_BASE" "$s"
         rm -f "$s/wpe-engine"                        # the 2.50.5 engine
+        # The base stage's Buildroot legal-info was made for WebKit 2.50.5. The package's WebKit is 2.54.3 (same licence files:
+        # Source/WebCore/LICENSE-LGPL-2.1 and LICENSE-APPLE are byte-identical in both tarballs), so the manifest and folder say 2.54.3.
+        if [ -f "$s/licenses/manifest.csv" ]; then
+            sed -i 's/wpewebkit-2\.50\.5/wpewebkit-2.54.3/g; s/"wpewebkit","2\.50\.5"/"wpewebkit","2.54.3"/' "$s/licenses/manifest.csv"
+            [ -d "$s/licenses/wpewebkit-2.50.5" ] && mv "$s/licenses/wpewebkit-2.50.5" "$s/licenses/wpewebkit-2.54.3"
+        fi
         # WebKit 2.54.3 (the JIT series), stripped
         install -m755 "$WK254/lib/libWPEWebKit-2.0.so.1.11.6" "$s/lib/libWPEWebKit-2.0.so.1"
         for h in WPEWebProcess WPENetworkProcess WPEGPUProcess; do install -m755 "$WK254/bin/$h" "$s/libexec/$h"; done
@@ -292,6 +302,57 @@ do_ui() {
 }
 
 # ---- add64: engine64/ and the engine notes go into the same ipk -------------------------------------------------
+# add_licences <appdir> <app id>: what the GPL, LGPL, MIT, MPL and Apache terms want to travel with the binaries.
+#  - licenses/SOURCE.txt: where the corresponding source is (replaces the kit's "not set" text)
+#  - engine64/licenses: Mesa and LLVM, which the 32-bit engine's Buildroot manifest does not list (they are only in the aarch64 build)
+#  - licenses/ad-blocker: adblock-rust, the Rust crates, uBlock Origin, the filter lists (made by tools/ubo, phase ubo)
+add_licences() {
+    local appdir=$1 app=$2 kit bd m l
+    kit=$(git -C "$src/third_party/webos-native-app-kit" rev-parse HEAD 2>/dev/null || echo unknown)
+    mkdir -p "$appdir/licenses"
+    cat > "$appdir/licenses/SOURCE.txt" <<EOF
+Robin $VERSION ($app)
+Robin is free software under the GNU General Public License, version 3 or (at your option) any later version
+(licenses/LICENSE). It is based on Wren 0.3.3 by sostk, https://github.com/sostk/webos-wpe-browser .
+
+Corresponding source of this package: $SOURCE_URL
+  commit $COMMIT
+  webOS native app kit, commit $kit (git submodule third_party/webos-native-app-kit,
+    https://github.com/Native-Webos/webos-native-app-kit), with third_party/patches/webos-native-app-kit applied
+  WPE WebKit 2.54.3: the release tarball https://wpewebkit.org/releases/wpewebkit-2.54.3.tar.xz plus the patch series
+    buildroot-external/patches/wpewebkit/2.54.3/ of the repository above
+  Libraries and toolchain: Buildroot (commit cdd3776b) with buildroot-external/ and toolchain/ct-ng.defconfig of the
+    repository above. The sources of the Buildroot packages (GStreamer, FFmpeg, GLib and the rest of engine/licenses/manifest.csv)
+    are attached to the release page of $SOURCE_REPO .
+  Filter lists: the snapshot the build downloaded is attached to the same release page.
+Licences: licenses/ (UI and kit components), engine/licenses/ and engine64/licenses/ (engine libraries),
+licenses/ad-blocker/ (ad blocker, Rust crates, filter lists).
+
+LG's firmware libraries (media pipeline, NDL, Luna, EGL/GLES, libcurl) are not part of this package;
+they are loaded from the TV at runtime.
+EOF
+    # engine64: Mesa and LLVM
+    bd=$BR/br-out-aarch64/build
+    mkdir -p "$appdir/engine64/licenses"
+    for m in "$bd"/mesa3d-*/docs/license.rst; do
+        [ -f "$m" ] || { echo "no Mesa licence in $bd (mesa3d-*/docs/license.rst): the aarch64 Buildroot tree is incomplete" >&2; exit 1; }
+        l=$(basename "$(dirname "$(dirname "$m")")"); mkdir -p "$appdir/engine64/licenses/$l"; cp "$m" "$appdir/engine64/licenses/$l/"
+    done
+    for m in "$bd"/llvm-*/LICENSE.TXT; do
+        [ -f "$m" ] || { echo "no LLVM licence in $bd (llvm-*/LICENSE.TXT)" >&2; exit 1; }
+        l=$(basename "$(dirname "$m")"); mkdir -p "$appdir/engine64/licenses/$l"; cp "$m" "$appdir/engine64/licenses/$l/"
+    done
+    cat > "$appdir/engine64/licenses/README.txt" <<EOF
+engine64/ holds the same libraries as engine/ built for aarch64, plus Mesa (software renderer) and LLVM.
+Mesa: MIT and other permissive licences, see mesa3d-*/license.rst. LLVM: Apache-2.0 with LLVM exceptions, see llvm-*/LICENSE.TXT.
+The licences of all other packages are in ../../engine/licenses/ (same packages, same versions).
+EOF
+    # ad blocker
+    [ -f "$WORK/ubo/data/licences/NOTICES.txt" ] || { echo "no ad blocker notices in $WORK/ubo/data/licences: run the ubo phase" >&2; exit 1; }
+    mkdir -p "$appdir/licenses/ad-blocker"; cp -a "$WORK/ubo/data/licences/." "$appdir/licenses/ad-blocker/"
+    rm -rf "$appdir/engine/ubo/licences"
+}
+
 do_add64() {
     [ -d "$STAGE64" ] || { echo "no aarch64 stage $STAGE64 (tools/engine-aarch64.sh stage)" >&2; exit 1; }
     rm -rf "$STAGE_OUT"; mkdir -p "$STAGE_OUT"   # this run's set only; $OUT is not touched until `publish`
@@ -303,7 +364,8 @@ do_add64() {
         ( cd "$w" && ar x "$in" && mkdir data && tar xzf data.tar.gz -C data )
         local appdir="$w/data/usr/palm/applications/$app"
         cp -a "$STAGE64" "$appdir/engine64"
-        rm -rf "$appdir/engine64/licenses" "$appdir/engine64/lib/glibc/gconv"   # UTF-8/ASCII only; licences ship in engine/licenses
+        rm -rf "$appdir/engine64/licenses" "$appdir/engine64/lib/glibc/gconv"   # UTF-8/ASCII only
+        add_licences "$appdir" "$app"
         find "$appdir/engine64" -type f \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) | while read -r f; do
             case "$f" in *.dat|*.conf|*.json|*.txt|*.ini|*.js) continue ;; esac
             "$STRIP64" --strip-unneeded "$f" 2>/dev/null || true
@@ -320,7 +382,7 @@ do_add64() {
         install -m755 "$WORK/ubo/aarch64-unknown-linux-gnu/libwren-ubo.so" "$appdir/engine64/lib/glibc/lib/web-extensions/libwren-ubo.so"
         ln -s ../../../engine/ubo "$appdir/engine64/lib/glibc/ubo"
         cat > "$appdir/ENGINES.txt" <<EOF
-Wren $VERSION ($app): two web engines in one package
+Robin $VERSION ($app): two web engines in one package
   engine/    32-bit WPE WebKit 2.54.3 (ARMv7 JIT + DFG), the default. engine/wpe-engine is a small launcher; the real
              engine is engine/wpe-engine32.
   engine64/  the same WebKit 2.54.3 as an aarch64 process (about twice as fast on JavaScript, software rendering,
@@ -333,7 +395,7 @@ Switching (the launcher, engine/wpe-engine, reads these in this order):
   3. otherwise the 32-bit engine.
 If engine64/ or its loader is missing the launcher logs "wpe-launcher: ..." in engine.log and starts the 32-bit engine.
 Hardware video in shared-memory mode is opt-in: launch parameter {"wpebShmVideo":"1"} (32-bit engine).
-Licences of the bundled libraries: licenses/ and engine/licenses/.
+Licences of the bundled libraries: licenses/, engine/licenses/, engine64/licenses/, licenses/ad-blocker/.
 EOF
         # control: new Installed-Size; same package name and version
         local kb; kb=$(du -sk "$w/data" | cut -f1)
@@ -425,6 +487,12 @@ do_check() {
             interp=$(readelf -l "$A/$f" 2>/dev/null | sed -n 's/.*interpreter: \(.*\)\]/\1/p')
             [ "$interp" = "/tmp/$app/ld-linux-aarch64.so.1" ] || fail "$app: $f PT_INTERP is '$interp'"
         done
+        # licence material (see add_licences)
+        grep -q 'not set' "$A/licenses/SOURCE.txt" 2>/dev/null && fail "$app: licenses/SOURCE.txt does not name the source"
+        grep -q "$COMMIT" "$A/licenses/SOURCE.txt" 2>/dev/null || fail "$app: licenses/SOURCE.txt does not name commit $COMMIT"
+        grep -q 'wpewebkit.*2\.50\.5' "$A/engine/licenses/manifest.csv" 2>/dev/null && fail "$app: engine/licenses/manifest.csv still lists WebKit 2.50.5"
+        ls "$A"/engine64/licenses/mesa3d-*/license.rst "$A"/engine64/licenses/llvm-*/LICENSE.TXT >/dev/null 2>&1 || fail "$app: engine64/licenses has no Mesa or LLVM licence"
+        for f in NOTICES.txt THIRD-PARTY-CRATES.txt LICENCES.txt LICENSE.txt; do [ -s "$A/licenses/ad-blocker/$f" ] || fail "$app: licenses/ad-blocker/$f missing"; done
         rm -rf "$w"
     done
     [ "$count" -ge 1 ] || fail "no package of IDS=$IDS found in $dir"

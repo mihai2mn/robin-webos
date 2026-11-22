@@ -1,0 +1,32 @@
+Ad blocker notices
+==================
+
+Robin's ad blocker (engine/ubo, tools/ubo) is GPL-3.0-or-later like the rest of the package. It uses the following.
+
+Code
+----
+adblock-rust 0.13.6, Brave Software, MPL-2.0. Unmodified. Source: https://github.com/brave/adblock-rust (also
+  https://crates.io/crates/adblock/0.13.6). The Mozilla Public License 2.0 text is in THIRD-PARTY-CRATES.txt.
+rustc-hash 2.1.3, MIT OR Apache-2.0, with one change (engine/ubo/vendor/README.md in the source).
+The other Rust crates (59 in all) and their licence texts: THIRD-PARTY-CRATES.txt.
+uBlock Origin (scriptlets and redirect resources), Raymond Hill and contributors, GPL-3.0. Source:
+  https://github.com/gorhill/uBlock . The commit used is in engine/ubo/COMMIT of the package. Its licence text is LICENSE.txt here.
+
+Filter lists (compiled into engine.dat and lists/*.dat)
+-------------------------------------------------------
+The lists are downloaded on the build day. LICENCES.txt holds the header lines each list carries.
+
+uBlock filters, badware, privacy, unbreak, quick fixes, annoyances, cookie notices, URL tracking
+  uBlockOrigin/uAssets, https://github.com/uBlockOrigin/uAssets : GPL-3.0.
+EasyList, EasyPrivacy, EasyList social, annoyances, newsletters, notifications, chat, AI
+  https://easylist.to : GPL-3.0-or-later or CC BY-SA 3.0, dual. Used here under the GPL.
+URLhaus filter, Phishing URL Blocklist
+  https://gitlab.com/malware-filter : CC0-1.0 (as the projects state; their own pages are the authority).
+AdGuard Base, optional, off by default
+  https://github.com/AdguardTeam/AdguardFilters : GPL-3.0.
+Peter Lowe's ad server list
+  https://pgl.yoyo.org/adservers/ : no licence is published. The list page says: "Feel free to combine this list with
+  yours or lists from other sites and put it up on the web, though!" (read 2026-11-22). Credit: Peter Lowe, pgl@yoyo.org.
+  The package uses it on that statement. Remove the "plowe" entry from tools/ubo/update.py if that is not enough for you.
+
+Robin's own filters and scriptlets (tools/ubo/wren-filters.txt, wren-scriptlets.js): GPL-3.0-or-later.

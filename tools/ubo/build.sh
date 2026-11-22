@@ -35,6 +35,9 @@ for l in json.load(open(os.path.join(ubo, "lists", "lists.json"))):
         --target-dir "$OUT/cargo-host" --bin wren-ubo-compile -- \
         "$OUT/data" "$UBO/ubo/web_accessible_resources" "$UBO/ubo/js/redirect-resources.js" "$OUT/scriptlets.json" $LISTS "$UBO/wren-filters.txt:trusted"
     cp "$SRC/engine/ubo/cosmetic.js" "$SRC/engine/ubo/compat.js" "$OUT/data/"
+    # Notices that travel with the compiled lists and the Rust crates (the package puts them in licenses/ad-blocker/).
+    mkdir -p "$OUT/data/licences"
+    cp "$SRC/engine/ubo/NOTICES.txt" "$SRC/engine/ubo/THIRD-PARTY-CRATES.txt" "$UBO/lists/LICENCES.txt" "$UBO/ubo/LICENSE.txt" "$OUT/data/licences/"
     # The windows' own filters ($popup, $popunder): adblock-rust leaves them out, the engine matches them (engine/src/popup_filter.h).
     sh "$UBO/popups.sh" "$OUT/data/popups.txt" "$UBO"/lists/*.txt "$UBO/wren-filters.txt"
     # Extra lists: one engine each, with uBO's Unbreak and Quick fixes so their exceptions apply inside it, and
