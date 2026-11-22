@@ -51,6 +51,13 @@ clean_launch() {  # clean_launch JSON: close the app, clear the session and the 
     if [ -n '$DATA' ]; then rm -f '$DATA'/profile/session*; rm -rf '$DATA/webkit/cache'; mkdir -p '$DATA/webkit/cache'; chown -R \$(stat -c %u:%g '$DATA') '$DATA/webkit/cache' 2>/dev/null; fi
     : > /tmp/wrenbench/results.log; tv launch $APP '$1' >/dev/null"
 }
+check_env() {  # check_env EVENTS_LOG: every PAGE_ENV name must appear as "engine env NAME=" (the engine launch logs each name it accepts); a name the browser drops would void the run
+  [ -n "${PAGE_ENV:-}" ] || return 0
+  local n
+  for n in $(printf '%s' "$PAGE_ENV" | grep -o '"[A-Za-z0-9_]*"[[:space:]]*:' | tr -d '": \t'); do
+    grep -q "engine env $n=" "$1" || { say "FAIL: PAGE_ENV name $n was not accepted by the browser (no 'engine env $n=' in $1): this run does not measure what was asked"; exit 4; }
+  done
+}
 savelogs() {  # savelogs TAG
   tv 30 "d=/tmp/$APP; cp \$d/engine.log /tmp/wrenbench/e.log; cp \$d/events.log /tmp/wrenbench/v.log" >/dev/null 2>&1
   timeout 60 scp -q -o BatchMode=yes lgtv:/tmp/wrenbench/e.log "$OUT/engine-$1.log"; timeout 60 scp -q -o BatchMode=yes lgtv:/tmp/wrenbench/v.log "$OUT/events-$1.log"
@@ -69,6 +76,7 @@ want pages && for url in $PAGES; do for r in $(seq 1 "$RUNS"); do
     [ -z "$fin" ] && fin=$(tv 15 "grep -m1 'load finished after' /tmp/$APP/engine.log" 2>/dev/null | sed -n 's/.*after \([0-9]*\) ms.*/\1/p')
     [ -n "$fin" ] && [ "$i" -ge 25 ] && break; done
   savelogs "$tag"
+  check_env "$OUT/events-$tag.log"
   say "page url=$url run=$r finish_ms=${fin:-NA} web_rss_peak_mb=$((peak/1024)) commit_ms=$(grep -m1 'load committed after' "$OUT/engine-$tag.log" | sed -n 's/.*after \([0-9]*\) ms.*/\1/p')"
 done; done
 want scroll && for r in $(seq 1 "$RUNS"); do

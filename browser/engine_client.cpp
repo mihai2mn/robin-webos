@@ -207,8 +207,8 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
         if (name == "WEBKIT_EXEC_PATH" || name == "WEBKIT_INJECTED_BUNDLE_PATH") continue;
         if (name.rfind("WEBKIT_", 0) == 0 || name.rfind("JSC_", 0) == 0 || name.rfind("WPE_BROWSER_DEBUG", 0) == 0 ||
             name.rfind("GST_DEBUG", 0) == 0 || name.rfind("G_TLS_", 0) == 0 ||
-            name.rfind("MSE_", 0) == 0) {  // MSE_MAX_BUFFER_SIZE: WPE's per-type SourceBuffer byte limit (experiments)
-  // G_TLS_GNUTLS_PRIORITY: TLS cipher order (network speed tests)
+            name.rfind("MSE_", 0) == 0 ||  // MSE_MAX_BUFFER_SIZE: WPE's per-type SourceBuffer byte limit (experiments)
+            name == "WREN_UBO") {          // WREN_UBO=0: the ad blocker off (benchmarks); G_TLS_GNUTLS_PRIORITY: TLS cipher order
             set_env(env, name, value);
             WNK_LOGI(kCat, "engine env %s=%s (launch parameter)", name.c_str(), value.c_str());
         }
