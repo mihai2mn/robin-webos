@@ -779,6 +779,16 @@ class App : public wnk::app::Delegate {
         // inside first if it slipped out, e.g. to the page under it).
         if (browsing && screen_->overlay_open()) {
             browser::wren::Overlay *o = screen_->open_overlay();
+            // The OK held to open the quick actions is still down: its repeats and its release belong to that hold, not to
+            // the overlay's widgets. The release also ends the hold (ok_down_ otherwise stayed set and swallowed pointer clicks).
+            if (action == A::Confirm && ok_down_) {
+                if (e.down && !e.repeat) {
+                    ok_down_ = false;  // a new press: the last release was lost
+                } else {
+                    if (!e.down) ok_down_ = false;
+                    return true;
+                }
+            }
             if (action == A::Back) {
                 if (e.down && !e.repeat) o->close(ui);
                 return true;
