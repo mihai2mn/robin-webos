@@ -539,6 +539,7 @@ struct target {
     struct wl_webos_surface_group *group;
     struct wl_keyboard *keyboard;
     struct wl_webos_exported *video; // the page's video window (wpeb_webos_video_open), NULL without one
+    unsigned video_seq; // bumped by every wpeb_webos_video_open on this target (g_video_lock)
     char video_id[128]; // its window id: a sink addresses its own window by it, whichever page is shown by then
     enum wpeb_crop_mode video_crop_mode;
     int video_place_state; // 0=none, 1=window, 2=crop, 3=squash, 4=park (for transition logging)
@@ -713,6 +714,13 @@ static struct target *g_shown_target; // the last attached page target (g_video_
 static void target_close_video(struct target *t); // g_video_lock held
 struct target;
 static struct target *g_video_targets[32]; // pages that have a video window with an id (g_video_lock)
+// Every target from target_create until target_destroy frees it (g_video_lock): wpeb_webos_video_open waits for its window id
+// with the lock released, and the page may be closed and freed meanwhile.
+static GHashTable *g_live_targets;
+static bool target_alive(const struct target *t) // g_video_lock held
+{
+    return g_live_targets && g_hash_table_contains(g_live_targets, t);
+}
 static void video_register(struct target *t, bool on) // g_video_lock held
 {
     for (size_t i = 0; i < G_N_ELEMENTS(g_video_targets); ++i)
@@ -906,6 +914,11 @@ static void *target_create(struct wpe_renderer_backend_egl_target *wpe, int fd)
     struct target *t = g_new0(struct target, 1);
     t->wpe = wpe;
     t->fd = fd;
+    pthread_mutex_lock(&g_video_lock);
+    if (!g_live_targets)
+        g_live_targets = g_hash_table_new(g_direct_hash, g_direct_equal);
+    g_hash_table_add(g_live_targets, t);
+    pthread_mutex_unlock(&g_video_lock);
     return t;
 }
 
@@ -979,6 +992,9 @@ static void target_destroy(void *data)
     target_deinitialize(t);
     if (t->fd >= 0)
         close(t->fd);
+    pthread_mutex_lock(&g_video_lock);
+    g_hash_table_remove(g_live_targets, t);
+    pthread_mutex_unlock(&g_video_lock);
     g_free(t);
 }
 
@@ -1248,7 +1264,9 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
     memset(&t->video_last_plan, 0, sizeof(t->video_last_plan));
     g_video_id[0] = '\0';
     t->video_id[0] = '\0';
+    const unsigned seq = ++t->video_seq;
     t->video = wl_webos_foreign_export_element(t->renderer->foreign, t->surface, WL_WEBOS_FOREIGN_WEBOS_EXPORTED_TYPE_VIDEO_OBJECT);
+    struct wl_webos_exported *const mine = t->video;
     // The event arrives on the target's queue, which WebKit's compositing thread dispatches.
     wl_proxy_set_queue((struct wl_proxy *)t->video, t->queue);
     wl_webos_exported_add_listener(t->video, &video_listener, NULL);
@@ -1259,6 +1277,13 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
     until.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
     if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
     while (!g_video_id[0] && pthread_cond_timedwait(&g_video_cond, &g_video_lock, &until) == 0) { }
+    // The wait let go of the lock: the page may have been closed (target_deinitialize closes its window, target_destroy frees
+    // it), or another open may have replaced the window. Then nothing of t may be touched.
+    if (!target_alive(t) || t->video != mine || t->video_seq != seq) {
+        pthread_mutex_unlock(&g_video_lock);
+        LOG("video window: the page or its window went away while the id was awaited");
+        return 0;
+    }
     int ok = g_video_id[0] != '\0';
     if (ok) {
         snprintf(id, size, "%s", g_video_id);
