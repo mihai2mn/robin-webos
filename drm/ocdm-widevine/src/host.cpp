@@ -1,6 +1,7 @@
 #include "host.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -105,14 +106,23 @@ bool Host::write(const std::string& name, const std::string& data)
     if (path.empty())
         return false;
     std::lock_guard<std::mutex> lock(storage_mutex_);
-    std::string temporary = path + ".tmp";
+    // A name no other process (or thread) uses at the same time; list() ignores every *.tmp.
+    static std::atomic<unsigned> counter { 0 };
+    std::string temporary = path + "." + std::to_string(getpid()) + "." + std::to_string(counter++) + ".tmp";
     int fd = open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0)
         return false;
     bool ok = write_all(fd, data.data(), data.size()) && fsync(fd) == 0;
     ok = (close(fd) == 0) && ok;
-    if (ok && rename(temporary.c_str(), path.c_str()) == 0)
+    if (ok && rename(temporary.c_str(), path.c_str()) == 0) {
+        // Make the rename itself durable: sync the directory (best effort; the file is already complete either way).
+        int dfd = open(directory_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dfd >= 0) {
+            fsync(dfd);
+            close(dfd);
+        }
         return true;
+    }
     unlink(temporary.c_str());
     return false;
 }
