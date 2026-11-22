@@ -97,6 +97,7 @@ private:
         Clock::time_point at{};
         uint64_t seq = 0;
         bool valid = false;
+        bool before_load = false;  // the stream had not loaded the decoder yet: it may make the hole while no stream owns it
     };
     // The plane's motion (mutex_): where the video was in the last commits, to place the plane where it is going to be.
     struct PlaneSample {

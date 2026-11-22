@@ -235,7 +235,10 @@ void MediaServer::commit_area(bool frame_ready) {
         fprintf(stderr, "[page-area] webkit=(%d,%d %dx%d) origin=(%.1f,%.1f) scale=(%.4f,%.4f) -> area=(%.1f,%.1f %.1fx%.1f)\n",
                 a.x, a.y, a.width, a.height, page_x_.load(), page_y_.load(), scx, scy, sx, sy, sw, sh);
     // Only the owner's stream drives the plane and the hole: another tab's sink must not repaint them.
-    const bool from_owner = owner_.load() == p.id || owner_.load() == 0;
+    // With no owner, only a stream that has not loaded yet (its AREA may precede its Load): after a release (UNLOAD, or release_owner when
+    // the page went away) the stream's areas no longer make a hole.
+    const uint64_t owner = owner_.load();
+    const bool from_owner = owner == p.id || (owner == 0 && p.before_load);
     if (backend_ && a.width > 0 && a.height > 0 && from_owner && !use_lg_) {
         // Where the video is going: the compositor shows the plane some milliseconds after the UI's own frame (screenshots of a
         // scrolling page: the plane trailed the hole by one to two scroll steps), so a plane put on the hole trails it by that
@@ -374,11 +377,14 @@ void MediaServer::serve(int fd, uint64_t id) {
         uint64_t generation;
         bool eos = false;  // the stream's end, behind its last unit (pts: last, so the other stream goes first)
         uint64_t start_seq = 0;  // feeder: the start of feed (arm_seq) this unit was last judged for (a unit the decoder refused is not judged twice)
+        uint64_t seq = 0;        // arrival order (next_seq): a unit the feeder gives back goes in again where it was
     };
     std::mutex qm;
     std::condition_variable qcv;
     std::deque<Unit> queues[2];  // [0] video, [1] audio
     uint64_t generation = 0;     // qm; a flush or load drops what was queued before it
+    uint64_t next_seq = 0;       // qm; Unit::seq of the next unit queued
+    uint64_t reload_epoch = 0;   // mutex_ and qm (both held to change it): counts the retries begun; the feeder reads it under either
     uint64_t arm_seq = 0;        // qm; counts the starts of a feed (load, reload, flush): the feeder arms its start filter for each
     uint64_t arm_gen = 0;        // qm; units of an older generation do not belong to that start
     bool stop = false;
@@ -451,7 +457,7 @@ void MediaServer::serve(int fd, uint64_t id) {
                 }
             }
             if (u.eos) {
-                queues[pick].pop_front();
+                queues[pick].pop_front();  // u is gone from here on
                 if (eos_generation != g) ended[0] = ended[1] = pushed_eos = false, eos_generation = g;
                 ended[pick] = true;
                 ql.unlock();
@@ -475,29 +481,44 @@ void MediaServer::serve(int fd, uint64_t id) {
                 ql.lock();
                 continue;
             }
+            // The unit leaves the queue before qm is let go: FLUSH, LOAD and UNLOAD clear the queues under qm alone, which freed the
+            // buffer the decoder was reading (LG's Feed gets its address). A unit the decoder refuses goes back where it was.
+            const uint64_t epoch = reload_epoch;
+            Unit unit = std::move(u);
+            queues[pick].pop_front();
             ql.unlock();
-            bool full = false;
+            bool full = false, requeue = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (owner_.load() == id && backend_ && (use_lg_ || ndl_loaded_)) {
+                if (reload_epoch != epoch) {
+                    requeue = true;  // a retry began after this unit was taken out: it goes to the reloaded pipeline, behind the replay
+                } else if (owner_.load() == id && backend_ && (use_lg_ || ndl_loaded_)) {
                     if (use_lg_) {
                         if (pick == 0 || lg_.has_audio())
-                            full = lg_.feed(pick == 1, u.packet.data.data(), u.packet.data.size(), u.packet.pts_us) ==
+                            full = lg_.feed(pick == 1, unit.packet.data.data(), unit.packet.data.size(), unit.packet.pts_us) ==
                                    LgMediaPlayer::Feed::Full;
                     } else if (pick == 0 || backend_audio.load()) {
-                        full = backend_->feed(u.packet) == wnk::media::MediaBackend::Feed::Full;
+                        full = backend_->feed(unit.packet) == wnk::media::MediaBackend::Feed::Full;
                     }
                 }
+                // qm while mutex_ is still held (the lock order): a retry (mutex_, then qm) cannot come between this feed and the replay
+                // bookkeeping below, so what the pipeline was given is in the replay it takes.
+                ql.lock();
             }
-            ql.lock();
-            if (full && generation == g) {
+            if ((full || requeue) && generation == g && (full || owner_.load() == id)) {
+                // Back in front of what came after it (by arrival: a retry may have put its replay in front meanwhile).
+                auto &q = queues[pick];
+                auto at = q.begin();
+                while (at != q.end() && at->seq < unit.seq) ++at;
+                q.insert(at, std::move(unit));
+                if (requeue) continue;
                 ++full_waits;
                 blocked_until[pick] = Clock::now() + std::chrono::milliseconds(10);
                 if (owner_.load() == id && replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
                 if (owner_.load() == id && use_lg_ && !recover_wanted.load() && lg_.error() != 0 && lg_.frames_presented() > 0) recover_wanted = true;
                 continue;
             }
-            if (!queues[pick].empty() && queues[pick].front().generation == g) {
+            if (generation == g) {
                 // Keep what the decoder was given until its first picture shows (a failed start is repeated with it).
                 if (replay_ok && use_lg_) {
                     if (lg_.frames_presented() > 0 || replay_bytes > kReplayMax) {
@@ -505,11 +526,10 @@ void MediaServer::serve(int fd, uint64_t id) {
                         replay_bytes = 0;
                         replay_ok = false;
                     } else {
-                        replay_bytes += queues[pick].front().packet.data.size();
-                        replay.push_back(queues[pick].front());
+                        replay_bytes += unit.packet.data.size();
+                        replay.push_back(std::move(unit));
                     }
                 }
-                queues[pick].pop_front();
             }
             if (pick == 0) ++units;
             if (owner_.load() == id && replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
@@ -530,9 +550,11 @@ void MediaServer::serve(int fd, uint64_t id) {
         qcv.notify_all();
     };
     const auto release = [&] {
+        // mutex_ first, then the owner (as release_owner): between a compare-and-swap outside the lock and the unload, a newer
+        // stream's Load could take the decoder, and this stream then unloaded that stream's fresh pipeline.
+        std::lock_guard<std::mutex> lock(mutex_);
         uint64_t mine = id;
         if (owner_.compare_exchange_strong(mine, 0)) {
-            std::lock_guard<std::mutex> lock(mutex_);
             clear_hole();  // the stream that owned the plane is gone (under mutex_, like the AREA store)
             lg_.unload();
             if (backend_ && ndl_loaded_) backend_->unload();
@@ -560,12 +582,33 @@ void MediaServer::serve(int fd, uint64_t id) {
     // software chain for a muted element when this backend takes the audio), so only these two values change.
     uint32_t vol_permille = 1000;
     bool vol_muted = false;
+    // The element's pause state (WPEB_MEDIA_PAUSE, as applied): kept for the stream and applied after every load, as LG's player starts
+    // playing on its first feed by itself. A pause that came while the Load was held (the stream did not own the decoder yet), or
+    // before a retry or recovery reloaded the pipeline, was lost: the video played under a paused element.
+    bool paused_state = false;
+    bool loaded_once = false;  // reader thread: do_load ran for this stream (its areas without an owner no longer make a hole)
+    WpebMediaArea last_area{};  // reader thread: this stream's newest AREA, posted again when it takes the decoder
+    bool have_area = false;
 
     bool force_ndl = false;  // the last attempt after LG's pipeline failed to start: the Starfish backend's decoder
     int retries = 0;
-    const auto do_load = [&](const WpebMediaLoad &l) {
+    bool close_stream = false;  // reader thread: a (re)load failed; the connection is closed (below) so the page gets a media error
+    // No decoder any more (qm held): nothing will consume the queues, which are not capped. Closing the connection makes the web
+    // process's sink fail its next write ("Hardware video service lost"): the page gets a media error instead of a stall.
+    const auto close_without_decoder = [&](const char *what) {
+        queues[0].clear();
+        queues[1].clear();
+        ++generation;
+        close_stream = true;
+        WNK_LOGW(kCat, "stream %llu: %s failed: closing the stream", static_cast<unsigned long long>(id), what);
+    };
+    // What do_load did. Lost: a reload (retry or recovery) found the decoder no longer this stream's: a newer stream's Load or the UI
+    // took it while the reload waited without mutex_, and taking it back would leave that stream without a picture.
+    enum class Loaded { Yes, No, Lost };
+    const auto do_load = [&](const WpebMediaLoad &l, bool reload) -> Loaded {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!backend_) return;
+        if (!backend_) return Loaded::No;
+        if (reload && owner_.load() != id) return Loaded::Lost;
         auto &b = *backend_;
         key_codec = l.codec;
         wnk::media::StreamFormat f;
@@ -595,7 +638,14 @@ void MediaServer::serve(int fd, uint64_t id) {
         if (ndl_loaded_) b.unload();
         use_lg_ = ndl_loaded_ = false;
         owner_ = id;
-        if (hole_id_.load() != id) clear_hole();  // another stream's rectangle no longer applies (this one's AREA may precede its Load)
+        loaded_once = true;
+        if (hole_id_.load() != id) clear_hole();
+        if (have_area) {
+            // Its areas were kept back while another stream owned the plane (see WPEB_MEDIA_AREA): its newest one makes its hole now (a static
+            // page sends no other).
+            std::lock_guard<std::mutex> al(area_mu_);
+            pending_ = PendingArea{last_area, id, Clock::now(), ++pending_seq_, true, false};
+        }  // another stream's rectangle no longer applies (this one's AREA may precede its Load)
         units = 0;
         full_waits = 0;
         const bool with_audio = audio_state == AudioState::Hardware;
@@ -627,6 +677,10 @@ void MediaServer::serve(int fd, uint64_t id) {
         }
         if (ndl_loaded_ && starfish_) starfish_->set_volume(static_cast<int>(vol_permille / 10), vol_muted);
         if (use_lg_) lg_.set_volume(vol_permille, vol_muted);
+        if (paused_state) {
+            if (use_lg_) lg_.pause(true);
+            else if (ndl_loaded_) b.pause(true);
+        }
         if (use_lg_ || ndl_loaded_)
             WNK_LOGI(kCat, "stream %llu: %s for %s %ux%u @ %.2f fps%s%s%s", static_cast<unsigned long long>(id),
                      use_lg_ ? "LG media pipeline" : "NDL", codec_label(l.codec), l.width, l.height, l.fps_milli / 1000.0,
@@ -639,6 +693,18 @@ void MediaServer::serve(int fd, uint64_t id) {
         replay_ok = use_lg_;
         arm_gen = generation;  // the units from here on start a feed
         ++arm_seq;
+        return use_lg_ || ndl_loaded_ ? Loaded::Yes : Loaded::No;
+    };
+    // A reload found the decoder taken (Loaded::Lost): the stream goes on as one whose decoder a newer Load took (its units are
+    // consumed and dropped by the feeder, as before the reload).
+    const auto lost_decoder = [&](const char *what) {
+        std::lock_guard<std::mutex> ql(qm);
+        replay.clear();
+        replay_bytes = 0;
+        replay_ok = false;
+        ready = true;
+        qcv.notify_all();
+        WNK_LOGI(kCat, "stream %llu: %s dropped: another stream holds the decoder now", static_cast<unsigned long long>(id), what);
     };
     // The LG pipeline failed before showing a picture (TV, 2026-11-20: "fail to create AVProxy" for a page's main video right after its
     // ads, while another app still held a decoder or the ad's pipeline was still being released): load it again after a pause, with
@@ -648,30 +714,50 @@ void MediaServer::serve(int fd, uint64_t id) {
         if (!pending_valid || owner_.load() != id) return;  // a stream the newest Load took the decoder from must not take it back
         const int code = lg_.error();
         ++retries;
+        bool lost = false;
         std::deque<Unit> again;
-        {
-            std::lock_guard<std::mutex> ql(qm);
-            ready = false;
-            again.swap(replay);
-            replay_bytes = 0;
-            replay_ok = false;
-        }
         const int delay_ms = retries == 1 ? 500 : 1500;
         WNK_LOGW(kCat, "stream %llu: LG pipeline error %d before its first picture: attempt %d to load it again in %d ms%s", static_cast<unsigned long long>(id),
                  code, retries + 1, delay_ms, retries >= 2 ? " (Starfish backend)" : "");
         {
+            // use_lg_ is the owner's: a stream that lost the decoder meanwhile leaves it (and the pipeline) to the new owner.
+            // mutex_ before the replay is taken: the feeder is not in the middle of a feed, so the unit it was feeding is in the replay
+            // (it used to be fed to the failed pipeline after the swap and then missed from both); a unit it took out of the queue and
+            // has not fed yet goes back into it (reload_epoch).
             std::lock_guard<std::mutex> lock(mutex_);
-            if (owner_.load() == id) lg_.unload();
-            use_lg_ = false;
+            if (owner_.load() != id) {
+                lost = true;
+            } else {
+                {
+                    std::lock_guard<std::mutex> ql(qm);
+                    ready = false;
+                    again.swap(replay);
+                    replay_bytes = 0;
+                    replay_ok = false;
+                    ++reload_epoch;
+                    // The feeder may have asked again since the exchange above (a feed to the failing pipeline before this lock): that
+                    // is this same retry, not another one (it used up the next attempt and went to the fallback decoder).
+                    retry_wanted = false;
+                }
+                lg_.unload();
+                use_lg_ = false;
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-        if (retries >= 2) force_ndl = true;
-        do_load(pending);
+        if (!lost) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            if (retries >= 2) force_ndl = true;
+        }
+        const Loaded r = lost ? Loaded::Lost : do_load(pending, true);
+        if (r == Loaded::Lost) {
+            lost_decoder("the retry");
+            return;
+        }
         {
             std::lock_guard<std::mutex> ql(qm);
             // What was fed goes first again (per stream in order), ahead of what came meanwhile.
             for (auto it = again.rbegin(); it != again.rend(); ++it) queues[it->packet.type == wnk::media::TrackType::Audio ? 1 : 0].push_front(std::move(*it));
-            ready = use_lg_ || ndl_loaded_;
+            ready = r == Loaded::Yes;
+            if (!ready) close_without_decoder("the retry");  // as do_recover: a failed retry left the stream black and its queues growing
             qcv.notify_all();
         }
     };
@@ -680,7 +766,6 @@ void MediaServer::serve(int fd, uint64_t id) {
     // and feed it from the next keyframe. Not more than three times in a minute, then it is left to the page (its own recovery).
     std::deque<Clock::time_point> recoveries;
     bool cap_logged = false;     // reader thread: the "not reloaded" line is printed once per error episode (a Load or a reload starts a new one)
-    bool close_stream = false;  // reader thread: the reload failed; the connection is closed (below) so the page gets a media error
     const auto do_recover = [&] {
         if (!recover_wanted.exchange(false)) return;
         if (!pending_valid || !use_lg_ || owner_.load() != id) return;  // as do_retry: only the stream that owns the pipeline reloads it
@@ -699,29 +784,33 @@ void MediaServer::serve(int fd, uint64_t id) {
             std::lock_guard<std::mutex> ql(qm);
             ready = false;
         }
+        bool lost = false;
         {
+            // As in do_retry: only the owner unloads the pipeline and clears use_lg_.
             std::lock_guard<std::mutex> lock(mutex_);
-            if (owner_.load() == id) lg_.unload();
-            use_lg_ = false;
+            if (owner_.load() != id) {
+                lost = true;
+            } else {
+                lg_.unload();
+                use_lg_ = false;
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
-        need_key_at = Clock::now().time_since_epoch().count();
-        need_key = true;
-        do_load(pending);
+        if (!lost) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            need_key_at = Clock::now().time_since_epoch().count();
+            need_key = true;
+        }
+        const Loaded r = lost ? Loaded::Lost : do_load(pending, true);
+        if (r == Loaded::Lost) {
+            lost_decoder("the reload");
+            return;
+        }
         {
             std::lock_guard<std::mutex> ql(qm);
             replay_ok = false;  // no replay for a stream that has shown pictures
             replay.clear();
-            ready = use_lg_ || ndl_loaded_;
-            if (!ready) {
-                // No decoder any more: nothing will consume the queues, which are not capped. Closing the connection makes the web process's
-                // sink fail its next write ("Hardware video service lost"): the page gets a media error instead of a stall.
-                queues[0].clear();
-                queues[1].clear();
-                ++generation;
-                close_stream = true;
-                WNK_LOGW(kCat, "stream %llu: the reload failed: closing the stream", static_cast<unsigned long long>(id));
-            }
+            ready = r == Loaded::Yes;
+            if (!ready) close_without_decoder("the reload");
             qcv.notify_all();
         }
     };
@@ -732,7 +821,14 @@ void MediaServer::serve(int fd, uint64_t id) {
         if (audio_state == AudioState::Unknown && waited)
             WNK_LOGW(kCat, "stream %llu: no word from the audio side: video only", static_cast<unsigned long long>(id));
         load_pending = false;
-        do_load(pending);
+        if (do_load(pending, false) == Loaded::No) {
+            // Neither decoder took the stream: as a failed reload, the page gets a media error instead of a black video.
+            std::lock_guard<std::mutex> ql(qm);
+            ready = false;
+            close_without_decoder("the load");
+            qcv.notify_all();
+            return;
+        }
         set_ready(true);
     };
 
@@ -778,6 +874,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             u.packet.data.assign(payload.begin(), payload.end());
             std::lock_guard<std::mutex> ql(qm);
             u.generation = generation;
+            u.seq = next_seq++;
             queues[audio ? 1 : 0].push_back(std::move(u));
             qcv.notify_all();
             continue;
@@ -824,6 +921,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             u.eos = true;
             std::lock_guard<std::mutex> ql(qm);
             u.generation = generation;
+            u.seq = next_seq++;
             queues[audio ? 1 : 0].push_back(std::move(u));
             qcv.notify_all();
             break;
@@ -846,6 +944,11 @@ void MediaServer::serve(int fd, uint64_t id) {
                 std::lock_guard<std::mutex> ql(qm);
                 arm_gen = generation;  // a seek: what follows starts a feed
                 ++arm_seq;
+                // What a retry repeats is what the decoder was given since the seek: units from before it would be fed first again
+                // (from the old position, and older than the start filter's arm_gen, so not judged by it). The replay stays complete
+                // (replay_ok as it was): the feed after a seek starts over at the new position.
+                replay.clear();
+                replay_bytes = 0;
             }
             std::lock_guard<std::mutex> lock(mutex_);
             if (owner_.load() == id) {
@@ -862,8 +965,14 @@ void MediaServer::serve(int fd, uint64_t id) {
             // Not applied here: the UI commits the newest rectangle together with the page frame it draws
             // (commit_area), so the plane, the hole and the picture move in the same frame instead of the plane
             // running ahead of the page by one engine frame.
+            last_area = a;
+            have_area = true;
+            // One pending slot for all streams: another stream's area would overwrite the owner's newest one and then be dropped by
+            // commit_area (on a static page the plane and the hole stayed in the old place). It is kept for this stream's own Load.
+            const uint64_t owner = owner_.load();
+            if (owner != 0 && owner != id) break;
             std::lock_guard<std::mutex> al(area_mu_);
-            pending_ = PendingArea{a, id, Clock::now(), ++pending_seq_, true};
+            pending_ = PendingArea{a, id, Clock::now(), ++pending_seq_, true, !loaded_once};
 
             break;
         }
@@ -875,6 +984,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             // decoder has shown its buffered pictures: pausing then cut the end of the video off (TV: the last 2 s of a clip
             // never appeared). A decoder that was told the stream ended is left to drain.
             if (paused != 0 && eos_pushed.load()) break;
+            paused_state = paused != 0;
             std::lock_guard<std::mutex> lock(mutex_);
             if (owner_.load() == id) {
                 if (use_lg_) lg_.pause(paused != 0);
