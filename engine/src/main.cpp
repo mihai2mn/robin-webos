@@ -2557,7 +2557,7 @@ int main(int, char **)
     // handling only starts when memchute is already killing apps. Must be set before the session exists.
     // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=0: WebKit's own.
     // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=<n>: the process limit; the thresholds below are fractions of it (conservative / strict / kill).
-    // The kill threshold (1.3 x the limit, WPE_BROWSER_DEBUG_MEM_KILL=0: off) ends a web process that goes on growing while the TV swaps.
+    // The kill threshold (1.6 x the limit, WPE_BROWSER_DEBUG_MEM_KILL=0: off) ends a web process that goes on growing while the TV swaps.
     {
         const long limit_mb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "520").c_str());
         if (limit_mb > 0) {
@@ -2577,7 +2577,11 @@ int main(int, char **)
             // The kill threshold (a multiple of the limit, WebKit measures resident + swapped): a web process that goes on growing past
             // its limit while the TV is already swapping (2026-11-20: 585 MB at a 420 MB limit, swap full, the whole TV frozen) is
             // ended, and the UI reloads the tab (browser/main.cpp: crashed tabs). 0 = never.
-            const double kill = atof(env_or("WPE_BROWSER_DEBUG_MEM_KILL", "1.3").c_str());
+            // 1.6 (832 MB at the 520 MB limit), was 1.3: a 1080p MediaSource stream with 17-50 MB segments sits at 600-780 MB
+            // for minutes while it plays and falls back to 500 MB when the appends stop (2026-11-22, 14-minute runs: no growth
+            // paused, no growth after the end, at least 250 MB still available on the TV at the peak). Patch 0027 makes the
+            // kill wait for several measurements in a row.
+            const double kill = atof(env_or("WPE_BROWSER_DEBUG_MEM_KILL", "1.6").c_str());
             webkit_memory_pressure_settings_set_kill_threshold(mp, kill);
             if (webkit_memory_pressure_settings_get_kill_threshold(mp) != kill)
                 log_msg("memory pressure: kill threshold %.2f rejected (0 or above strict %.2f)", kill, webkit_memory_pressure_settings_get_strict_threshold(mp));
