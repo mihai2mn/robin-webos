@@ -164,6 +164,12 @@ struct _WpebVideoSink {
     gint playing;      /* PAUSED_TO_PLAYING .. PLAYING_TO_PAUSED (atomic) */
     gint deferred;     /* atomic: the LOAD (and the window) wait for this video's next played unit (see set_caps, load_video) */
     gint lost;         /* atomic: another video took the page's window and LG's decoder; taken back at this one's next play */
+    /* Paused nudge (see nudge_schedule). */
+    gint nudge_armed;    /* atomic: a settle timer is pending */
+    gint nudging;        /* atomic: LG was told to play for the nudge and not told to pause again yet */
+    gint64 nudge_changed_us; /* lock: the last size change of the window while paused */
+    WpebMediaVolume vol_last; /* the element's volume as last sent to the UI (lock) */
+    gboolean vol_known;
     int deferred_width, deferred_height;
     char vid[128]; /* the window's id (WpebMediaLoad.window_id of the load that opened it) */
     GByteArray *parameter_sets; /* Annex B */
@@ -373,7 +379,21 @@ static void ctl_kick(WpebVideoSink *self)
         g_timeout_add(100, ctl_retry_cb, gst_object_ref(self));
 }
 
+static void send_ctl_raw(WpebVideoSink *self, uint32_t type, const void *data, uint32_t size);
+
+/* The element's own control messages: its volume is remembered (the paused nudge mutes LG for a moment and restores it). */
 static void send_ctl(WpebVideoSink *self, uint32_t type, const void *data, uint32_t size)
+{
+    if (type == WPEB_MEDIA_VOLUME && size == sizeof(WpebMediaVolume)) {
+        g_mutex_lock(&self->lock);
+        memcpy(&self->vol_last, data, sizeof(self->vol_last));
+        self->vol_known = TRUE;
+        g_mutex_unlock(&self->lock);
+    }
+    send_ctl_raw(self, type, data, size);
+}
+
+static void send_ctl_raw(WpebVideoSink *self, uint32_t type, const void *data, uint32_t size)
 {
     g_assert(size <= sizeof(((WpebCtl *)0)->data));
     g_mutex_lock(&self->lock);
@@ -431,6 +451,108 @@ static void area_flush_pending_locked(WpebVideoSink *self, gboolean nonblock)
         self->sent_area = area;
         self->area_next_us = now_us() + self->area_send_gap_us;
         g_mutex_unlock(&self->lock);
+    }
+}
+
+/* ---- paused nudge ------------------------------------------------------------------------------------------- */
+
+/* LG's pipeline presents no frame while it is paused: a paused video whose window changes size (fullscreen and back, a layout that
+ * resizes the box) showed black until it played again; neither re-sending the placement nor a seek helped, a short play did (TV,
+ * 2026-11-22). So when the window of a paused video changes size, LG alone (not WebKit: the page sees no play/pause event and its
+ * currentTime does not move) plays for WPEB_NUDGE_MS with the audio muted, then pauses again. One nudge per burst of size changes
+ * (placements during a fullscreen transition come several frames in a row): it starts WPEB_NUDGE_SETTLE_MS after the last one.
+ * LG's own position then leads WebKit's by about WPEB_NUDGE_MS (nothing tells LG to go back; see REPORT). Off with
+ * WPE_BROWSER_DEBUG_NO_PAUSED_NUDGE=1. Any thread (area_painted, change_state); the timers run on the main loop. */
+#define WPEB_NUDGE_SETTLE_MS 200
+static guint nudge_ms(void)
+{
+    const char *v = g_getenv("WPE_BROWSER_DEBUG_PAUSED_NUDGE_MS");
+    const int ms = v ? atoi(v) : 150;
+    return ms > 0 && ms <= 1000 ? (guint)ms : 150;
+}
+
+static gboolean nudge_eligible(WpebVideoSink *self)
+{
+    g_mutex_lock(&self->lock);
+    const gboolean window = self->have_window;
+    g_mutex_unlock(&self->lock);
+    return window && !g_atomic_int_get(&self->playing) && !g_atomic_int_get(&self->deferred) && !g_atomic_int_get(&self->lost) &&
+           g_atomic_int_get(&self->fd) >= 0;
+}
+
+static void send_ctl_raw(WpebVideoSink *self, uint32_t type, const void *data, uint32_t size);
+
+static void nudge_restore_volume(WpebVideoSink *self)
+{
+    g_mutex_lock(&self->lock);
+    WpebMediaVolume v = self->vol_known ? self->vol_last : (WpebMediaVolume){1000, 0}; /* the UI's default before any VOLUME */
+    g_mutex_unlock(&self->lock);
+    send_ctl_raw(self, WPEB_MEDIA_VOLUME, &v, sizeof(v));
+}
+
+/* The timers hold a reference each and are never removed from outside (a removal racing a callback that already runs would
+ * drop the reference twice): they look at the sink's state when they fire. */
+static gboolean nudge_end_cb(gpointer data)
+{
+    WpebVideoSink *self = data;
+    if (g_atomic_int_compare_and_exchange(&self->nudging, 1, 0)) {
+        /* Paused again unless the video started playing meanwhile (then change_state's PAUSE(0) stands, volume already back). */
+        if (!g_atomic_int_get(&self->playing)) {
+            uint32_t paused = 1;
+            send_ctl_raw(self, WPEB_MEDIA_PAUSE, &paused, sizeof(paused));
+        }
+        nudge_restore_volume(self);
+        g_printerr("[wpebmedia] paused nudge: paused again, volume restored\n");
+    }
+    gst_object_unref(self);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean nudge_settle_cb(gpointer data)
+{
+    WpebVideoSink *self = data;
+    /* Settled only WPEB_NUDGE_SETTLE_MS after the last size change of the burst. */
+    g_mutex_lock(&self->lock);
+    const gint64 left = self->nudge_changed_us + WPEB_NUDGE_SETTLE_MS * 1000 - g_get_monotonic_time();
+    g_mutex_unlock(&self->lock);
+    if (left > 1000) {
+        g_timeout_add((guint)(left / 1000) + 1, nudge_settle_cb, self); /* the reference moves on */
+        return G_SOURCE_REMOVE;
+    }
+    g_atomic_int_set(&self->nudge_armed, 0);
+    if (nudge_eligible(self) && !g_getenv("WPE_BROWSER_DEBUG_NO_PAUSED_NUDGE") &&
+        g_atomic_int_compare_and_exchange(&self->nudging, 0, 1)) {
+        const WpebMediaVolume mute = {0, 1};
+        const uint32_t play = 0;
+        const guint ms = nudge_ms();
+        send_ctl_raw(self, WPEB_MEDIA_VOLUME, &mute, sizeof(mute));
+        send_ctl_raw(self, WPEB_MEDIA_PAUSE, &play, sizeof(play));
+        g_printerr("[wpebmedia] paused nudge: muted, LG plays for %u ms (the window changed size while paused)\n", ms);
+        g_timeout_add(ms, nudge_end_cb, self); /* the reference moves on */
+        return G_SOURCE_REMOVE;
+    }
+    gst_object_unref(self);
+    return G_SOURCE_REMOVE;
+}
+
+/* A placement of this paused video changed the window's size. Any thread. */
+static void nudge_schedule(WpebVideoSink *self)
+{
+    if (g_getenv("WPE_BROWSER_DEBUG_NO_PAUSED_NUDGE") || g_atomic_int_get(&self->nudging) || !nudge_eligible(self))
+        return;
+    g_mutex_lock(&self->lock);
+    self->nudge_changed_us = g_get_monotonic_time();
+    g_mutex_unlock(&self->lock);
+    if (g_atomic_int_compare_and_exchange(&self->nudge_armed, 0, 1))
+        g_timeout_add(WPEB_NUDGE_SETTLE_MS, nudge_settle_cb, gst_object_ref(self));
+}
+
+/* The video plays (or stops): a nudge in progress gives the volume back at once; its timer then leaves LG playing. */
+static void nudge_cancel(WpebVideoSink *self)
+{
+    if (g_atomic_int_compare_and_exchange(&self->nudging, 1, 0)) {
+        nudge_restore_volume(self);
+        g_printerr("[wpebmedia] paused nudge: cancelled (play or stop), volume restored\n");
     }
 }
 
@@ -563,9 +685,12 @@ static void area_painted(WpebVideoSink *self, WpebMediaArea a)
         self->place_us = now_us() - t0;
         g_mutex_lock(&self->lock);
         self->unflushed_at_us = now_us();
+        const gboolean resized = self->place_rect[4] > 0 && (self->place_rect[4] != a.width || self->place_rect[5] != a.height);
         self->place_rect[0] = vw, self->place_rect[1] = vh, self->place_rect[2] = a.x, self->place_rect[3] = a.y;
         self->place_rect[4] = a.width, self->place_rect[5] = a.height;
         g_mutex_unlock(&self->lock);
+        if (resized)
+            nudge_schedule(self);
     }
     if (WPEB_AREA_DEBUG) {
         /* v: the page surface's commit that carried this move (engine/webos-backend, 0: unknown), or when the last
@@ -953,6 +1078,11 @@ static int64_t media_time_us(const GstSegment *segment, GstBuffer *buffer, int64
 static GstFlowReturn wpeb_video_sink_render(GstBaseSink *sink, GstBuffer *buffer)
 {
     WpebVideoSink *self = WPEB_VIDEO_SINK(sink);
+    if (g_atomic_int_get(&self->lost)) {
+        /* Another video took the page's window and LG's decoder and this one was UNLOADed: the UI would only queue these units
+         * (its queues are not capped and nothing consumes them after an UNLOAD). Dropped; the clock and the page go on. */
+        return GST_FLOW_OK;
+    }
     if (g_atomic_int_compare_and_exchange(&self->deferred, 1, 0)) {
         /* This video plays now (render runs in PLAYING; for a video that never played the first unit is the prerolled keyframe;
          * one that lost the window while it was paused resumes where it stopped, and LG shows from its next keyframe): the
@@ -1047,6 +1177,7 @@ static GstStateChangeReturn wpeb_video_sink_change_state(GstElement *element, Gs
     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
         paused = 0;
         g_atomic_int_set(&self->playing, 1);
+        nudge_cancel(self);
         if (g_atomic_int_compare_and_exchange(&self->lost, 1, 0)) {
             /* Another video took the page's window while this one was not playing: this one plays now and takes it back at its
              * next unit (render). The window was the other's to close: ours is gone, so the load opens a new one. */
@@ -1056,6 +1187,9 @@ static GstStateChangeReturn wpeb_video_sink_change_state(GstElement *element, Gs
             g_atomic_int_set(&self->deferred, 1);
         }
         send_ctl(self, WPEB_MEDIA_PAUSE, &paused, sizeof(paused));
+        break;
+    case GST_STATE_CHANGE_PAUSED_TO_READY:
+        nudge_cancel(self);
         break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
         g_atomic_int_set(&self->playing, 0);
@@ -1325,7 +1459,8 @@ static GstFlowReturn wpeb_audio_hw_render(GstBaseSink *sink, GstBuffer *buffer)
     }
     /* A failed send means the video sink has stopped (or the UI is gone, which the video sink reports): the
      * audio has nowhere to go and is dropped quietly. */
-    if (!self->video || !send_msg(self->video, WPEB_MEDIA_AUDIO, pts_us, data, (uint32_t)size))
+    /* The video lost LG's pipeline to another video (UNLOADed): its audio has nowhere to go either (see the video render). */
+    if (!self->video || g_atomic_int_get(&self->video->lost) || !send_msg(self->video, WPEB_MEDIA_AUDIO, pts_us, data, (uint32_t)size))
         GST_DEBUG_OBJECT(self, "audio frame dropped: no media connection");
     gst_buffer_unmap(buffer, &map);
     if (++self->sent == 1)
