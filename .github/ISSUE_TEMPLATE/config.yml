@@ -6,6 +6,3 @@ contact_links:
   - name: Wren (the project Robin is based on)
     url: https://github.com/sostk/webos-wpe-browser
     about: For Wren itself. Please report Robin's bugs here, not to Wren.
-  - name: Security problem
-    url: https://github.com/mihai2mn/robin-webos/security/advisories/new
-    about: Report it privately, not as a public issue.
