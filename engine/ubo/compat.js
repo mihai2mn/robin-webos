@@ -118,6 +118,10 @@
         if (v.__wrenReleased || isMain(v)) return;
         const src = v.getAttribute('src'), sources = [...v.querySelectorAll('source')];
         if (!src && !sources.length) return;
+        // An MSE player (blob: source) cannot give its stream back and get it again: load() closes its MediaSource and restore() would
+        // re-attach a URL nothing feeds. It keeps what it has.
+        const blob = s => String(s || '').startsWith('blob:');
+        if (blob(src) || blob(v.currentSrc) || sources.some(s => blob(s.getAttribute('src')))) return;
         v.__wrenReleased = { src, sources: sources.map(s => s.cloneNode(true)) };
         try { v.pause(); } catch (e) {}
         v.removeAttribute('src');
