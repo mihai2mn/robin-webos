@@ -1489,9 +1489,18 @@ gboolean memory_guard_tick(gpointer)
     static const long avail_floor_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_AVAIL_MB", "110").c_str()) * 1024;
     static const long swap_pct = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_SWAP_PCT", "12").c_str());
     static gint64 last_kill_us = 0;
+    // One discard at a time: what it frees shows only in the next measurement, so the tick after a request only looks (the
+    // trigger is evaluated again on the tick after that).
+    static bool awaiting_measurement = false;
     MemInfo m;
     if (!read_meminfo(m))
         return G_SOURCE_CONTINUE;
+    if (awaiting_measurement) {
+        awaiting_measurement = false;
+        log_msg("memory guard: after the discard request %ld MB available, swap %ld of %ld MB free: measured, no further request on this tick",
+            m.avail_kb / 1024, m.swap_free_kb / 1024, m.swap_total_kb / 1024);
+        return G_SOURCE_CONTINUE;
+    }
     const bool swap_gone = m.swap_total_kb <= 0 || m.swap_free_kb * 100 < m.swap_total_kb * swap_pct;
     // The web process (all tabs) is also watched on its own: at 70% of WebKit's own limit, background tabs go before WebKit's kill threshold
     // ends every tab at once (2026-11-20: all five tabs were reset together at the threshold while the TV was not yet out of memory).
@@ -1522,6 +1531,7 @@ gboolean memory_guard_tick(gpointer)
     }
     last_kill_us = now;
     if (g.tabs.size() > 1) {
+        awaiting_measurement = true;
         log_msg("memory guard: %ld MB available, swap %ld of %ld MB free: asking the UI to discard a background tab", m.avail_kb / 1024,
             m.swap_free_kb / 1024, m.swap_total_kb / 1024);
         send_msg(WPE_ENGINE_DISCARD_REQUEST, 0, nullptr, 0);
