@@ -25,7 +25,7 @@ na() { if [ -n "$1" ]; then printf '%s' "$1"; else printf NA; fi; }  # a measure
 RT='export PATH=/opt/bin:/opt/sbin:$PATH'
 
 # the lock: taken here, or already held by $OWNER (a caller that ran something else first); released at the end either way
-if [ "$(tv 20 "head -1 $LOCK/owner 2>/dev/null")" != "$OWNER" ] && ! tv 30 "mkdir $LOCK 2>/dev/null && printf '%s\n%s\n' '$OWNER' \$(date +%s) > $LOCK/owner"; then echo "TV lock held by: $(tv 20 "head -1 $LOCK/owner 2>/dev/null")"; exit 2; fi
+if [ "$(tv 20 "head -1 $LOCK/owner 2>/dev/null")" != "$OWNER" ] && ! tv 30 "mkdir $LOCK 2>/dev/null && { { printf '%s\n%s\n' '$OWNER' \$(date +%s) > $LOCK/owner.tmp && mv $LOCK/owner.tmp $LOCK/owner; } || { rm -rf $LOCK; exit 1; }; }"; then echo "TV lock held by: $(tv 20 "head -1 $LOCK/owner 2>/dev/null")"; exit 2; fi
 DATA=$(tv 30 "for d in /media/developer/apps/usr/palm/applications/$APP/$APP.data*; do [ -d \$d/webkit ] && { echo \$d; break; }; done")
 cleanup() {
   tv 40 "$RT; tv close $APP >/dev/null 2>&1; sleep 1; [ -f /tmp/wrenbench/srv.pid ] && kill \$(cat /tmp/wrenbench/srv.pid) 2>/dev/null

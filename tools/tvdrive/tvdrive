@@ -10,6 +10,9 @@ OUT=${TVDRIVE_OUT:-$PWD/tvdrive-out}
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RUN=/tmp/$APP
 LOCKDIR=/tmp/wren-devapp.lock
+LOCK_STALE_MIN=25   # a lock older than this is shown as stale (it is never taken over by itself)
+# the TV-side files of shot/frames carry the owner's name, so two owners never write the same file
+TAG=${TVDRIVE_OWNER:-pid$$}; TAG=${TAG//[^A-Za-z0-9_.-]/_}
 REMOTE_PATH='export PATH=/opt/bin:/opt/sbin:$PATH;'
 
 if [ "$APP" = "org.sostk.wpebrowser" ]; then echo "tvdrive: refusing to touch the real app $APP" >&2; exit 2; fi
@@ -41,7 +44,9 @@ tvdrive <command> [args]   (screen is 1920x1080; x y are screenshot pixels)
                          focused: click the field first). Letters, digits, space . , @ ? ; \n = Enter, \b = backspace
   log [n]                last n (default 40) lines of events.log + engine.log; "log --follow" streams events.log
   state                  foreground app, memory, swap, web process RSS, app pids
-  lock <owner> | unlock <owner>   the shared dev-app lock (/tmp/wren-devapp.lock); hold it <= 25 min
+  lock <owner> | unlock <owner>   the shared dev-app lock (/tmp/wren-devapp.lock); hold it <= 25 min. Every command that uses the
+                         screen or the app (all but log, state, lock, unlock) needs TVDRIVE_OWNER to be exactly the lock's owner while
+                         one is held; an unreadable or half-written lock stops them too.
   close                  close the dev app
   frames [seconds] [--fps N] [dir]   what the SCREEN did, as text: a burst of small screen captures (default 4 s at
                          10 per second; includes the video plane and the toolbar) reduced by frames.js to
@@ -50,13 +55,25 @@ EOF
 }
 
 cmd=${1:-}; [ $# -gt 0 ] && shift
-# Commands that drive the app refuse to run while another owner holds the dev-app lock (the lock's first line must start with
-# $TVDRIVE_OWNER). Two agents ran over each other's tests because they did not look at the answer of "lock".
-case "$cmd" in open|close|move|nudge|click|scroll|drag|key|type)
-  held=$(tvssh "head -n1 $LOCKDIR/owner 2>/dev/null" 2>/dev/null || true)
-  if [ -n "$held" ]; then
-    case "$held" in "${TVDRIVE_OWNER:-<unset>}"*) ;; *) die "the TV is locked by '$held' (you are '${TVDRIVE_OWNER:-unset}'): not running '$cmd'. Take the lock first and export TVDRIVE_OWNER=<your lock name>." ;; esac
-  fi ;;
+# The state of the dev-app lock, read in one ssh call: "free", "incomplete" (the directory exists but has no complete owner file:
+# a lock being taken, or a dead one), or "held <age in seconds> <owner>". Fails (and so do the guarded commands) when the TV cannot be read.
+lockstate() {
+  tvssh "L=$LOCKDIR; if [ ! -d \$L ]; then echo free; elif [ -s \$L/owner ] && [ -n \"\$(sed -n 2p \$L/owner)\" ]; then echo held \$(( \$(date +%s) - \$(sed -n 2p \$L/owner) )) \$(head -n1 \$L/owner); else echo incomplete; fi" 2>/dev/null
+}
+lockage() { local s=$1; [ "$s" -ge 0 ] 2>/dev/null || { echo "age unknown"; return; }
+  if [ "$s" -ge $((LOCK_STALE_MIN*60)) ]; then echo "held $((s/60)) min: STALE (older than $LOCK_STALE_MIN min; ask the owner, or unlock it by name)"; else echo "held $((s/60)) min"; fi; }
+# Commands that use the TV's screen or the dev app refuse to run while another owner holds the dev-app lock. $TVDRIVE_OWNER must be
+# exactly the lock's owner name. Fail closed: when the lock cannot be read (ssh failed) or is half-written, nothing runs.
+# Two agents ran over each other's tests because they did not look at the answer of "lock".
+case "$cmd" in open|close|move|nudge|click|scroll|drag|key|type|shot|frames)
+  st=$(lockstate) || die "cannot read the TV's lock (ssh failed): not running '$cmd'"
+  case "$st" in
+    free) ;;
+    incomplete) die "the TV's lock directory $LOCKDIR has no complete owner file (being taken, or dead): not running '$cmd'. If it stays so, remove it on the TV yourself." ;;
+    held\ *) rest=${st#held }; age=${rest%% *}; held=${rest#* }
+      [ "$held" = "${TVDRIVE_OWNER:-}" ] || die "the TV is locked by '$held' ($(lockage "$age")); you are '${TVDRIVE_OWNER:-unset}': not running '$cmd'. Take the lock first and export TVDRIVE_OWNER=<your lock name>." ;;
+    *) die "unreadable lock state '$st': not running '$cmd'" ;;
+  esac ;;
 esac
 case "$cmd" in
   ''|help|-h|--help) usage ;;
@@ -64,8 +81,9 @@ case "$cmd" in
   shot)
     mkdir -p "$OUT"
     f=${1:-$OUT/shot-$(now).png}; mkdir -p "$(dirname "$f")"
-    tvsh "tv shot /tmp/tvdrive-shot.png >/dev/null" || die "shot failed"
-    scp -q -o BatchMode=yes "$HOST:/tmp/tvdrive-shot.png" "$f" || die "scp failed"
+    tvsh "tv shot /tmp/tvdrive-shot-$TAG.png >/dev/null" || die "shot failed"
+    scp -q -o BatchMode=yes "$HOST:/tmp/tvdrive-shot-$TAG.png" "$f" || die "scp failed"
+    tvsh "rm -f /tmp/tvdrive-shot-$TAG.png" >/dev/null 2>&1 || true
     echo "$f"
     ff=$(ffm)
     if [ -n "$ff" ]; then
@@ -94,9 +112,9 @@ case "$cmd" in
     ff=$(ffm); [ -n "$ff" ] || die "frames needs ffmpeg"
     # One capture takes about 40 ms on the TV; the pause between captures keeps the rate (and the load) down.
     gap=$(( 1000000 / fps - 40000 )); [ "$gap" -lt 0 ] && gap=0
-    tvssh "sh -s $secs $gap" < "$DIR/tvframes.sh" || die "capture failed"
-    scp -q -o BatchMode=yes "$HOST:/tmp/tvdrive-frames.tar" "$d/frames.tar" || die "scp failed"
-    tvsh "rm -f /tmp/tvdrive-frames.tar"
+    tvssh "sh -s $secs $gap $TAG" < "$DIR/tvframes.sh" || die "capture failed"
+    scp -q -o BatchMode=yes "$HOST:/tmp/tvdrive-frames-$TAG.tar" "$d/frames.tar" || die "scp failed"
+    tvsh "rm -f /tmp/tvdrive-frames-$TAG.tar"
     tar xf "$d/frames.tar" -C "$d" && rm -f "$d/frames.tar"
     if ! ls "$d"/f*.jpg >/dev/null 2>&1; then
       echo "tvdrive frames: the TV's capture service wrote no frame file." >&2
@@ -154,15 +172,18 @@ for p in \$(ps | grep -E 'wpebrowser|wpe-engine|WPEWebProc|WPENetworkProc' | gre
   echo \"pid \$p \$(cat /proc/\$p/comm) rss_kb=\$(awk '/VmRSS/{print \$2}' /proc/\$p/status)\"
 done
 echo \"events.log tail:\"; tail -n 2 $RUN/events.log | cut -c1-170
-echo \"lock: \$(head -n1 $LOCKDIR/owner 2>/dev/null || echo free)\"" ;;
+echo \"lock: \$(head -n1 $LOCKDIR/owner 2>/dev/null || echo free) (since epoch \$(sed -n 2p $LOCKDIR/owner 2>/dev/null), now \$(date +%s))\"" ;;
 
   lock)
     owner=${1:-}; [ -n "$owner" ] || die "lock <owner-name>"
-    if tvsh "mkdir $LOCKDIR 2>/dev/null && printf '%s\n' $(sq "$owner") > $LOCKDIR/owner && date +%s >> $LOCKDIR/owner"; then echo "lock taken by $owner (hold <= 25 min)"
-    else echo "lock held by: $(tvssh "head -n1 $LOCKDIR/owner" 2>/dev/null)"; exit 1; fi ;;
+    # mkdir is the atomic step; the owner file is written whole (name and time) under a temporary name and renamed, so no reader ever
+    # sees a half-written owner; when the write fails the directory this call made is removed again.
+    if tvsh "mkdir $LOCKDIR 2>/dev/null && { { printf '%s\n%s\n' $(sq "$owner") \$(date +%s) > $LOCKDIR/owner.tmp && mv $LOCKDIR/owner.tmp $LOCKDIR/owner; } || { rm -rf $LOCKDIR; exit 1; }; }"; then echo "lock taken by $owner (hold <= $LOCK_STALE_MIN min)"
+    else st=$(lockstate) || st="unreadable (ssh failed)"
+      case "$st" in held\ *) rest=${st#held }; echo "lock held by: ${rest#* } ($(lockage "${rest%% *}"))" ;; *) echo "lock not taken: state $st" ;; esac; exit 1; fi ;;
   unlock)
     owner=${1:-}; [ -n "$owner" ] || die "unlock <owner-name>"
-    cur=$(tvssh "head -n1 $LOCKDIR/owner 2>/dev/null")
+    cur=$(tvssh "head -n1 $LOCKDIR/owner 2>/dev/null; true") || die "cannot read the TV's lock (ssh failed): not releasing"
     if [ "$cur" = "$owner" ]; then tvssh "rm -rf $LOCKDIR" && echo "lock released"
     else echo "not released: lock owner is '${cur:-nobody}', not '$owner'"; exit 1; fi ;;
 

@@ -19,7 +19,7 @@ Setup: an ssh host called `lgtv` (root on a rooted TV with `/opt/bin/tv` and pyt
 | `type "text"` | text into the focused field, by clicking LG's on-screen keyboard |
 | `log [n]` / `log --follow` | tail the app's events.log and engine.log |
 | `state` | foreground app, memory/swap, web process sizes, lock owner |
-| `lock <owner>` / `unlock <owner>` | the shared dev-app lock; `close` closes the app |
+| `lock <owner>` / `unlock <owner>` | the shared dev-app lock; `close` closes the app. While a lock is held, every command that uses the screen or the app (`shot`, `frames`, `open`, `key`, ...) needs `TVDRIVE_OWNER` to be exactly the owner name; an unreadable (ssh failed) or half-written lock stops them too; a lock older than 25 min is reported as stale but never taken over |
 | `frames [seconds] [--fps N]` | what the screen did over a short capture burst: static / changing / FLICKER stretches (see Screen traces) |
 
 ## How it works (and what to know)
