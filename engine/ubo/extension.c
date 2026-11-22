@@ -287,6 +287,11 @@ static void on_window_object_cleared(WebKitScriptWorld *world, WebKitWebPage *pa
     if (g.compat_js) {
         JSCContext *main = webkit_frame_get_js_context_for_script_world(frame, world);
         evaluate(main, g.compat_js, "wren-compat.js", uri);
+        /* The video policy (hardware or in-page decoding, the emulated fullscreen) is on in every frame: an embedded player that asks for
+         * fullscreen inside its frame needs it as much as the top page. The engine's loader (top frame only) switches it on the same way;
+         * WPE_BROWSER_DEBUG_HYBRID=0 turns both off. */
+        if (g_strcmp0(g_getenv("WPE_BROWSER_DEBUG_HYBRID"), "0") != 0)
+            evaluate(main, "if (window.__wrenVideoPolicy) window.__wrenVideoPolicy.on = true;", "wren-policy-on", uri);
         g_object_unref(main);
     }
     const char *top = webkit_frame_is_main_frame(frame) ? uri : webkit_web_page_get_uri(page);
@@ -490,10 +495,12 @@ G_MODULE_EXPORT void webkit_web_process_extension_initialize_with_user_data(WebK
     g_free(dat_path);
     g_free(res_path);
     g_free(js_path);
-    if (!g.ubo)
-        return;
-    apply_lists();
-    apply_my_filters();
+    /* Without the blocker core (engine.dat or resources.json missing or unusable) the page scripts still run: compat.js, the AVIF
+     * fix, the video policy and the fullscreen emulation do not depend on it (every use of g.ubo below is behind wanted()). */
+    if (g.ubo) {
+        apply_lists();
+        apply_my_filters();
+    }
 
     g.world = webkit_script_world_new_with_name("wren-ubo");
     g_signal_connect(webkit_script_world_get_default(), "window-object-cleared", G_CALLBACK(on_window_object_cleared), NULL);
