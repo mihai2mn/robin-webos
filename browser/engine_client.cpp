@@ -237,6 +237,7 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
         return false;
     }
     sock_ = sv[0];
+    stall_why_.clear();
     ::fcntl(sock_, F_SETFL, ::fcntl(sock_, F_GETFL) | O_NONBLOCK);
     WNK_LOGI(kCat, "started %s (pid %d), log %s", exe.c_str(), static_cast<int>(pid_), log_path.c_str());
 
@@ -251,12 +252,21 @@ bool EngineClient::send(uint32_t type, TabId tab, const void *payload, uint32_t 
     const WpeMsgHeader h{type, size, tab};
     std::memcpy(packet, &h, sizeof(h));
     if (size) std::memcpy(packet + sizeof(h), payload, size);
+    uint64_t give_up_ms = 0;
     for (;;) {
         const ssize_t n = ::send(sock_, packet, sizeof(h) + size, MSG_NOSIGNAL);
         if (n >= 0) return true;
         if (errno == EINTR) continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // The engine is busy (a page is loading); input can wait a few ms rather than be lost.
+            // The engine is busy (a page is loading); input can wait a few ms rather than be lost. Not for ever: this runs on the UI
+            // thread (and from stop()), and an engine that does not read its socket for kSendDeadlineMs is stuck: it is stopped.
+            const uint64_t now = monotonic_ms();
+            if (give_up_ms == 0) {
+                give_up_ms = now + kSendDeadlineMs;
+            } else if (now >= give_up_ms) {
+                stalled(type);
+                return false;
+            }
             ::usleep(1000);
             continue;
         }
@@ -336,9 +346,16 @@ void EngineClient::poll() {
                 std::snprintf(why, sizeof(why), "killed by signal %d", WTERMSIG(status));
             else
                 std::snprintf(why, sizeof(why), "exited with status %d", WEXITSTATUS(status));
-            lost(why);
+            const std::string stall = std::move(stall_why_);
+            stall_why_.clear();
+            lost(stall.empty() ? std::string(why) : stall);
             return;
         }
+    } else if (!stall_why_.empty()) {
+        const std::string stall = std::move(stall_why_);
+        stall_why_.clear();
+        lost(stall);
+        return;
     }
     while (sock_ >= 0) {
         alignas(WpeMsgHeader) uint8_t buf[WPE_IPC_MAX_PACKET];
@@ -552,6 +569,17 @@ void EngineClient::unmap() {
     have_frame_ = false;
 }
 
+// The engine stopped reading its messages. It is killed and the socket closed here; the loss is reported by poll() once the process
+// is reaped, the way an engine that died is (lost(), the exited callback and its restart). Not lost() itself: send() runs inside
+// handle() and the UI's own calls, which must not see the frame mapping go away or the callbacks run under them.
+void EngineClient::stalled(uint32_t type) {
+    WNK_LOGW(kCat, "send type %u: the engine has not read its socket for %u ms: stopping it", type, static_cast<unsigned>(kSendDeadlineMs));
+    ::close(sock_);
+    sock_ = -1;
+    if (pid_ > 0) ::kill(pid_, SIGKILL);
+    stall_why_ = "it stopped reading its messages";
+}
+
 void EngineClient::lost(const std::string &why) {
     WNK_LOGW(kCat, "engine lost: %s", why.c_str());
     if (sock_ >= 0) ::close(sock_);
@@ -562,10 +590,11 @@ void EngineClient::lost(const std::string &why) {
 
 void EngineClient::stop() {
     if (sock_ >= 0) {
-        send(WPE_APP_QUIT, 0, nullptr, 0);
-        ::close(sock_);
+        send(WPE_APP_QUIT, 0, nullptr, 0);  // at most kSendDeadlineMs for an engine that does not read (it is killed then)
+        if (sock_ >= 0) ::close(sock_);
         sock_ = -1;
     }
+    stall_why_.clear();  // stopping: nothing to report
     if (pid_ > 0) {
         // The kit's shutdown watchdog allows 3 s in total: give the engine 1 s, then kill it.
         const uint64_t deadline = monotonic_ms() + 1000;
