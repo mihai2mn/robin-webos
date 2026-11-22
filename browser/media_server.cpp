@@ -714,6 +714,9 @@ void MediaServer::serve(int fd, uint64_t id) {
                     replay_bytes = 0;
                     replay_ok = false;
                     ++reload_epoch;
+                    // The feeder may have asked again since the exchange above (a feed to the failing pipeline before this lock): that
+                    // is this same retry, not another one (it used up the next attempt and went to the fallback decoder).
+                    retry_wanted = false;
                 }
                 lg_.unload();
                 use_lg_ = false;
