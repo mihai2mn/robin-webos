@@ -38,12 +38,24 @@ you install.
 
 ## What it does
 
-| | |
-|---|---|
-| ![A Wikipedia article with the toolbar shown](docs/screenshots/browsing.jpg) | ![The side panel with bookmarks, history, zoom and settings](docs/screenshots/side-panel.jpg) |
-| **Browsing.** Arrows move a pointer and scroll, OK clicks, Back goes back. Press ▲ at the top of a page for tabs and the address bar. | **Side panel.** Bookmarks, history, zoom per site and settings, one key away. |
-| ![The ad blocker page with a list of filter lists and switches](docs/screenshots/adblock.jpg) | ![A video playing full screen](docs/screenshots/video.jpg) |
-| **Ad blocker.** uBlock Origin's filter lists, switchable one by one, plus a box for your own rules. | **Video.** Hardware decoding through the TV's own pipeline, full screen, with the remote's media keys. |
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/browsing.jpg" alt="A Wikipedia article with the toolbar shown"></td>
+    <td width="50%"><img src="docs/screenshots/side-panel.jpg" alt="The side panel with bookmarks, history, zoom and settings"></td>
+  </tr>
+  <tr>
+    <td valign="top"><b>Browsing.</b> Arrows move a pointer and scroll, OK clicks, Back goes back. Press ▲ at the top of a page for tabs and the address bar.</td>
+    <td valign="top"><b>Side panel.</b> Bookmarks, history, zoom per site and settings, one key away.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/adblock.jpg" alt="The ad blocker page with a list of filter lists and switches"></td>
+    <td><img src="docs/screenshots/video.jpg" alt="A video playing full screen"></td>
+  </tr>
+  <tr>
+    <td valign="top"><b>Ad blocker.</b> uBlock Origin's filter lists, switchable one by one, plus a box for your own rules.</td>
+    <td valign="top"><b>Video.</b> Hardware decoding through the TV's own pipeline, full screen, with the remote's media keys.</td>
+  </tr>
+</table>
 
 - **YouTube works properly.** Videos play on the hardware decoder at full quality, with full screen, seeking and
   the remote's media keys. On the TV's built-in browser it does not.
