@@ -17,6 +17,12 @@ read -r -a sites <<< "${SITES:-https://en.wikipedia.org/wiki/Wren https://www.bb
 env_json=${WPEB_ENV:+,\"wpebEnv\":$WPEB_ENV}
 app=org.sostk.wpebrowser; logs=/tmp/org.sostk.wpebrowser
 sh_tv() { ares-shell -d "$dev" -r "$1" 2>/dev/null; }
+# Whatever ends the run (a failure, an interrupt, the end): close Wren, stop the test server, remove its folder.
+cleanup() {
+    ares-launch -d "$dev" --close "$app" >/dev/null 2>&1 || true
+    sh_tv "pkill minihttpd; rm -rf /tmp/emetest" || true
+}
+trap cleanup EXIT
 say() { echo "$*" | tee -a "$rep"; }
 
 wait_for() {  # wait_for FILE PATTERN TRIES: until PATTERN appears in FILE on the TV
@@ -52,7 +58,7 @@ for site in "${sites[@]}"; do
     done
 done
 
-[ -n "${NO_SCROLL:-}" ] && { ares-launch -d "$dev" --close "$app" >/dev/null 2>&1 || true; say "== done"; exit 0; }
+[ -n "${NO_SCROLL:-}" ] && { say "== done"; exit 0; }
 sh_tv "mkdir -p /tmp/emetest"
 ares-push -d "$dev" "$root/build/minihttpd" /tmp/emetest/ >/dev/null
 ares-push -d "$dev" "$here/scroll.html" /tmp/emetest/ >/dev/null
@@ -68,6 +74,4 @@ done
 cpu=$(sh_tv "p=\$(pgrep -f '$app/wpebrowser' | head -1); a=\$(awk '{print \$14+\$15}' /proc/\$p/stat); sleep 10; b=\$(awk '{print \$14+\$15}' /proc/\$p/stat); echo \$((b-a))")
 say "ui-cpu still page: ${cpu:-?} ticks / 10 s (100 ticks = one core for 1 s)"
 
-ares-launch -d "$dev" --close "$app" >/dev/null 2>&1 || true
-sh_tv "pkill minihttpd; rm -rf /tmp/emetest" || true
-say "== done"
+say "== done"   # the EXIT trap closes Wren and removes /tmp/emetest

@@ -5,13 +5,19 @@
 # testing beside the real app) and the real id (org.sostk.wpebrowser). Builds from a CLEAN CLONE of a commit, so
 # uncommitted work in the working tree never ends up in the package. Host only (WSL/Linux + Docker); no TV commands.
 #
-#   bash tools/package-release.sh all                 every phase, both ids -> build/release/*.ipk, NOTES-data
-#   bash tools/package-release.sh clone|launcher|engine32|stage|ui|add64|check|sums   one phase (each needs the ones before)
-#   IDS="dev"  COMMIT=<sha>  BUILD_ROOT=~/webos-browser-build  OUT=...  bash tools/package-release.sh all
+#   bash tools/package-release.sh all                 every phase, both ids -> build/release/*.ipk, MD5SUMS, BUILD-INFO.txt
+#   bash tools/package-release.sh clone|launcher|engine32|stage|ui|add64|sums|check|publish   one phase (each needs the ones before)
+#   IDS="dev"  COMMIT=<sha>  BUILD_ROOT=~/webos-browser-build (alias WPE_BUILD_ROOT)  OUT=...  bash tools/package-release.sh all
+# The packages are assembled in $OUT.tmp (add64 empties it first) and moved into $OUT by `publish` only when every id was built and
+# `check` passed; `publish` first removes the old *_arm.ipk, MD5SUMS and BUILD-INFO.txt from $OUT (other files there are left), so
+# $OUT never holds a mixture of two runs. MD5SUMS and BUILD-INFO.txt describe exactly the ipks of $IDS (default: both ids).
+# `check` unpacks every ipk of $IDS and fails on: a missing ipk or an extra one, a wrong package id/version, an app directory
+# that is not the id, missing engine/ or engine64/ entries, a 32-bit file that is not ARM or a 64-bit one that is not AArch64, a wrong
+# PT_INTERP, a DT_NEEDED library that is neither in the package nor in TV_LIBS, a dangling link, a BUILD-INFO commit that is not COMMIT.
 #
 # Inputs that are NOT built here (each has its own script; the package records which it used, build/release/BUILD-INFO.txt):
 #   STAGE_BASE  tools/stage-engine.sh output (libs, glibc, GStreamer, fonts, certs, licences): build/engine-stage-jit/engine
-#   WK254       the in-tree WebKit 2.54.3 build with patches/wpewebkit/2.54.3/0001..0021 (tools/build-engine.sh with
+#   WK254       the in-tree WebKit 2.54.3 build with patches/wpewebkit/2.54.3/0001..0026, every file of the directory (tools/build-engine.sh with
 #               WEBKIT_VERSION=2.54.3, then ninja; wk254.sh): libWPEWebKit, WPE{Web,Network,GPU}Process, injected bundle.
 #               The stripped libWPEWebKit has md5 a281cdbc88005b5338e401dc226f7613 (= the TV's engine254jit); NOT rebuilt here
 #               (a WebKit build takes hours; `tools/build-engine.sh start` with WEBKIT_VERSION=2.54.3 rebuilds it from the patch series).
@@ -21,9 +27,16 @@
 # Rebuilt here from the clean clone: wpe-engine + libgstwpebmedia.so (against the 2.54.3 headers), the launcher, the UI.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-BR=${BUILD_ROOT:-$HOME/webos-browser-build}
-COMMIT=${COMMIT:-$(git -C "$repo" rev-parse HEAD)}
+# One build root for every tool this script runs: BUILD_ROOT (this script) and WPE_BUILD_ROOT (build-launcher.sh, build-engine.sh, ...) name the
+# same directory; setting both to different values is refused, and the child scripts get the resolved root explicitly (BR_OUT is passed
+# as $BR/br-out to build-webos-backend.sh whatever the environment holds: engine-aarch64.sh documents BR_OUT as the aarch64 tree).
+if [ -n "${BUILD_ROOT:-}" ] && [ -n "${WPE_BUILD_ROOT:-}" ] && [ "$BUILD_ROOT" != "$WPE_BUILD_ROOT" ]; then
+    echo "BUILD_ROOT=$BUILD_ROOT and WPE_BUILD_ROOT=$WPE_BUILD_ROOT differ: set one of them" >&2; exit 2
+fi
+BR=${BUILD_ROOT:-${WPE_BUILD_ROOT:-$HOME/webos-browser-build}}
+COMMIT=$(git -C "$repo" rev-parse --verify "${COMMIT:-HEAD}^{commit}")   # always the full id: BUILD-INFO and `check` compare it
 OUT=${OUT:-$repo/build/release}
+STAGE_OUT=$OUT.tmp   # the packages are assembled here and move into $OUT only when the whole set was built and checked
 WORK=${WORK:-$BR/release-work}
 IDS=${IDS:-"dev release"}
 VERSION=${VERSION:-0.3.3}
@@ -76,7 +89,7 @@ do_launcher() {
     for id in $IDS; do
         say "launcher for $id"
         mkdir -p "$WORK/launcher-$id"
-        LAUNCHER_SRC="$src/engine/launcher/wpe-launcher.c" LAUNCHER_INTERP="/tmp/$(appid $id)/ld-linux.so.3" OUT_DIR="$WORK/launcher-$id" bash "$repo/tools/build-launcher.sh" | sed "s/^/   /"
+        WPE_BUILD_ROOT="$BR" LAUNCHER_SRC="$src/engine/launcher/wpe-launcher.c" LAUNCHER_INTERP="/tmp/$(appid $id)/ld-linux.so.3" OUT_DIR="$WORK/launcher-$id" bash "$src/tools/build-launcher.sh" | sed "s/^/   /"
     done
 }
 
@@ -107,7 +120,7 @@ do_engine32() {
 # ---- backend: direct GPU presentation libraries (NDK), built from the clone --------------------------------------
 do_backend() {
     say "libWPEBackend-webos.so + libwpeb-owner.so"
-    ( cd "$src" && rm -rf build/webos-backend && WEBOS_NDK="$NDK" bash tools/build-webos-backend.sh ) > "$WORK/backend.log" 2>&1 || { tail "$WORK/backend.log"; exit 1; }
+    ( cd "$src" && rm -rf build/webos-backend && WEBOS_NDK="$NDK" BR_OUT="$BR/br-out" bash tools/build-webos-backend.sh ) > "$WORK/backend.log" 2>&1 || { tail "$WORK/backend.log"; exit 1; }
     ls -l "$src/build/webos-backend/libWPEBackend-webos.so" "$src/build/webos-backend/libwpeb-owner.so" | sed "s/^/   /"
 }
 
@@ -118,8 +131,24 @@ do_backend() {
 # of the shared tree (cp -a keeps mtimes, so ninja stays incremental; bind-mounted at the SAME path in the container, so the absolute
 # paths in build.ninja stay valid and the shared tree is never touched); (3) every source file that differs from the pristine tree is
 # overwritten in the copy; (4) ninja in the copy (ccache is in the container's environment as in wk254.sh); (5) the copy must then differ
-# from the pristine tree in 0 files, or this phase fails. Stage takes libWPEWebKit, the helpers and the injected bundle from the copy.
+# from the pristine tree in 0 files (and miss none), or this phase fails (wk_diff). Stage takes libWPEWebKit, the helpers and the injected bundle from the copy.
 # Disk: the copy is ~6 GB (removed with `webkit32 clean`).
+# wk_diff <pristine> <copy>: the source files of <pristine> that differ in <copy> or are missing there, one relative path per line.
+# (A file only in the copy is build output or a file a patch deleted: not listed.) diff's own failure (exit 2, e.g. an unreadable
+# file) is an error here: it is never read as "0 differing".
+wk_diff() {
+    local pr=$1 c=$2 out rc=0 line d n
+    out=$(LC_ALL=C diff -rq --no-dereference "$pr" "$c" 2>"$WORK/wk-diff.err") || rc=$?
+    [ "$rc" -le 1 ] || { echo "diff exit $rc: $(head -3 "$WORK/wk-diff.err")" >&2; return 2; }
+    out=$(printf '%s\n' "$out" | grep -a -e '^Files ' -e "^Only in $pr" || true)
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            "Files $pr/"*" and $c/"*" differ") line=${line#"Files $pr/"}; echo "${line%% and $c/*}" ;;
+            "Only in $pr"*": "*) line=${line#"Only in "}; d=${line%%: *}; n=${line#*: }; d=${d#"$pr"}; d=${d#/}; echo "${d:+$d/}$n" ;;
+        esac
+    done <<<"$out"
+}
 do_webkit32() {
     local tb=$BR/dl/wpewebkit/wpewebkit-2.54.3.tar.xz pr=$WORK/wk-pristine
     [ "${1:-}" = clean ] && { rm -rf "$WK_TREE" "$pr"; return; }
@@ -138,9 +167,9 @@ do_webkit32() {
         ( exec 9>"$BR/.wk254.lock"; flock 9; cp -a "$WK_SHARED" "$WK_TREE" )
     fi
     say "comparing the copy with the pristine sources"
-    ( cd "$pr" && diff -rq . "$WK_TREE" 2>/dev/null | grep -E '^Files .* differ$' | sed -E 's/^Files \.\/(.*) and .* differ$/\1/' ) > "$WORK/wk-differing.txt" || true
+    wk_diff "$pr" "$WK_TREE" > "$WORK/wk-differing.txt" || { echo "the comparison of the copy with the pristine sources failed" >&2; exit 1; }
     echo "   $(wc -l < "$WORK/wk-differing.txt") differing source files"; sed 's/^/     /' "$WORK/wk-differing.txt" | head -20
-    while read -r f; do cp "$pr/$f" "$WK_TREE/$f"; done < "$WORK/wk-differing.txt"
+    while read -r f; do mkdir -p "$(dirname "$WK_TREE/$f")"; cp -a "$pr/$f" "$WK_TREE/$f"; done < "$WORK/wk-differing.txt"
     # Cortex-A55 code generation is the default (measured: JS -12%, nothing slower; tools/a55-probe ran every flag set on the TV).
     # WK_CPU="" builds for the toolchain's Cortex-A9 default again. Re-configuring the cache changes every compile line: a full rebuild.
     local cpu=${WK_CPU-"-march=armv8-a+crc -mfpu=neon-fp-armv8 -mtune=cortex-a55"} fl
@@ -155,7 +184,13 @@ do_webkit32() {
         bash -c 'cd /build/br-out/build/wpewebkit-2.54.3 && export PATH=/build/br-out/host/bin:$PATH && if [ -n "$FULL" ]; then ninja -t clean >/dev/null; fi && ninja -j${JOBS_WK:-24}' > "$WORK/webkit32-ninja.log" 2>&1 \
         || { tail -25 "$WORK/webkit32-ninja.log"; exit 1; }
     tail -1 "$WORK/webkit32-ninja.log" | cut -c1-120
-    ( cd "$pr" && diff -rq . "$WK_TREE" 2>/dev/null | grep -cE '^Files .* differ$' || true ) | sed 's/^/   differing files after the sync: /'
+    # The promised check: after the sync the copy must have no source file that differs from, or is missing against, the pristine tree.
+    wk_diff "$pr" "$WK_TREE" > "$WORK/wk-differing-after.txt" || { echo "the final comparison of the copy with the pristine sources failed" >&2; exit 1; }
+    if [ -s "$WORK/wk-differing-after.txt" ]; then
+        echo "FAIL: $(wc -l < "$WORK/wk-differing-after.txt") source files of the build copy still differ from pristine 2.54.3 + the series:" >&2
+        head -20 "$WORK/wk-differing-after.txt" | sed 's/^/     /' >&2; exit 1
+    fi
+    echo "   differing files after the sync: 0"
     rm -rf "$pr"
 }
 
@@ -259,7 +294,7 @@ do_ui() {
 # ---- add64: engine64/ and the engine notes go into the same ipk -------------------------------------------------
 do_add64() {
     [ -d "$STAGE64" ] || { echo "no aarch64 stage $STAGE64 (tools/engine-aarch64.sh stage)" >&2; exit 1; }
-    mkdir -p "$OUT"
+    rm -rf "$STAGE_OUT"; mkdir -p "$STAGE_OUT"   # this run's set only; $OUT is not touched until `publish`
     for id in $IDS; do
         local app; app=$(appid "$id")
         local in; in=$(ls -t "$src"/browser/build/webos-"$id"/dist/${app}_*_arm.ipk | head -1)
@@ -306,20 +341,106 @@ EOF
         sed -i "s/^Installed-Size:.*/Installed-Size: $kb/" "$w/ctl/control" 2>/dev/null || true
         ( cd "$w/ctl" && tar czf "$w/control.tar.gz" --owner=0 --group=0 control )   # no "./": the TV installer rejects ./ entries
         ( cd "$w/data" && tar czf "$w/data.tar.gz" --owner=0 --group=0 usr )
-        local outf=$OUT/${app}_${VERSION}_arm.ipk
-        rm -f "$outf"; ( cd "$w" && python3 "$repo/tools/mkar.py" "$outf" debian-binary control.tar.gz data.tar.gz )   # not `ar rc`: BusyBox ar on the TV rejects "name/"
+        local outf=$STAGE_OUT/${app}_${VERSION}_arm.ipk
+        rm -f "$outf"; ( cd "$w" && python3 "$src/tools/mkar.py" "$outf" debian-binary control.tar.gz data.tar.gz )   # not `ar rc`: BusyBox ar on the TV rejects "name/"
         echo "   $outf ($(mb "$(stat -c %s "$outf")") MB, installed $((kb/1024)) MB)"
         rm -rf "$w"
     done
 }
 
 do_sums() {
-    ( cd "$OUT" && md5sum ./*.ipk | tee MD5SUMS | sed 's/^/   /' )
+    [ -d "$STAGE_OUT" ] || { echo "no $STAGE_OUT: run add64 first" >&2; exit 1; }
+    local id
+    ( cd "$STAGE_OUT" && for id in $IDS; do echo "./$(appid "$id")_${VERSION}_arm.ipk"; done | xargs md5sum | tee MD5SUMS | sed 's/^/   /' )
     { echo "commit $COMMIT ($(git -C "$repo" log -1 --format=%s "$COMMIT"))"
+      echo "ids $IDS  version $VERSION"
       echo "date $(date -u +%FT%TZ)"
       echo "WK254 libWPEWebKit (stripped) md5 $(md5sum "$WORK/stage-${IDS%% *}/engine/lib/libWPEWebKit-2.0.so.1" | cut -d' ' -f1)"
       echo "STAGE_BASE $STAGE_BASE  STAGE64 $STAGE64  uBO: built from the clone ($(cat "$WORK/ubo/COMMIT" 2>/dev/null))"
-      echo "kit $(git -C "$src/third_party/webos-native-app-kit" log -1 --format=%h)"; } > "$OUT/BUILD-INFO.txt"
+      echo "kit $(git -C "$src/third_party/webos-native-app-kit" log -1 --format=%h)"; } > "$STAGE_OUT/BUILD-INFO.txt"
+}
+
+# ---- check: validate the assembled ipks (default: $STAGE_OUT, else $OUT; CHECK_DIR=... for another) --------------------------
+# Libraries the TV itself provides (DT_NEEDED entries that are allowed to be missing from the package): the Wayland client and EGL window
+# libraries of the direct-presentation backend, and PulseAudio's client (only the optional gst pulse plugin wants it; GStreamer skips a plugin
+# it cannot load).
+TV_LIBS=${TV_LIBS:-"libwayland-client.so.0 libwayland-egl.so libpulse.so.0"}
+do_check() {
+    local dir=${CHECK_DIR:-} id app ipk w f n d tree arch interp bad=0 count=0
+    if [ -z "$dir" ]; then if [ -d "$STAGE_OUT" ]; then dir=$STAGE_OUT; else dir=$OUT; fi; fi
+    say "check $dir (ids: $IDS)"
+    fail() { echo "   FAIL: $*" >&2; bad=$((bad+1)); }
+    local bi; bi=$(sed -n 's/^commit \([0-9a-f]\{40\}\).*/\1/p' "$dir/BUILD-INFO.txt" 2>/dev/null | head -1)
+    [ "$bi" = "$COMMIT" ] || fail "BUILD-INFO.txt commit '${bi:-none}' is not $COMMIT"
+    if [ -e "$src/.git" ]; then [ "$(git -C "$src" rev-parse HEAD)" = "$COMMIT" ] || fail "the clean clone $src is not at $COMMIT"; fi
+    for ipk in "$dir"/*.ipk; do
+        [ -e "$ipk" ] || break
+        n=$(basename "$ipk"); d=0
+        for id in $IDS; do [ "$n" = "$(appid "$id")_${VERSION}_arm.ipk" ] && d=1; done
+        [ "$d" = 1 ] || fail "$n is not one of the packages of IDS=$IDS (a leftover of another run?)"
+    done
+    for id in $IDS; do
+        app=$(appid "$id"); ipk=$dir/${app}_${VERSION}_arm.ipk
+        if [ ! -f "$ipk" ]; then fail "$ipk missing (app id $app)"; continue; fi
+        count=$((count+1))
+        grep -qF " ./$(basename "$ipk")" "$dir/MD5SUMS" 2>/dev/null && ( cd "$dir" && grep -F " ./$(basename "$ipk")" MD5SUMS | md5sum -c --status ) || fail "MD5SUMS has no matching line for $(basename "$ipk")"
+        w=$(mktemp -d "$TMPDIR/check.XXXXXX")
+        if ! ( cd "$w" && ar x "$ipk" && mkdir data ctl && tar xzf data.tar.gz -C data && tar xzf control.tar.gz -C ctl ); then fail "$ipk does not unpack"; rm -rf "$w"; continue; fi
+        grep -qx "Package: $app" "$w/ctl/control" || fail "$app: control has not 'Package: $app'"
+        grep -qx "Version: $VERSION" "$w/ctl/control" || fail "$app: control has not 'Version: $VERSION'"
+        local ad=$w/data/usr/palm/applications
+        [ "$(ls "$ad" 2>/dev/null)" = "$app" ] || fail "$app: the applications folder holds '$(ls "$ad" 2>/dev/null | tr '\n' ' ')', not just $app"
+        local A=$ad/$app
+        grep -q "\"id\": *\"$app\"" "$A/appinfo.json" 2>/dev/null || fail "$app: appinfo.json id is not $app"
+        for f in ENGINES.txt engine/wpe-engine engine/wpe-engine32 engine/lib/libWPEWebKit-2.0.so.1 engine/libexec/WPEWebProcess engine/libexec/WPENetworkProcess \
+                 engine/libexec/WPEGPUProcess engine/lib/injected-bundle/libWPEInjectedBundle.so engine/lib/gstreamer-1.0/libgstwpebmedia.so \
+                 engine/lib/libWPEBackend-webos.so engine/lib/glibc/ld-linux.so.3 engine/ubo/engine.dat engine/lib/web-extensions/libwren-ubo.so \
+                 engine64/wpe-engine engine64/lib/libWPEWebKit-2.0.so.1 engine64/libexec/WPEWebProcess engine64/libexec/WPENetworkProcess \
+                 engine64/lib/glibc/ld-linux-aarch64.so.1 engine64/lib/glibc/ubo/engine.dat engine64/lib/glibc/lib/web-extensions/libwren-ubo.so; do
+            [ -e "$A/$f" ] || fail "$app: $f missing"
+        done
+        while read -r f; do fail "$app: dangling link $f"; done < <(cd "$A" && find . -xtype l)
+        for tree in engine engine64; do
+            [ -d "$A/$tree" ] || continue
+            if [ "$tree" = engine ]; then arch=ARM; else arch=AArch64; fi
+            # every ELF file: the right machine; every DT_NEEDED name: a file of the same engine tree, or a TV library
+            find "$A/$tree" -type f > "$w/files.txt"; sed 's|.*/||' "$w/files.txt" | sort -u > "$w/names.txt"; : > "$w/needed.txt"
+            while read -r f; do
+                head -c4 "$f" | grep -q ELF || continue
+                readelf -h "$f" 2>/dev/null | grep -q "Machine: *$arch\$" || fail "$app: ${f#$A/} is not $arch"
+                readelf -d "$f" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sed "s|$| ${f#$A/}|" >> "$w/needed.txt"
+            done < "$w/files.txt"
+            while read -r n f; do
+                grep -qxF "$n" "$w/names.txt" && continue
+                case " $TV_LIBS " in *" $n "*) continue ;; esac
+                fail "$app: $f needs $n: not in $tree/ and not a TV library (TV_LIBS)"
+            done < <(sort -u "$w/needed.txt")
+        done
+        # PT_INTERP of what is exec'd: the app's own loader links (the launcher makes them in /tmp/<app id>/)
+        for f in engine/wpe-engine engine/wpe-engine32 engine/libexec/WPEWebProcess engine/libexec/WPENetworkProcess engine/libexec/WPEGPUProcess; do
+            interp=$(readelf -l "$A/$f" 2>/dev/null | sed -n 's/.*interpreter: \(.*\)\]/\1/p')
+            [ "$interp" = "/tmp/$app/ld-linux.so.3" ] || fail "$app: $f PT_INTERP is '$interp'"
+        done
+        for f in engine64/wpe-engine engine64/libexec/WPEWebProcess engine64/libexec/WPENetworkProcess engine64/libexec/WPEGPUProcess; do
+            interp=$(readelf -l "$A/$f" 2>/dev/null | sed -n 's/.*interpreter: \(.*\)\]/\1/p')
+            [ "$interp" = "/tmp/$app/ld-linux-aarch64.so.1" ] || fail "$app: $f PT_INTERP is '$interp'"
+        done
+        rm -rf "$w"
+    done
+    [ "$count" -ge 1 ] || fail "no package of IDS=$IDS found in $dir"
+    [ "$bad" -eq 0 ] || { echo "check: $bad problem(s): nothing is published" >&2; exit 1; }
+    say "check passed: $count package(s) in $dir"
+}
+
+# ---- publish: the checked set replaces the old one in $OUT --------------------------------------------------------
+do_publish() {
+    [ -d "$STAGE_OUT" ] || { echo "nothing to publish: no $STAGE_OUT" >&2; exit 1; }
+    CHECK_DIR=$STAGE_OUT do_check
+    mkdir -p "$OUT"
+    rm -f "$OUT"/*_arm.ipk "$OUT/MD5SUMS" "$OUT/BUILD-INFO.txt"
+    mv "$STAGE_OUT"/*_arm.ipk "$STAGE_OUT/MD5SUMS" "$STAGE_OUT/BUILD-INFO.txt" "$OUT/"
+    rmdir "$STAGE_OUT"
+    say "published to $OUT"; ls -l "$OUT"/*_arm.ipk | sed 's/^/   /'
 }
 
 case "$phase" in
@@ -334,6 +455,8 @@ case "$phase" in
     ui) do_ui ;;
     add64) do_add64 ;;
     sums) do_sums ;;
-    all) do_clone; do_overlay; do_launcher; do_webkit32; do_engine32; do_backend; do_ubo; do_stage; do_ui; do_add64; do_sums ;;
-    *) echo "usage: $0 all|clone|launcher|engine32|backend|ubo|stage|ui|add64|sums" >&2; exit 2 ;;
+    check) do_check ;;
+    publish) do_publish ;;
+    all) do_clone; do_overlay; do_launcher; do_webkit32; do_engine32; do_backend; do_ubo; do_stage; do_ui; do_add64; do_sums; do_publish ;;
+    *) echo "usage: $0 all|clone|overlay|launcher|webkit32|engine32|backend|ubo|stage|ui|add64|sums|check|publish" >&2; exit 2 ;;
 esac

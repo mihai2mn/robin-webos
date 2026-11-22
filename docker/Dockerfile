@@ -1,5 +1,5 @@
 # Build environment for the webOS WPE WebKit browser: crosstool-ng toolchain + Buildroot.
-# Runs as the host user (see tools/in-docker.sh) so files in the bind mounts stay owned by them.
+# Runs as the host user (see docker/run.sh) so files in the bind mounts stay owned by them.
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \

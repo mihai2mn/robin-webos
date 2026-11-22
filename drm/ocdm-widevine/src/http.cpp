@@ -23,6 +23,8 @@ enum {
     kOptFollowLocation = 52,
     kOptPostFieldSize = 60,
     kOptNoSignal = 99,
+    kOptConnectTimeout = 78,
+    kOptProtocols = 181,        // CURLOPT_PROTOCOLS (a CURLPROTO_* mask; deprecated in 7.85, still honoured)
     kOptWriteFunction = 20011,
     kInfoResponseCode = 0x200002,
 };
@@ -74,10 +76,19 @@ Curl* curl()
     return instance;
 }
 
+// The provisioning answer is a few KB; anything past this is not one (returning less than was given makes curl fail the transfer).
+const size_t kMaxResponse = 1 << 20;
+
 size_t append(char* data, size_t size, size_t count, void* user)
 {
-    static_cast<std::string*>(user)->append(data, size * count);
-    return size * count;
+    auto* body = static_cast<std::string*>(user);
+    const size_t n = size * count;
+    if (count && n / count != size)
+        return 0;
+    if (body->size() + n > kMaxResponse)
+        return 0;
+    body->append(data, n);
+    return n;
 }
 
 } // namespace
@@ -108,6 +119,8 @@ HttpResult http_post(const std::string& url, const std::string& body, const std:
     c->easy_setopt(easy, kOptTimeout, timeout_seconds);
     c->easy_setopt(easy, kOptNoSignal, 1L);
     c->easy_setopt(easy, kOptFollowLocation, 0L);
+    c->easy_setopt(easy, kOptProtocols, 3L);   // CURLPROTO_HTTP | CURLPROTO_HTTPS only (no file://, ftp://, ...)
+    c->easy_setopt(easy, kOptConnectTimeout, 10L);
     if (const char* ca = getenv("WPE_BROWSER_CA_FILE"))
         if (*ca)
             c->easy_setopt(easy, kOptCaInfo, ca);

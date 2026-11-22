@@ -221,7 +221,7 @@ chmod -R u+w "$stage" 2>/dev/null || true
 rm -rf "$stage"
 mkdir -p "$stage/libexec" "$stage/lib/gio/modules" "$stage/lib/glibc" "$stage/lib/mesa" "$stage/lib/injected-bundle" \
          "$stage/lib/gstreamer-1.0" "$stage/etc/fonts" "$stage/etc/ssl/certs" "$stage/share"
-cp "$build/wpe-engine" "$build/libgstwpebmedia.so" "$stage/" 2>/dev/null || cp "$build/wpe-engine" "$stage/"
+cp "$build/wpe-engine" "$build/libgstwpebmedia.so" "$stage/" || { echo "the engine build left no wpe-engine or libgstwpebmedia.so in $build: nothing to stage" >&2; exit 1; }
 cp "$libexec"/WPEWebProcess "$libexec"/WPENetworkProcess "$stage/libexec/"
 [ -x "$libexec/WPEGPUProcess" ] && cp "$libexec/WPEGPUProcess" "$stage/libexec/"
 cp "$TARGET"/usr/lib/gio/modules/libgiognutls.so "$stage/lib/gio/modules/"
@@ -230,7 +230,7 @@ mkdir -p "$stage/lib/gstreamer-1.0"
 for plugin in "$TARGET"/usr/lib/gstreamer-1.0/*.so; do
     cp -L "$plugin" "$stage/lib/gstreamer-1.0/"
 done
-cp -f "$build/libgstwpebmedia.so" "$stage/lib/gstreamer-1.0/" 2>/dev/null || true
+cp -f "$build/libgstwpebmedia.so" "$stage/lib/gstreamer-1.0/"   # the video sink the engine plays through: without it nothing plays
 cp "$TARGET/usr/libexec/gstreamer-1.0/gst-plugin-scanner" "$stage/libexec/"
 echo "== bundle the tree's glibc (the bridge's 2.39 cannot run these libraries: see REPORT.md §5)"
 # libc & friends sit in <sysroot>/lib; libstdc++ is installed by gcc into <sysroot>/usr/lib, so both are searched.
@@ -242,9 +242,10 @@ find_glibc() {
 }
 for so in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 libmvec.so.1 libpthread.so.0 libdl.so.2 librt.so.1 \
           libresolv.so.2 libutil.so.1 libanl.so.1 libnss_files.so.2 libnss_dns.so.2 libgcc_s.so.1 libstdc++.so.6; do
-    src=$(find_glibc "$so") || { echo "   ! $so not found in the tree" >&2; continue; }
+    src=$(find_glibc "$so") || { echo "   ! $so not found in the tree" >&2; glibc_missing=1; continue; }
     cp -L "$src" "$stage/lib/glibc/"
 done
+[ "${glibc_missing:-0}" = 0 ] || { echo "the bundled glibc is incomplete: not staging" >&2; exit 1; }
 [ -d "$TARGET/usr/lib/gconv" ] && cp -r "$TARGET/usr/lib/gconv" "$stage/lib/glibc/" && chmod -R u+w "$stage/lib/glibc/gconv"
 
 # ---- Mesa: mandatory for aarch64 (unlike the 32-bit default, where the TV's Mali GPU is used) ----
@@ -306,7 +307,7 @@ collect() {
                     next="$next $stage/lib/mesa/$need"
                     continue
                 fi
-                path=$(find_lib "$need") || { echo "   ! $need (needed by $(basename "$f")) not in the tree" >&2; continue; }
+                path=$(find_lib "$need") || { echo "   ! $need (needed by $(basename "$f")) not in the tree" >&2; lib_missing=1; continue; }
                 cp -L "$path" "$stage/lib/$need"
                 next="$next $stage/lib/$need"
             done
@@ -316,10 +317,11 @@ collect() {
 }
 echo "== collect the libraries the engine and its helpers need (Mesa's own dependencies included: libexpat, libz, ...)"
 collect "$stage/wpe-engine $stage/libexec/* $stage/lib/gio/modules/libgiognutls.so $stage/lib/injected-bundle/libWPEInjectedBundle.so $stage/lib/gstreamer-1.0/*.so $stage/libexec/gst-plugin-scanner $mesa_seeds"
+[ "${lib_missing:-0}" = 0 ] || { echo "libraries the engine needs are missing from the tree (listed above): not staging a package that cannot start" >&2; exit 1; }
 echo "   $(ls "$stage/lib"/*.so* 2>/dev/null | wc -l) libraries in lib/"
 
 cp -r "$TARGET/usr/share/fonts" "$stage/share/"
-cp "$TARGET/etc/ssl/certs/ca-certificates.crt" "$stage/etc/ssl/certs/" 2>/dev/null || true
+cp "$TARGET/etc/ssl/certs/ca-certificates.crt" "$stage/etc/ssl/certs/" || { echo "no $TARGET/etc/ssl/certs/ca-certificates.crt: every https page would fail" >&2; exit 1; }
 
 # ---- PT_INTERP: the TV has no /lib/ld-linux-aarch64.so.1 ----
 # Everything the engine execs is linked against Buildroot's loader path, which does not exist on the TV, so each
@@ -385,8 +387,10 @@ while IFS= read -r so; do
         "$stage"/lib/gstreamer-1.0/*) so_origin='$ORIGIN:$ORIGIN/..:$ORIGIN/../mesa:$ORIGIN/../glibc' ;;
         *) so_origin='$ORIGIN:$ORIGIN/..:$ORIGIN/mesa:$ORIGIN/glibc' ;;
     esac
-    "$PATCHELF" --force-rpath --set-rpath "$so_origin" "$so" 2>/dev/null && rpath_count=$((rpath_count+1))
+    if "$PATCHELF" --force-rpath --set-rpath "$so_origin" "$so" 2>"$work/patchelf.err"; then rpath_count=$((rpath_count+1))
+    else echo "   ! patchelf failed on ${so#$stage/}: $(head -1 "$work/patchelf.err")" >&2; rpath_failed=1; fi
 done < <(find "$stage" -type f -name '*.so*' 2>/dev/null)
+[ "${rpath_failed:-0}" = 0 ] || { echo "RPATH could not be set on every shared object: not staging" >&2; exit 1; }
 echo "   RPATH set on $rpath_count shared objects (lib/glibc excluded)"
 
 echo "== check: every executable loads through $LOADER_LINK and finds its libraries"

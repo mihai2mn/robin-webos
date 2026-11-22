@@ -237,6 +237,57 @@ int main(int argc, char** argv)
     CHECK(server.hits == 1);
     CHECK(second && std::string(opencdm_session_id(second)) != id);
 
+    // A session whose last reference was dropped is being destroyed (its destroy task is queued on the dispatcher thread): a lookup
+    // must not hand it out again, or the destroy deletes a session the caller now uses. The dispatcher is held inside a key callback
+    // of another session, so the destroy stays queued while the lookup runs.
+    {
+        struct Gate {
+            std::mutex m;
+            std::condition_variable cv;
+            bool entered = false;
+            bool open = false;
+        } gate;
+        OpenCDMSessionCallbacks blocking {};
+        blocking.keys_updated_callback = [](const OpenCDMSession*, void* user) {
+            auto* g = static_cast<Gate*>(user);
+            std::unique_lock<std::mutex> lock(g->m);
+            g->entered = true;
+            g->cv.notify_all();
+            g->cv.wait_for(lock, std::chrono::seconds(5), [g] { return g->open; });
+        };
+        std::string kid_d(16, 'D'), kid_e(16, 'E');
+        Observed observed_v;
+        OpenCDMSession* victim = nullptr;
+        OpenCDMSession* holder = nullptr;
+        CHECK(opencdm_construct_session(system, Temporary, "cenc", reinterpret_cast<const uint8_t*>(pssh), 8, nullptr, 0,
+                  &cbs, &observed_v, &victim) == ERROR_NONE);
+        std::string license_d = "KEYS:" + kid_d;
+        CHECK(victim && opencdm_session_update(victim, reinterpret_cast<const uint8_t*>(license_d.data()), license_d.size()) == ERROR_NONE);
+        CHECK(wait_for(observed_v, [&] { return observed_v.keys_updated >= 1; }));
+        CHECK(opencdm_get_system_session(system, reinterpret_cast<const uint8_t*>(kid_d.data()), 16, 100) == victim);  // +1 reference
+        CHECK(opencdm_destruct_session(victim) == ERROR_NONE);  // gives that reference back; the construct reference stays
+
+        CHECK(opencdm_construct_session(system, Temporary, "cenc", reinterpret_cast<const uint8_t*>(pssh), 8, nullptr, 0,
+                  &blocking, &gate, &holder) == ERROR_NONE);
+        std::string license_e = "KEYS:" + kid_e;
+        CHECK(holder && opencdm_session_update(holder, reinterpret_cast<const uint8_t*>(license_e.data()), license_e.size()) == ERROR_NONE);
+        {
+            std::unique_lock<std::mutex> lock(gate.m);
+            CHECK(gate.cv.wait_for(lock, std::chrono::seconds(3), [&] { return gate.entered; }));
+        }
+        // The dispatcher is now inside the holder's callback. Drop the victim's last reference: its destroy is queued behind it.
+        CHECK(opencdm_destruct_session(victim) == ERROR_NONE);
+        OpenCDMSession* dying = opencdm_get_system_session(system, reinterpret_cast<const uint8_t*>(kid_d.data()), 16, 50);
+        CHECK(dying == nullptr);  // (a non-null answer is not released here: it would be a second destroy of the same session)
+        {
+            std::lock_guard<std::mutex> lock(gate.m);
+            gate.open = true;
+            gate.cv.notify_all();
+        }
+        CHECK(opencdm_destruct_session(holder) == ERROR_NONE);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
     // Close, then the session can no longer decrypt; references are released.
     CHECK(opencdm_session_close(session) == ERROR_NONE);
     {

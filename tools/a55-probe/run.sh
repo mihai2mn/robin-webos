@@ -9,6 +9,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 BR=$HOME/webos-browser-build; CC=$BR/x-tools/arm-webos-linux-gnueabi/bin/arm-webos-linux-gnueabi-gcc
 OBJDUMP=$BR/x-tools/arm-webos-linux-gnueabi/bin/arm-webos-linux-gnueabi-objdump
 out=${OUT:-$here/out}; mkdir -p "$out"
+rm -f "$out"/probe-*   # a probe of an earlier build must never be run and reported as this one's
+failed=0
 declare -A F=(
   [a9]="-march=armv7-a -mfpu=neon -mfloat-abi=softfp"
   [v8crc]="-march=armv8-a+crc -mfpu=neon-fp-armv8 -mfloat-abi=softfp -mtune=cortex-a55"
@@ -17,10 +19,11 @@ declare -A F=(
   [a55-extra]="-mcpu=cortex-a55 -mfpu=neon-fp-armv8 -mfloat-abi=softfp -mthumb -march=armv8.2-a+fp16+dotprod -DPROBE_EXTRA"
 )
 for k in "${!F[@]}"; do
-  $CC -O2 ${F[$k]} -o "$out/probe-$k" "$here/probe.c" -lm 2>"$out/build-$k.log" || { echo "build $k FAILED: $(head -3 "$out/build-$k.log")"; continue; }
+  $CC -O2 ${F[$k]} -o "$out/probe-$k" "$here/probe.c" -lm 2>"$out/build-$k.log" || { echo "build $k FAILED: $(head -3 "$out/build-$k.log")"; rm -f "$out/probe-$k"; failed=1; continue; }
   n=$($OBJDUMP -d "$out/probe-$k" | grep -cE '\s(sdiv|udiv|vfma|vfms|vrint[a-z]*|crc32[a-z]*|vsdot|vudot)')
   echo "built $k: armv8-class instructions in the binary: $n; $(${OBJDUMP%objdump}readelf -A "$out/probe-$k" 2>/dev/null | grep -E 'Tag_CPU_arch:' | tr -s ' ')"
 done
+[ "$failed" = 0 ] || { echo "a build failed: nothing is run on the TV" >&2; exit 1; }
 [ "${1:-}" = --tv ] || exit 0
 timeout 60 scp -q -o BatchMode=yes "$out"/probe-* lgtv:/tmp/ || exit 1
 for k in "${!F[@]}"; do

@@ -16,7 +16,8 @@ inline bool env_starts_with(const std::string &s, const char *prefix) { return s
 inline bool engine_env_listed(const std::string &name) {
     if (name == "WEBKIT_EXEC_PATH" || name == "WEBKIT_INJECTED_BUNDLE_PATH") return false;
     return env_starts_with(name, "WEBKIT_") || env_starts_with(name, "JSC_") || env_starts_with(name, "WPE_BROWSER_DEBUG") ||
-           env_starts_with(name, "GST_DEBUG") || env_starts_with(name, "G_TLS_") || env_starts_with(name, "MSE_");
+           env_starts_with(name, "GST_DEBUG") || env_starts_with(name, "G_TLS_") || env_starts_with(name, "MSE_") ||
+           name == "WREN_UBO";  // WREN_UBO=0: the ad blocker off (benchmarks); not harmless: dev id or dev-switches file only
 }
 
 // Listed names that only tune or log: JSC_* / MSE_* (engine tuning) and a few debug switches that write to the engine log.

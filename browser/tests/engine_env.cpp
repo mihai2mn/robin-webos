@@ -22,7 +22,7 @@ int main() {
     }
     for (const char *n : {"WPE_BROWSER_DEBUG_SCRIPT", "WPE_BROWSER_DEBUG_SETTINGS", "WPE_BROWSER_DEBUG_USER_AGENT",
                           "WPE_BROWSER_DEBUG_FORGET_COOKIES", "WPE_BROWSER_DEBUG_FUTURE_SWITCH", "WEBKIT_INSPECTOR_SERVER",
-                          "WEBKIT_DISABLE_COMPOSITING_MODE", "G_TLS_GNUTLS_PRIORITY", "GST_DEBUG_FILE", "GST_DEBUG"}) {
+                          "WEBKIT_DISABLE_COMPOSITING_MODE", "WREN_UBO", "G_TLS_GNUTLS_PRIORITY", "GST_DEBUG_FILE", "GST_DEBUG"}) {
         check(!engine_env_allowed(n, false), std::string(n) + " is refused on a release id");
         check(engine_env_allowed(n, true), std::string(n) + " passes unlocked");
     }

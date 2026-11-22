@@ -28,7 +28,7 @@ sh third_party/patches/apply-kit-patches.sh      # the app kit patches 0001-0009
 docker build -t webos-browser-build:1 docker/
 ```
 
-`docker/run.sh` mounts a fixed source path (`-v /home/sostk/Desktop/waydroid-test:/src`). Edit it before using it.
+`docker/run.sh` mounts the checkout it lives in (`docker/..`) as `/src`.
 The `build-*.sh` scripts below mount the checkout themselves.
 
 ## 2. The 32-bit engine
@@ -97,7 +97,12 @@ Output: `build/release/*.ipk`, `MD5SUMS` and `BUILD-INFO.txt` (commit, WebKit li
 8. `stage`: base stage + WebKit 2.54.3 + launcher + uBO into one engine tree per id.
 9. `ui`: the UI app per id (`WPEB_APPID`), packed with the kit.
 10. `add64`: adds `engine64/` and writes the ipks with `tools/mkar.py`. The TV's installer wants ar member names
-    without a trailing `/` and tar entries without `./`. GNU `ar rc` output is refused.
+    without a trailing `/` and tar entries without `./`. GNU `ar rc` output is refused. The ipks are written to `$OUT.tmp`.
+11. `sums`: `MD5SUMS` and `BUILD-INFO.txt` (full commit id) for exactly the ipks of `IDS`.
+12. `check`: unpacks every ipk and fails on a missing or extra package, a wrong id or version, missing `engine/` or
+    `engine64/` entries, a wrong ELF machine or `PT_INTERP`, a `DT_NEEDED` name found neither in the package nor in
+    `TV_LIBS`, a dangling link, or a `BUILD-INFO` commit that is not the built one.
+13. `publish` (part of `all`): runs `check`, then replaces the old ipks, `MD5SUMS` and `BUILD-INFO.txt` in `$OUT`.
 11. `sums`: `MD5SUMS` and `BUILD-INFO.txt`.
 
 The `dev` id (`org.sostk.wpebrowser.dev`) installs next to the real app for testing.
