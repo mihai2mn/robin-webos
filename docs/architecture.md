@@ -60,7 +60,7 @@ looked up at run time.
 | Path | What |
 |---|---|
 | `browser/` | the UI app: `wren_ui.*` (the glass interface: Home, tab row, overlays), `chrome.*` (buttons, address bar), screens (settings, history, bookmarks), engine client, LG media player, log export, profile, tests |
-| `browser/branding/` | the Robin icon (SVG master and the 512 px PNG, both made by `tools/branding/make-icons.py`, which also writes the 80, 130 and 96 px icons) |
+| `browser/branding/` | the Robin icon: the traced SVG, its 1024 px master PNG, and the 512 px PNG; `tools/branding/make-icons.py` (needs Pillow) writes the 512, 130, 96 and 80 px icons from the master |
 | `engine/src/` | `wpe-engine`: WebKit views, settings, site quirks, debug console, IPC with the UI |
 | `engine/gst/` | GStreamer sinks that send encoded audio/video to LG's pipeline |
 | `engine/webos-backend/` | libwpe backend for direct GPU presentation on webOS (wl_webos foreign surfaces) |

@@ -1989,7 +1989,7 @@ std::string ubo_page()
     std::string h = R"HTML(<!doctype html><html><head><meta charset="utf-8"><title>Ad blocker settings</title>
 <meta name="viewport" content="width=device-width">
 <style>
-:root{color-scheme:dark;--bg:#0b1020;--card:#151c33;--ink:#e8ecf8;--dim:#9aa6c4;--on:#f2693a;--line:#28314f}
+:root{color-scheme:dark;--bg:#0b1020;--card:#151c33;--ink:#e8ecf8;--dim:#9aa6c4;--on:#f25a10;--line:#28314f}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:22px/1.4 system-ui,sans-serif;padding:40px 64px}
 h1{font-size:40px;margin:0 0 6px}h2{font-size:26px;margin:36px 0 12px;color:var(--dim);font-weight:600}
 p.note{color:var(--dim);margin:0 0 20px}

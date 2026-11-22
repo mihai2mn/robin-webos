@@ -112,6 +112,11 @@ Build parameters: `APP_ID_BASE` (default `io.github.mihai2mn.robin`; the dev id 
 
 The `dev` id (`io.github.mihai2mn.robin.dev`) installs next to the real app for testing.
 
+## The icon
+
+`python3 tools/branding/make-icons.py` writes every icon size from `browser/branding/robin-icon-1024.png` (rounded-square mask,
+LANCZOS). It needs Pillow (`pip install pillow`). The generated PNGs are committed, so a build does not need it.
+
 ## The UI alone
 
 `./build.sh` in `browser/` builds and tests the UI on the desktop (`cmake --preset host-debug`,
