@@ -797,6 +797,11 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
     video_window_init();
     if (video_window.open && !self->have_window && !g_getenv("WPE_BROWSER_DEBUG_NO_VIDEO_WINDOW"))
         self->have_window = video_window.open(load.window_id, sizeof(load.window_id), 1000) != 0;
+    else if (self->have_window)
+        /* A codec change on a sink that has its window already (MSE changeType, an H.264 <-> VP9/HEVC switch): the new LOAD
+         * names the same window. Without it the LOAD went out with no window id (the UI then does not take the LG path) and the
+         * window was forgotten, so the hole stopped following and stop() never closed it. */
+        g_strlcpy(load.window_id, self->vid, sizeof(load.window_id));
     if (self->have_window && !load.window_id[0])
         self->have_window = FALSE;
     if (self->have_window) {
