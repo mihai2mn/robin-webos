@@ -724,6 +724,7 @@ class App : public wnk::app::Delegate {
             // Focus set in on_start lands before the first layout; settle it on the first frame.
             focused_once_ = true;
             focus_content();
+            if (!profile_notice_.empty()) ctx.ui().toast(profile_notice_, 9000);
         }
         // Keep the page size in step with the content area.
         const wnk::Rect r = screen_->page_->screen_rect();
@@ -1628,13 +1629,18 @@ class App : public wnk::app::Delegate {
              wnk::platform::storage_candidates(ctx.launch().app_id, ctx.launch().app_dir, ctx.runtime_dir())) {
             if (c.purpose != "data" || !wnk::platform::probe_writable(c).writable) continue;
             std::string why;
-            const std::string dir = browser::own_usable_dir(c.directory + own, &why);
+            const std::string dir = browser::own_usable_profile_dir(c.directory + own, &why);
             if (!why.empty()) WNK_LOGW(kCat, "profile folder %s", why.c_str());
-            if (!dir.empty()) return dir;
+            if (!dir.empty()) {
+                if (dir != c.directory + own)
+                    profile_notice_ = "Your saved bookmarks and history are in a folder this app cannot use. Starting with an empty profile.";
+                return dir;
+            }
         }
         const std::string fallback = runtime_dir(ctx) + own;
         std::string why;
-        const std::string dir = browser::own_usable_dir(fallback, &why);
+        const std::string dir = browser::own_usable_profile_dir(fallback, &why);
+        profile_notice_ = "No folder for saved data was usable: bookmarks and history will be lost when the app closes.";
         WNK_LOGE(kCat, "no persistent profile folder; using %s%s%s", dir.empty() ? fallback.c_str() : dir.c_str(),
             why.empty() ? "" : " (", why.empty() ? "" : (why + ")").c_str());
         return dir.empty() ? fallback : dir;
@@ -1668,6 +1674,7 @@ class App : public wnk::app::Delegate {
     bool focused_once_ = false;
     int32_t last_x_ = 0, last_y_ = 0;
     int restarts_ = 0;
+    std::string profile_notice_;  // set when the profile folder is not the usual one (data_dir): shown once at start
     TabId closing_tab_ = 0;  // close_tab: the tab being closed while its neighbour is shown (not counted, not discarded)
     double engine_started_ms_ = 0;  // when start_engine last ran
     static constexpr double kCrashLoopMs = 20000;
