@@ -246,7 +246,14 @@ static void exec_engine64(const char *app, int argc, char **argv)
         const char *slash = strrchr(app, '/');
         char dir[PATHBUF], link[PATHBUF], cur[PATHBUF];
         if (slash && join(dir, sizeof dir, "/tmp/", slash + 1) == 0 && join(link, sizeof link, dir, "/ld-linux-aarch64.so.1") == 0) {
-            mkdir(dir, 0700);
+            /* /tmp is shared: a directory (or a symlink) of that name made by another user would let that user swap the
+             * loader the helpers run through. Use it only if it is a real directory of ours that nobody else can write. */
+            struct stat st;
+            if ((mkdir(dir, 0700) != 0 && errno != EEXIST) || lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
+                st.st_uid != getuid() || (st.st_mode & 0777) != 0700) {
+                note("warning: the loader directory is not a private directory of this user, using the 32-bit engine", dir);
+                return;
+            }
             ssize_t n = readlink(link, cur, sizeof cur - 1);
             /* A link that names the right file but whose target is gone (the app folder was reinstalled elsewhere)
              * is dangling: access() follows it, so it counts as wrong too. */
