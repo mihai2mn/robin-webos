@@ -473,8 +473,10 @@ void on_progress(WebKitWebView *view, GParamSpec *, gpointer)
 void on_load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer)
 {
     if (event == WEBKIT_LOAD_COMMITTED)  // a new document: what the UI was last told about its fullscreen no longer holds
-        if (Tab *t = tab_by_id(tab_of_web_view(view)))
+        if (Tab *t = tab_by_id(tab_of_web_view(view))) {
             t->fs_sent = -1;
+            t->memory_kill = false;  // a page is alive: a memory kill that ended nothing must not label a later crash
+        }
     WpeLoad l {};
     switch (event) {
     case WEBKIT_LOAD_STARTED: l.event = WPE_LOAD_STARTED; break;
@@ -1456,6 +1458,21 @@ gboolean memory_guard_tick(gpointer)
     // The pages of all tabs live in ONE web process (no process swap, no COOP): ending it ends every tab, so while there are background
     // tabs the UI is asked to close the least recently shown one (WPE_ENGINE_DISCARD_REQUEST); only with none left is the shown
     // tab's process ended (the UI reloads it).
+    // With one tab the system-wide numbers alone say nothing about the page: ending it frees what it holds, so a small page (or no
+    // web process at all) is left alone; the pressure is someone else's. WPE_BROWSER_DEBUG_MEM_GUARD_FLOOR_MB (default 200).
+    if (g.tabs.size() <= 1) {
+        static const long floor_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_FLOOR_MB", "200").c_str()) * 1024;
+        static gint64 last_skip_log_us = 0;
+        const long footprint_kb = web_process_footprint_kb();
+        if (footprint_kb < floor_kb) {
+            if (now - last_skip_log_us > 60 * G_USEC_PER_SEC) {
+                last_skip_log_us = now;
+                log_msg("memory guard: %ld MB available, but the web process holds only %ld MB (below %ld MB): leaving the only tab alone",
+                    m.avail_kb / 1024, footprint_kb / 1024, floor_kb / 1024);
+            }
+            return G_SOURCE_CONTINUE;
+        }
+    }
     last_kill_us = now;
     if (g.tabs.size() > 1) {
         log_msg("memory guard: %ld MB available, swap %ld of %ld MB free: asking the UI to discard a background tab", m.avail_kb / 1024,
