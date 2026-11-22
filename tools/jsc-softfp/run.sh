@@ -9,7 +9,7 @@ jsc=$1; libs=$2; sysroot=${3:-$HOME/webos-browser-build/br-out/staging}
 tests=("$here/boundary.js" ${JS_TESTS:-})
 run() { QEMU_LD_PREFIX="$sysroot" LD_LIBRARY_PATH="$libs" timeout 900 qemu-arm-static -L "$sysroot" "$jsc" "$@"; }
 # Low thresholds: Baseline after 1 run, DFG after 10; no concurrent compilation, so tier-up is deterministic.
-forced=(--useConcurrentJIT=false --thresholdForJITAfterWarmUp=1 --thresholdForJITSoon=1
+forced=(--useJIT=true --useConcurrentJIT=false --thresholdForJITAfterWarmUp=1 --thresholdForJITSoon=1
         --thresholdForOptimizeAfterWarmUp=10 --thresholdForOptimizeAfterLongWarmUp=10 --thresholdForOptimizeSoon=10)
 fail=0
 for t in "${tests[@]}"; do
@@ -21,8 +21,9 @@ for t in "${tests[@]}"; do
         if [ "$got" = "$ref" ]; then echo "ok   $name/$mode ($(echo "$ref" | wc -l) lines identical)"
         else echo "FAIL $name/$mode: output differs"; diff <(echo "$ref") <(echo "$got") | head -10; fail=1; fi
     done
-    # Show that the JIT really ran: JSC prints compilation counts with --reportCompileTimes... keep it cheap:
-    run "${forced[@]}" --reportBaselineCompileTimes=true --reportDFGCompileTimes=true "$t" 2>&1 >/dev/null \
-        | grep -c -E "Baseline|DFG" | sed "s/^/     $name: JIT compilations logged: /" || true
+    # The JIT must really have run, or the comparison above says nothing: JSC logs each compilation with these options (stderr).
+    n=$(run "${forced[@]}" --reportBaselineCompileTimes=true --reportDFGCompileTimes=true "$t" 2>&1 >/dev/null | grep -c -E "Baseline|DFG" || true)
+    echo "     $name: JIT compilations logged: $n"
+    [ "${n:-0}" -gt 0 ] || { echo "FAIL $name: no JIT compilation was logged with the forced thresholds: the runs above compared the interpreter with itself"; fail=1; }
 done
 exit $fail
