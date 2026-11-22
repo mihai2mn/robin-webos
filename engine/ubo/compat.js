@@ -452,6 +452,7 @@
         // A video decided while a container is fullscreen (a new element, or one promoted to the hardware plane by the transition itself).
         onDecided = v => { if (emu.el && !(emu.el instanceof HTMLVideoElement) && !isFrame(emu.el) && mainPicture(v) && videosIn(emu.el).includes(v)) fillVideo(v, emu.el); };
         const enter = el => {
+            if (emu.el === el) return;           // already fullscreen: no swap, no second fullscreenchange
             const swap = !!emu.el;               // another element asks while one is fullscreen: switch, one change event, no exit
             if (swap) { restoreStyles(); emu.el = null; }
             emu.el = el;
@@ -518,6 +519,22 @@
                 Object.defineProperty(document, name, { configurable: true, get() { return emu.el ? value() : (original && original.get ? original.get.call(document) : null); } });
             } catch (e) {}
         }
+        // A shadow root answers for what is fullscreen inside its own tree (the element in that tree that is, or contains, the fullscreen one).
+        try {
+            const original = Object.getOwnPropertyDescriptor(ShadowRoot.prototype, 'fullscreenElement');
+            Object.defineProperty(ShadowRoot.prototype, 'fullscreenElement', { configurable: true, get() {
+                if (emu.el) {
+                    for (let n = emu.el; n;) {
+                        const r = n.getRootNode();
+                        if (r === this) return n;
+                        if (!(r instanceof ShadowRoot)) break;
+                        n = r.host;
+                    }
+                    return null;
+                }
+                return original && original.get ? original.get.call(this) : null;
+            } });
+        } catch (e) {}
         for (const name of ['requestFullscreen', 'webkitRequestFullscreen', 'webkitRequestFullScreen']) {
             const original = Element.prototype[name];
             if (!original) continue;
