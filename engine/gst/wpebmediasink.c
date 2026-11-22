@@ -99,13 +99,13 @@ static void video_window_init(void)
  * queue is dispatched on the compositing thread, so a flush from this one (the thread libwpe runs the sink on) cannot
  * dispatch it, and every painted frame of the page carries the move in its own commit: that is what makes the hole
  * and the page's pixels travel together. An app with an older backend has no entry point yet: the old place(). */
-static void video_window_place(const char *vid, int sw, int sh, int x, int y, int w, int h)
+static void video_window_place(const char *vid, int sw, int sh, int x, int y, int w, int h, int commit)
 {
     /* Our own window by its id: when another tab's sink is still winding down, or this one's page is not the shown one,
      * the shown page's window is not the one to move. */
     if (video_window.place_id && vid && vid[0])
-        video_window.place_id(vid, sw, sh, x, y, w, h, 0);
-    else if (video_window.place_unflushed)
+        video_window.place_id(vid, sw, sh, x, y, w, h, commit);
+    else if (video_window.place_unflushed && !commit)
         video_window.place_unflushed(sw, sh, x, y, w, h);
     else if (video_window.place)
         video_window.place(sw, sh, x, y, w, h);
@@ -149,6 +149,8 @@ struct _WpebVideoSink {
     double scroll_pps;
     gint64 area_send_gap_us; /* 0: none */
     int64_t place_us;
+    int64_t unflushed_at_us; /* lock: when the last placement was queued without a flush (0: none waiting) */
+    int place_rect[6];       /* lock: that placement (sw, sh, x, y, w, h) */
     guint64 sets; /* rectangle property sets, and how many were different from the last one */
     guint64 sent;
     int64_t last_pts_us; /* media time of the last unit sent */
@@ -542,8 +544,13 @@ static void area_painted(WpebVideoSink *self, WpebMediaArea a)
     }
     if (have_window && video_window.place) {
         const int64_t t0 = now_us();
-        video_window_place(self->vid, vw, vh, a.x, a.y, a.width, a.height);
+        video_window_place(self->vid, vw, vh, a.x, a.y, a.width, a.height, 0);
         self->place_us = now_us() - t0;
+        g_mutex_lock(&self->lock);
+        self->unflushed_at_us = now_us();
+        self->place_rect[0] = vw, self->place_rect[1] = vh, self->place_rect[2] = a.x, self->place_rect[3] = a.y;
+        self->place_rect[4] = a.width, self->place_rect[5] = a.height;
+        g_mutex_unlock(&self->lock);
     }
     if (WPEB_AREA_DEBUG) {
         /* v: the page surface's commit that carried this move (engine/webos-backend, 0: unknown), or when the last
@@ -802,7 +809,7 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
         const WpebMediaArea a = self->painted_area_valid ? self->painted_area : self->area;
         g_mutex_unlock(&self->lock);
         if (known)
-            video_window_place(self->vid, width, height, a.x, a.y, a.width, a.height); /* backend serializes with g_video_lock */
+            video_window_place(self->vid, width, height, a.x, a.y, a.width, a.height, 1); self->unflushed_at_us = 0; /* backend serializes with g_video_lock; flushed: a static page paints no frame after this one to carry it */
     }
     self->load = load;
     gboolean sent = send_msg(self, WPEB_MEDIA_LOAD, 0, &load, sizeof(load));
@@ -891,6 +898,20 @@ static GstFlowReturn wpeb_video_sink_render(GstBaseSink *sink, GstBuffer *buffer
     g_mutex_lock(&self->io_lock);
     area_flush_pending_locked(self, FALSE);
     g_mutex_unlock(&self->io_lock);
+    /* A placement is carried to the compositor by the next frame the page paints; a static page (nothing taller than the
+     * screen, no animation) paints none, and the picture stayed black (TV, 2026-11-22). When none followed within 120 ms the
+     * placement is flushed on its own (the same rectangle again: harmless when a frame did carry it). */
+    int rect[6];
+    gboolean flush_place = FALSE;
+    g_mutex_lock(&self->lock);
+    if (self->unflushed_at_us && self->have_window && now_us() - self->unflushed_at_us > 120000) {
+        memcpy(rect, self->place_rect, sizeof(rect));
+        self->unflushed_at_us = 0;
+        flush_place = TRUE;
+    }
+    g_mutex_unlock(&self->lock);
+    if (flush_place)
+        video_window_place(self->vid, rect[0], rect[1], rect[2], rect[3], rect[4], rect[5], 1);
     GST_LOG_OBJECT(self, "unit %" G_GUINT64_FORMAT ": media %" G_GINT64_FORMAT " us, %" G_GSIZE_FORMAT " bytes", self->sent + 1, pts_us, size);
     if (++self->sent == 1)
         GST_INFO_OBJECT(self, "first access unit: media time %" G_GINT64_FORMAT " us, %" G_GSIZE_FORMAT " bytes", pts_us, map.size);
