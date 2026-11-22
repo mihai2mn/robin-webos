@@ -778,6 +778,19 @@ gboolean load_later(gpointer data)
 bool popup_navigation_blocked(WebKitWebView *view, const char *uri);
 void popup_opener_moves(WebKitWebView *view, const char *uri);
 
+// The browser has no download UI and no place to put a file: a response WebKit would save (Content-Disposition:
+// attachment: WebKit's default decide-policy turns it into a download, and an unhandled decide-destination saves it under
+// the user's download directory) is cancelled here, with a log line (the address without its query).
+void on_download_started(WebKitNetworkSession *, WebKitDownload *download, gpointer)
+{
+    WebKitURIRequest *request = webkit_download_get_request(download);
+    const char *uri = request ? webkit_uri_request_get_uri(request) : nullptr;
+    std::string shown = uri ? uri : "";
+    shown.resize(shown.find_first_of("?#") == std::string::npos ? std::min<size_t>(shown.size(), 120) : shown.find_first_of("?#"));
+    log_msg("download refused (not supported): %.120s", shown.c_str());
+    webkit_download_cancel(download);
+}
+
 gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer)
 {
     if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION)
@@ -2480,6 +2493,7 @@ int main(int, char **)
     }
     if (!g.context) g.context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, nullptr));
     g.session = webkit_network_session_new(data_dir.c_str(), cache_dir.c_str());
+    g_signal_connect(g.session, "download-started", G_CALLBACK(on_download_started), nullptr);
     webkit_cookie_manager_set_persistent_storage(webkit_network_session_get_cookie_manager(g.session),
         (data_dir + "/cookies.sqlite").c_str(), WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
 
