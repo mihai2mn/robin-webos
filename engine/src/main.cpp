@@ -586,9 +586,16 @@ constexpr const char *kScrollScript = R"JS((function () {
     // The element that scrolls the content: the document, or (web apps, sites with a fixed layout) the largest
     // element that scrolls vertically and covers most of the screen. Spatial navigation only scrolls the box that holds
     // the focused link, so with nothing focusable on screen such a box never moves under the arrow keys.
+    // The search below is a getComputedStyle per element (up to 5000): its result is kept for the document and used while that
+    // element is still in the page and still scrolls; "none found" is kept for 2 s. A resize drops both.
+    var scrollerCache = null, noScrollerAt = 0;
+    addEventListener('resize', function () { scrollerCache = null; noScrollerAt = 0; });
     function scroller() {
         var doc = document.scrollingElement || document.documentElement;
         if (doc && doc.scrollHeight > doc.clientHeight + 4) return doc;
+        if (scrollerCache && scrollerCache.isConnected && scrollerCache.scrollHeight > scrollerCache.clientHeight + 4) return scrollerCache;
+        scrollerCache = null;
+        if (noScrollerAt && Date.now() - noScrollerAt < 2000) return doc;
         var best = null, bestArea = innerWidth * innerHeight * 0.3;
         var all = document.body ? document.body.getElementsByTagName('*') : [];
         for (var i = 0; i < all.length && i < 5000; i++) {
@@ -599,13 +606,15 @@ constexpr const char *kScrollScript = R"JS((function () {
             var area = el.clientWidth * el.clientHeight;
             if (area > bestArea) { best = el; bestArea = area; }
         }
+        scrollerCache = best;
+        noScrollerAt = best ? 0 : Date.now();
         return best || doc;
     }
     // Up / Down that changed nothing: spatial navigation moved no focus, nothing scrolled and the page did not take
     // the key (defaultPrevented: web apps with their own remote handling). Down then scrolls the content box itself;
     // Up does too unless the content is at its top, where it brings the toolbar (wpebEdge). Typing never counts.
     addEventListener('keydown', function (ev) {
-        if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+        if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown' || ev.defaultPrevented) return;
         var a = document.activeElement;
         if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return;
         var y = window.scrollY, s = scroller(), st = s ? s.scrollTop : 0;
@@ -915,6 +924,34 @@ std::string media_limit_script()
     return script;
 }
 
+// A tab that is no longer shown must not go on playing (memory, bandwidth, sound): when a document becomes hidden, every
+// <video>/<audio> in it, in open shadow trees too, is paused. Runs in every frame (a player in an iframe is its own
+// document), in an isolated world of its own so the page cannot see or disable it. It only ever pauses: nothing is resumed
+// when the document is shown again. Closed shadow trees are out of reach. (The tab switch's own pause of the top document,
+// kPause in the engine, stays.)
+constexpr const char *kPauseHiddenScript = R"JS((function () {
+  function pauseAll(root) {
+    var media = root.querySelectorAll('video,audio');
+    for (var i = 0; i < media.length; i++) { try { media[i].pause(); } catch (e) {} }
+    var all = root.querySelectorAll('*');
+    for (var j = 0; j < all.length; j++) if (all[j].shadowRoot) pauseAll(all[j].shadowRoot);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') pauseAll(document);
+  }, true);
+})();)JS";
+
+void add_pause_when_hidden(WebKitWebView *web_view)
+{
+    WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(web_view);
+    if (!ucm || g_strcmp0(getenv("WPE_BROWSER_DEBUG_PAUSE_HIDDEN"), "0") == 0)
+        return;
+    WebKitUserScript *script = webkit_user_script_new_for_world(kPauseHiddenScript, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+        WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, "wren-pause-hidden", nullptr, nullptr);
+    webkit_user_content_manager_add_script(ucm, script);
+    webkit_user_script_unref(script);
+}
+
 void add_media_limits(WebKitWebView *web_view)
 {
     static const std::string source = media_limit_script();
@@ -1198,6 +1235,7 @@ void add_scroll_reporter(WebKitWebView *web_view, uint32_t id)
 {
     add_site_quirks(web_view);
     add_media_limits(web_view);
+    add_pause_when_hidden(web_view);
     add_hybrid_video(web_view, id);
     add_debug_script(web_view);
     add_console_reporter(web_view, id); // after the limits, so it wraps them and logs what pages are told
@@ -1451,9 +1489,18 @@ gboolean memory_guard_tick(gpointer)
     static const long avail_floor_kb = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_AVAIL_MB", "110").c_str()) * 1024;
     static const long swap_pct = atol(env_or("WPE_BROWSER_DEBUG_MEM_GUARD_SWAP_PCT", "12").c_str());
     static gint64 last_kill_us = 0;
+    // One discard at a time: what it frees shows only in the next measurement, so the tick after a request only looks (the
+    // trigger is evaluated again on the tick after that).
+    static bool awaiting_measurement = false;
     MemInfo m;
     if (!read_meminfo(m))
         return G_SOURCE_CONTINUE;
+    if (awaiting_measurement) {
+        awaiting_measurement = false;
+        log_msg("memory guard: after the discard request %ld MB available, swap %ld of %ld MB free: measured, no further request on this tick",
+            m.avail_kb / 1024, m.swap_free_kb / 1024, m.swap_total_kb / 1024);
+        return G_SOURCE_CONTINUE;
+    }
     const bool swap_gone = m.swap_total_kb <= 0 || m.swap_free_kb * 100 < m.swap_total_kb * swap_pct;
     // The web process (all tabs) is also watched on its own: at 70% of WebKit's own limit, background tabs go before WebKit's kill threshold
     // ends every tab at once (2026-11-20: all five tabs were reset together at the threshold while the TV was not yet out of memory).
@@ -1484,6 +1531,7 @@ gboolean memory_guard_tick(gpointer)
     }
     last_kill_us = now;
     if (g.tabs.size() > 1) {
+        awaiting_measurement = true;
         log_msg("memory guard: %ld MB available, swap %ld of %ld MB free: asking the UI to discard a background tab", m.avail_kb / 1024,
             m.swap_free_kb / 1024, m.swap_total_kb / 1024);
         send_msg(WPE_ENGINE_DISCARD_REQUEST, 0, nullptr, 0);

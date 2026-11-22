@@ -1230,7 +1230,11 @@ class App : public wnk::app::Delegate {
     bool discard_background_tab(TabId except, const char *why) {
         Tab *victim = nullptr;
         for (Tab &x : tabs_) {
-            if (x.live && x.id != except && x.id != active_ && (victim == nullptr || x.last_shown_ms < victim->last_shown_ms))
+            if (!x.live || x.id == except || x.id == active_ || (victim != nullptr && x.last_shown_ms >= victim->last_shown_ms))
+                continue;
+            // The opener of a window that is still open (a sign-in popup talks to window.opener) is not discarded.
+            const bool opens_live_popup = std::any_of(tabs_.begin(), tabs_.end(), [&x](const Tab &p) { return p.live && p.opener == x.id; });
+            if (!opens_live_popup)
                 victim = &x;
         }
         if (victim == nullptr) return false;
