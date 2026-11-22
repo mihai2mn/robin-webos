@@ -1275,7 +1275,10 @@ static void video_place(int sw, int sh, int x, int y, int w, int h, gboolean com
                                                                   : 1;
         const bool area_debug = getenv("WPE_BROWSER_DEBUG_MEDIA_AREA") != NULL;
         const bool plan_changed = memcmp(&plan, &t->video_last_plan, sizeof(plan)) != 0;
-        if (state != t->video_place_state || (area_debug && plan_changed)) {
+        // A jump in size (the page's fullscreen, a player resizing) is worth a line even when the kind stays "window": otherwise the
+        // log shows no placement after the toggle and looks as if none happened.
+        const bool size_jump = abs(plan.dw - t->video_last_plan.dw) > 64 || abs(plan.dh - t->video_last_plan.dh) > 64;
+        if (state != t->video_place_state || size_jump || (area_debug && plan_changed)) {
             LOG("video place [%s]: req=(%d,%d %dx%d) surf=%ux%d(inset=%d) pic=%dx%d -> src=(%d,%d %dx%d) dst=(%d,%d %dx%d)",
                 wpeb_video_plan_label(&plan), x, y, w, h, t->width, surface_h,
                 surface_h > (int)t->height ? surface_h - (int)t->height : 0, plan.ow, plan.oh,
