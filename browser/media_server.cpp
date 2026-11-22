@@ -235,7 +235,10 @@ void MediaServer::commit_area(bool frame_ready) {
         fprintf(stderr, "[page-area] webkit=(%d,%d %dx%d) origin=(%.1f,%.1f) scale=(%.4f,%.4f) -> area=(%.1f,%.1f %.1fx%.1f)\n",
                 a.x, a.y, a.width, a.height, page_x_.load(), page_y_.load(), scx, scy, sx, sy, sw, sh);
     // Only the owner's stream drives the plane and the hole: another tab's sink must not repaint them.
-    const bool from_owner = owner_.load() == p.id || owner_.load() == 0;
+    // With no owner, only a stream that has not loaded yet (its AREA may precede its Load): after a release (UNLOAD, or release_owner when
+    // the page went away) the stream's areas no longer make a hole.
+    const uint64_t owner = owner_.load();
+    const bool from_owner = owner == p.id || (owner == 0 && p.before_load);
     if (backend_ && a.width > 0 && a.height > 0 && from_owner && !use_lg_) {
         // Where the video is going: the compositor shows the plane some milliseconds after the UI's own frame (screenshots of a
         // scrolling page: the plane trailed the hole by one to two scroll steps), so a plane put on the hole trails it by that
@@ -583,6 +586,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     // playing on its first feed by itself. A pause that came while the Load was held (the stream did not own the decoder yet), or
     // before a retry or recovery reloaded the pipeline, was lost: the video played under a paused element.
     bool paused_state = false;
+    bool loaded_once = false;  // reader thread: do_load ran for this stream (its areas without an owner no longer make a hole)
 
     bool force_ndl = false;  // the last attempt after LG's pipeline failed to start: the Starfish backend's decoder
     int retries = 0;
@@ -632,6 +636,7 @@ void MediaServer::serve(int fd, uint64_t id) {
         if (ndl_loaded_) b.unload();
         use_lg_ = ndl_loaded_ = false;
         owner_ = id;
+        loaded_once = true;
         if (hole_id_.load() != id) clear_hole();  // another stream's rectangle no longer applies (this one's AREA may precede its Load)
         units = 0;
         full_waits = 0;
@@ -953,7 +958,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             // (commit_area), so the plane, the hole and the picture move in the same frame instead of the plane
             // running ahead of the page by one engine frame.
             std::lock_guard<std::mutex> al(area_mu_);
-            pending_ = PendingArea{a, id, Clock::now(), ++pending_seq_, true};
+            pending_ = PendingArea{a, id, Clock::now(), ++pending_seq_, true, !loaded_once};
 
             break;
         }
