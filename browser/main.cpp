@@ -25,6 +25,7 @@
 #include "profile.hpp"
 #include "screens.hpp"
 #include "storage.hpp"
+#include "tab_ids.hpp"
 #include "../engine/webos-backend/protocol.h"
 
 #include "wnk/app/app.hpp"
@@ -97,7 +98,8 @@ constexpr double kChromeDwellMs = 350;  // the pointer rests this long at the to
 constexpr double kChromeHideDelayMs = 250;  // the toolbar must be unwanted this long before it slides away (no flicker when a reason flips back and forth)
 constexpr float kChromeLeaveMargin = 24.0f;  // logical px below the toolbar that send it away again
 constexpr float kChromeRevealEdge = 6.0f;  // logical px at the top of the screen that bring the toolbar back
-constexpr int kMaxRestarts = 3;
+constexpr int kMaxRestarts = 3;  // engine deaths in a row; an engine that stayed up kRestartForgiveMs starts the count again
+constexpr double kRestartForgiveMs = 5 * 60 * 1000;
 constexpr double kHoldOkMs = 550;  // OK held this long opens quick actions
 // Background tabs beyond this many keep only their URL and title (Chromium's tab discarding); they reload
 // when shown again. Each live tab costs WebKit memory, and a TV has little to spare.
@@ -355,7 +357,7 @@ class App : public wnk::app::Delegate {
             engine_.reload(t->id);
     }
     // A tab whose web process died: load its page again in a new one, unless it died again within
-    // kCrashLoopMs of the last automatic reload (then the user decides, with Green).
+    // kCrashLoopMs of the last automatic reload (then the user decides, with Hold OK → Reload).
     void reload_crashed(Tab &t) {
         t.crashed = false;
         WNK_LOGI(kCat, "tab %u: reloading after its web process crashed", t.id);
@@ -700,6 +702,7 @@ class App : public wnk::app::Delegate {
             direct_.close();
             screen_->page_->set_direct(false);
             for (Tab &t : tabs_) t.live = false, t.loading = false;
+            renumber_engine_tabs();
             screen_->page_->show_tab(0);
             start_engine();
             if (Tab *t = tab(active_)) activate(t->id);
@@ -776,6 +779,16 @@ class App : public wnk::app::Delegate {
         // inside first if it slipped out, e.g. to the page under it).
         if (browsing && screen_->overlay_open()) {
             browser::wren::Overlay *o = screen_->open_overlay();
+            // The OK held to open the quick actions is still down: its repeats and its release belong to that hold, not to
+            // the overlay's widgets. The release also ends the hold (ok_down_ otherwise stayed set and swallowed pointer clicks).
+            if (action == A::Confirm && ok_down_) {
+                if (e.down && !e.repeat) {
+                    ok_down_ = false;  // a new press: the last release was lost
+                } else {
+                    if (!e.down) ok_down_ = false;
+                    return true;
+                }
+            }
             if (action == A::Back) {
                 if (e.down && !e.repeat) o->close(ui);
                 return true;
@@ -1128,6 +1141,7 @@ class App : public wnk::app::Delegate {
         if (history) {
             const size_t n = profile_.clear_history(seconds);
             WNK_LOGI(kCat, "cleared %zu history entries", n);
+            refresh_chrome();  // the Home page's recent tiles
         }
         const uint32_t what = (cookies ? WPE_CLEAR_COOKIES_AND_SITE_DATA : 0u) | (cache ? WPE_CLEAR_CACHE : 0u);
         if (what != 0 && engine_.running()) {
@@ -1228,6 +1242,23 @@ class App : public wnk::app::Delegate {
         return true;
     }
 
+    // The engine is gone (it died, or direct presentation is being replaced): popups' ids from it must not clash with the next
+    // engine's, which counts from the same base again. Give those tabs fresh UI ids, and follow them everywhere an id is held.
+    void renumber_engine_tabs() {
+        std::vector<TabId> ids;
+        for (const Tab &t : tabs_) ids.push_back(t.id);
+        const browser::TabIdRemap remap(ids, WPE_ENGINE_TAB_ID_BASE, next_id_);
+        if (remap.empty()) return;
+        for (Tab &t : tabs_) {
+            t.id = remap(t.id);
+            t.opener = remap(t.opener);
+        }
+        active_ = remap(active_);
+        video_tab_ = remap(video_tab_);
+        hole_tab_ = remap(hole_tab_);
+        for (auto &pc : pending_closes_) pc.first = remap(pc.first);
+    }
+
     void open_in_engine(Tab &t, const std::string &url) {
         // Discard the least recently shown background tabs first (they keep URL and title).
         size_t live = static_cast<size_t>(std::count_if(tabs_.begin(), tabs_.end(), [](const Tab &x) { return x.live; }));
@@ -1240,18 +1271,13 @@ class App : public wnk::app::Delegate {
     void refresh_chrome() {
         const std::vector<browser::TabInfo> infos = tab_infos();
         auto &ui = ctx_->ui();
-        const bool row_focused = ui.focused() != nullptr && screen_->tabrow_->is_ancestor_of(ui.focused());
+        // Each rebuild keeps focus where it was (same tab, same card): this runs for events of every tab, background ones
+        // included, and must not move what the person is pointing at.
         screen_->tabrow_->rebuild(ui, infos, active_);
-        if (row_focused) {
-            if (auto *chip = screen_->tabrow_->chip(active_)) ui.focus(chip);
-        }
-        const bool home_focused = ui.focused() != nullptr && screen_->home_->is_ancestor_of(ui.focused()) &&
-                                  ui.focused() != &screen_->home_->search().field();
-        screen_->home_->set_tabs(infos, active_);
+        screen_->home_->set_tabs(ui, infos, active_);
         const Tab *t = tab(active_);
         const bool page = t != nullptr && !t->url.empty();
-        if (!page) screen_->home_->set_recents(recents());
-        if (home_focused && !page) ui.focus(&screen_->home_->search().field());
+        if (!page) screen_->home_->set_recents(recents(), &ui);
         screen_->home_->set_visible(!page);
         screen_->page_->set_visible(page);
         screen_->back_->set_active(t != nullptr && t->can_back);
@@ -1381,7 +1407,7 @@ class App : public wnk::app::Delegate {
             t->crashed = !looping;
             const bool memory = code == 1;  // WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT: the engine's memory guard or WebKit's kill threshold
             if (looping) {
-                if (id == active_) ctx_->ui().toast("This page stopped again (" + msg + "). Press Green to reload.", 6000);
+                if (id == active_) ctx_->ui().toast("This page stopped again (" + msg + "). Hold OK and choose Reload.", 6000);
             } else if (id == active_) {
                 if (memory) ctx_->ui().toast("This page used too much memory and was reloaded.", 6000);
                 reload_crashed(*t);
@@ -1419,8 +1445,11 @@ class App : public wnk::app::Delegate {
             applied_zoom_ = 0;
             screen_->page_->ime(ctx_->ui(), false);
             for (Tab &t : tabs_) t.live = false, t.loading = false;
+            renumber_engine_tabs();
             screen_->page_->show_tab(0);
             refresh_chrome();
+            // Only deaths close together count: an engine that ran for minutes before dying is not a restart loop.
+            if (ctx_->ui().now_ms() - engine_started_ms_ >= kRestartForgiveMs) restarts_ = 0;
             if (restarts_ < kMaxRestarts) {
                 ++restarts_;
                 ctx_->ui().toast("The web engine stopped (" + why + "). Restarting...", 4000);
@@ -1452,6 +1481,7 @@ class App : public wnk::app::Delegate {
 
     void start_engine() {
         auto &ctx = *ctx_;
+        engine_started_ms_ = ctx.ui().now_ms();
         browser::EngineLaunch l;
         const char *override_dir = std::getenv("WPE_BROWSER_ENGINE_DIR");
         l.engine_dir = override_dir && *override_dir ? override_dir : ctx.launch().app_dir + "/engine";
@@ -1605,6 +1635,7 @@ class App : public wnk::app::Delegate {
     bool focused_once_ = false;
     int32_t last_x_ = 0, last_y_ = 0;
     int restarts_ = 0;
+    double engine_started_ms_ = 0;  // when start_engine last ran
     static constexpr double kCrashLoopMs = 20000;
     double crash_at_ms_ = -1e9;  // the last web-process crash
     bool restart_pending_ = false;

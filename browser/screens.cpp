@@ -241,8 +241,9 @@ class HistoryScreen : public PageScreen {
     void fill(size_t focus_index = SIZE_MAX, Ui *ui = nullptr) {
         body_->clear_children();
         auto &top = section("");
-        top.add<wnk::ui::ValueRow>("Clear browsing data").set_value("History, cookies, cache")
-            .set_on_click([this](Ui &u) { h_.show_clear_data(u); });
+        clear_row_ = &top.add<wnk::ui::ValueRow>("Clear browsing data");
+        clear_row_->set_value("History, cookies, cache").set_on_click([this](Ui &u) { h_.show_clear_data(u); });
+        filled_for_ = p_.history().size();
         const auto &entries = p_.history();
         if (entries.empty()) {
             auto &empty = body_->add<wnk::ui::Label>("Pages you visit will appear here.");
@@ -277,8 +278,17 @@ class HistoryScreen : public PageScreen {
         if (ui != nullptr && to_focus != nullptr) ui->focus(to_focus);
     }
 
+    // Back from the Clear screen: the list was filled before it, and may have lost entries since.
+    void on_show(Ui &ui) override {
+        if (p_.history().size() == filled_for_) return;
+        fill();
+        if (clear_row_ != nullptr) ui.focus(clear_row_);
+    }
+
     Profile &p_;
     PageHooks h_;
+    wnk::ui::ValueRow *clear_row_ = nullptr;
+    size_t filled_for_ = 0;
 };
 
 // ---- Bookmarks -------------------------------------------------------------------------------------------

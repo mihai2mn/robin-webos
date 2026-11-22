@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "log_export.hpp"
 
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -46,47 +47,63 @@ std::string read_tail(const std::string &path, std::size_t max, bool *missing, b
 
 }  // namespace
 
-std::string redact_urls(const std::string &text) {
+namespace {
+
+// The length of the URL scheme ("https://", ...) that starts at text[i], in any letter case; 0 if none does.
+std::size_t scheme_at(const std::string &text, std::size_t i) {
     static const char *const kSchemes[] = {"https://", "http://", "wss://", "ws://"};
+    for (const char *s : kSchemes) {
+        const std::size_t n = std::strlen(s);
+        if (i + n > text.size()) continue;
+        std::size_t k = 0;
+        while (k < n && std::tolower(static_cast<unsigned char>(text[i + k])) == s[k]) ++k;
+        if (k == n) return n;
+    }
+    return 0;
+}
+
+}  // namespace
+
+// One pass over the text, every search bounded by the end of the address it is looking at: a log of tens of megabytes
+// with no address (or none with a query) used to take quadratic time.
+std::string redact_urls(const std::string &text) {
     std::string out;
     out.reserve(text.size());
+    std::size_t copied = 0;  // text[0, copied) is in `out`
     std::size_t i = 0;
     while (i < text.size()) {
-        std::size_t at = std::string::npos, len = 0;
-        for (const char *s : kSchemes) {
-            const std::size_t p = text.find(s, i);
-            if (p < at) {
-                at = p;
-                len = std::strlen(s);
-            }
+        const std::size_t len = scheme_at(text, i);
+        if (len == 0) {
+            ++i;
+            continue;
         }
-        if (at == std::string::npos) {
-            out.append(text, i, std::string::npos);
-            break;
-        }
+        const std::size_t at = i;
         std::size_t end = at + len;
         while (end < text.size() && !url_end(text[end])) ++end;
         const std::size_t auth_start = at + len;
-        const std::size_t auth_sep = text.find_first_of("/?#", auth_start);
-        const std::size_t auth_end = auth_sep == std::string::npos ? end : std::min(end, auth_sep);
-        out.append(text, i, auth_start - i);
+        std::size_t auth_end = auth_start;
+        while (auth_end < end && text[auth_end] != '/' && text[auth_end] != '?' && text[auth_end] != '#') ++auth_end;
+        out.append(text, copied, auth_start - copied);
         std::size_t host_start = auth_start;
-        if (auth_end > auth_start) {
-            const std::size_t at_sign = text.rfind('@', auth_end - 1);
-            if (at_sign != std::string::npos && at_sign >= auth_start) {
+        for (std::size_t k = auth_end; k > auth_start; --k) {
+            if (text[k - 1] == '@') {
                 out += "…@";
-                host_start = at_sign + 1;
+                host_start = k;
+                break;
             }
         }
-        const std::size_t cut = text.find_first_of("?#", host_start);
-        if (cut != std::string::npos && cut < end) {
+        std::size_t cut = host_start;
+        while (cut < end && text[cut] != '?' && text[cut] != '#') ++cut;
+        if (cut < end) {
             out.append(text, host_start, cut - host_start);
             out += "?…";
         } else {
             out.append(text, host_start, end - host_start);
         }
+        copied = end;
         i = end;
     }
+    out.append(text, copied, std::string::npos);
     return out;
 }
 

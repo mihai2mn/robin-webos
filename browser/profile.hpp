@@ -3,7 +3,9 @@
 // files in the app's persistent data folder (<data>/profile/*.json, each replaced atomically).
 //
 // Threading: main thread only. Changes mark a part dirty; flush() (called every frame) writes dirty parts on
-// the kit's worker pool at most once every two seconds; flush_now() writes synchronously (shutdown).
+// the kit's worker pool at most once every two seconds; flush_now() writes synchronously (shutdown). Both write through
+// one mutex and a per-file generation, so a pool write still running when flush_now() starts cannot interleave with it or
+// land after it. A file that cannot be parsed at load is kept as <file>.corrupt.
 #pragma once
 
 #include <cstdint>
