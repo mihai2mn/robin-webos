@@ -631,8 +631,20 @@ static gboolean to_annex_b(WpebVideoSink *self, const guint8 *d, gsize n, gboole
     return at == n;
 }
 
+/* Late access units still go to the decoder: dropping encoded data breaks every picture that refers to it, and with an
+ * open GOP (non-IDR keyframes) nothing would put it right again. WebKit sets qos and a 100 ms max-lateness on the video sink
+ * after creating it (MediaPlayerPrivateGStreamer::createVideoSink), over what init() chose, so the choice is made again here,
+ * when the element goes to PAUSED / gets its caps. The first second of every start was dropped otherwise (the UI holds LG's Load
+ * for the audio's answer; units that wait that long are "late"): the decoder began on an IDR, then a P frame 1.2 s on. */
+static void keep_late_units(GstBaseSink *sink)
+{
+    gst_base_sink_set_max_lateness(sink, -1);
+    gst_base_sink_set_qos_enabled(sink, FALSE);
+}
+
 static gboolean wpeb_video_sink_start(GstBaseSink *sink)
 {
+    keep_late_units(sink);
     WpebVideoSink *self = WPEB_VIDEO_SINK(sink);
     const char *path = g_getenv("WPEB_MEDIA_SOCKET");
     if (!path || !*path) {
@@ -698,6 +710,7 @@ static gboolean wpeb_video_sink_stop(GstBaseSink *sink)
 
 static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
 {
+    keep_late_units(sink);
     WpebVideoSink *self = WPEB_VIDEO_SINK(sink);
     GstStructure *s = gst_caps_get_structure(caps, 0);
     const char *name = gst_structure_get_name(s);
@@ -1084,6 +1097,7 @@ static gboolean audio_hw_opus_caps(WpebAudioHw *self, GstCaps *caps)
 
 static gboolean wpeb_audio_hw_set_caps(GstBaseSink *sink, GstCaps *caps)
 {
+    keep_late_units(sink);
     WpebAudioHw *self = WPEB_AUDIO_HW(sink);
     GstStructure *s = gst_caps_get_structure(caps, 0);
     if (g_str_equal(gst_structure_get_name(s), "audio/x-opus"))

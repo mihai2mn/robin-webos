@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "media_server.hpp"
 
+#include "start_filter.hpp"
+
 #include "wpe_media_ipc.h"
 #include "wnk/log.hpp"
 #include "wnk/media/ndl_backend.hpp"
@@ -387,11 +389,14 @@ void MediaServer::serve(int fd, uint64_t id) {
         wnk::media::Packet packet;
         uint64_t generation;
         bool eos = false;  // the stream's end, behind its last unit (pts: last, so the other stream goes first)
+        uint64_t start_seq = 0;  // feeder: the start of feed (arm_seq) this unit was last judged for (a unit the decoder refused is not judged twice)
     };
     std::mutex qm;
     std::condition_variable qcv;
     std::deque<Unit> queues[2];  // [0] video, [1] audio
     uint64_t generation = 0;     // qm; a flush or load drops what was queued before it
+    uint64_t arm_seq = 0;        // qm; counts the starts of a feed (load, reload, flush): the feeder arms its start filter for each
+    uint64_t arm_gen = 0;        // qm; units of an older generation do not belong to that start
     bool stop = false;
     bool ready = false;          // qm; the decoder is loaded (units wait until then)
     std::atomic<bool> backend_audio{false};  // the backend's load took audio (feeder reads it)
@@ -411,6 +416,8 @@ void MediaServer::serve(int fd, uint64_t id) {
         bool ended[2] = {};          // feeder thread; the streams whose end was reached, in eos_generation
         bool pushed_eos = false;
         uint64_t eos_generation = 0;
+        StartFilter start_filter;  // leading pictures at the start of a feed (start_filter.hpp)
+        uint64_t seen_arm = 0, armed_gen = 0;
         std::unique_lock<std::mutex> ql(qm);
         for (;;) {
             qcv.wait(ql, [&] { return stop || (ready && (!queues[0].empty() || !queues[1].empty())); });
@@ -442,6 +449,21 @@ void MediaServer::serve(int fd, uint64_t id) {
                         continue;
                     }
                     need_key = false;
+                }
+            }
+            if (pick == 0 && !u.eos) {
+                // A load, a reload or a seek starts a feed: if it starts on a keyframe with leading pictures, they are left out.
+                if (arm_seq != seen_arm) { seen_arm = arm_seq; armed_gen = arm_gen; start_filter.arm(); }
+                if (u.start_seq != seen_arm && u.generation >= armed_gen) {
+                    u.start_seq = seen_arm;
+                    const uint32_t kc = key_codec.load();
+                    if (start_filter.drop(kc == WPEB_MEDIA_HEVC ? StartFilter::Codec::Hevc : kc == WPEB_MEDIA_H264 ? StartFilter::Codec::H264 : StartFilter::Codec::Other,
+                                          u.packet.data.data(), u.packet.data.size(), u.packet.pts_us)) {
+                        WNK_LOGI(kCat, "stream %llu: leading picture left out (pts %.3f s, %d so far since the start of the feed)",
+                                 static_cast<unsigned long long>(id), u.packet.pts_us / 1e6, start_filter.dropped());
+                        queues[pick].pop_front();
+                        continue;
+                    }
                 }
             }
             if (u.eos) {
@@ -631,6 +653,8 @@ void MediaServer::serve(int fd, uint64_t id) {
         replay.clear();
         replay_bytes = 0;
         replay_ok = use_lg_;
+        arm_gen = generation;  // the units from here on start a feed
+        ++arm_seq;
     };
     // The LG pipeline failed before showing a picture (TV, 2026-11-20: "fail to create AVProxy" for a page's main video right after its
     // ads, while another app still held a decoder or the ad's pipeline was still being released): load it again after a pause, with
@@ -671,6 +695,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     // frames presented stop while units are still fed, and the decoder stayed held): unload it, load it again at the current position
     // and feed it from the next keyframe. Not more than three times in a minute, then it is left to the page (its own recovery).
     std::deque<Clock::time_point> recoveries;
+    bool cap_logged = false;     // reader thread: the "not reloaded" line is printed once per error episode (a Load or a reload starts a new one)
     bool close_stream = false;  // reader thread: the reload failed; the connection is closed (below) so the page gets a media error
     const auto do_recover = [&] {
         if (!recover_wanted.exchange(false)) return;
@@ -679,9 +704,11 @@ void MediaServer::serve(int fd, uint64_t id) {
         while (!recoveries.empty() && now - recoveries.front() > std::chrono::seconds(60)) recoveries.pop_front();
         const int code = lg_.error();
         if (recoveries.size() >= 3) {
-            WNK_LOGW(kCat, "stream %llu: LG pipeline error %d again: not reloaded (3 in a minute)", static_cast<unsigned long long>(id), code);
+            if (!cap_logged) WNK_LOGW(kCat, "stream %llu: LG pipeline error %d again: not reloaded (3 in a minute; not logged again for this error)", static_cast<unsigned long long>(id), code);
+            cap_logged = true;
             return;
         }
+        cap_logged = false;
         recoveries.push_back(now);
         WNK_LOGW(kCat, "stream %llu: LG pipeline error %d mid-stream: reloading it at the current position", static_cast<unsigned long long>(id), code);
         {
@@ -783,6 +810,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             retry_wanted = false;
             recover_wanted = false;
             need_key = false;
+            cap_logged = false;
             pending.window_id[sizeof(pending.window_id) - 1] = '\0';
             load_pending = true;
             load_at = Clock::now();
@@ -830,6 +858,11 @@ void MediaServer::serve(int fd, uint64_t id) {
             break;
         case WPEB_MEDIA_FLUSH: {
             drop_queued();
+            {
+                std::lock_guard<std::mutex> ql(qm);
+                arm_gen = generation;  // a seek: what follows starts a feed
+                ++arm_seq;
+            }
             std::lock_guard<std::mutex> lock(mutex_);
             if (owner_.load() == id) {
                 std::string error;
