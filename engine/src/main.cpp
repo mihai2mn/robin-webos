@@ -2175,6 +2175,13 @@ void popup_opener_moves(WebKitWebView *view, const char *uri)
     const char *cur = webkit_web_view_get_uri(view);
     if (cur && g_strcmp0(cur, uri) == 0)
         return;
+    // A change of the fragment only stays in the same document (a single-page app's route, a sign-in page's own link):
+    // that is not the opener moving on.
+    if (cur) {
+        const std::string a(cur, strcspn(cur, "#")), b(uri, strcspn(uri, "#"));
+        if (a == b)
+            return;
+    }
     const int64_t now = g_get_monotonic_time();
     std::vector<uint32_t> under;
     for (auto &[tid, tab] : g.tabs)
