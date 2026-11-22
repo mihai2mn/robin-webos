@@ -867,7 +867,7 @@ static int collection_has_audio(GstPad *pad)
  * segment, which the first AAC frame after a seek or when joining a live stream usually does (frames don't line up
  * with the seek point); sending 0 for it put the audio 30 s (or a live stream's whole position) behind the video, and
  * LG's pipeline then showed the first frame and never started its clock (TV, 2026-11-13: Angel One from 30 s,
- * NetTV live). _full() gives those times too. A buffer without a timestamp keeps the previous one. */
+ * a live stream). _full() gives those times too. A buffer without a timestamp keeps the previous one. */
 static int64_t media_time_us(const GstSegment *segment, GstBuffer *buffer, int64_t previous_us)
 {
     GstClockTime pts = GST_BUFFER_PTS_IS_VALID(buffer) ? GST_BUFFER_PTS(buffer) : GST_BUFFER_DTS(buffer);

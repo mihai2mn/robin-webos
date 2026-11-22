@@ -1208,8 +1208,8 @@ void add_console_reporter(WebKitWebView *web_view, uint32_t id)
 }
 
 // Site quirks: sites that take any AppleWebKit agent without "Chrome" for Safari and then serve FairPlay, which only
-// Apple's Safari has. NetTV (webtv.nettv.com.np) tests AppleWebKit && !/Chrome|CriOS|Edg|OPR|Firefox|FxiOS/, sends
-// X-Client-Browser: Safari and gets an fps.ezdrm.com license for HLS; Video.js then finds "no compatible source"
+// Apple's Safari has. One regional streaming site tests AppleWebKit && !/Chrome|CriOS|Edg|OPR|Firefox|FxiOS/, sends
+// X-Client-Browser: Safari and gets a FairPlay license for HLS; Video.js then finds "no compatible source"
 // (TV, 2026-11-13). Other browsers get Widevine, which we have (libocdm). A Chrome token in navigator.userAgent, on
 // these sites only, takes that path. The HTTP User-Agent header is unchanged.
 constexpr const char *kChromeAgentScript = R"JS((function () {
@@ -2613,7 +2613,7 @@ int main(int, char **)
     // The back/forward page cache keeps whole documents (DOM, layers, JS heaps) of the pages left behind: tens of MB
     // each on a 2.6 GB TV that LG's apps share. Off by default; WPE_BROWSER_DEBUG_PAGE_CACHE=1 restores it.
     webkit_settings_set_enable_page_cache(g.settings, env_or("WPE_BROWSER_DEBUG_PAGE_CACHE", "0") == "1");
-    // No "webOS" in the user agent: sites' mobile checks list it (Palm's phones), e.g. webtv.nettv.com.np's
+    // No "webOS" in the user agent: sites' mobile checks list it (Palm's phones), e.g. a streaming site's
     // /iPhone|...|webOS|.../i showed its mobile page (2026-11-11). The rest is WPE's desktop Linux agent.
     webkit_settings_set_user_agent_with_application_details(g.settings, "WPEBrowser", "0.2");
     webkit_settings_set_enable_developer_extras(g.settings, FALSE);
