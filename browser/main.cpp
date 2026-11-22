@@ -25,6 +25,7 @@
 #include "profile.hpp"
 #include "screens.hpp"
 #include "storage.hpp"
+#include "tab_ids.hpp"
 #include "../engine/webos-backend/protocol.h"
 
 #include "wnk/app/app.hpp"
@@ -701,6 +702,7 @@ class App : public wnk::app::Delegate {
             direct_.close();
             screen_->page_->set_direct(false);
             for (Tab &t : tabs_) t.live = false, t.loading = false;
+            renumber_engine_tabs();
             screen_->page_->show_tab(0);
             start_engine();
             if (Tab *t = tab(active_)) activate(t->id);
@@ -1229,6 +1231,23 @@ class App : public wnk::app::Delegate {
         return true;
     }
 
+    // The engine is gone (it died, or direct presentation is being replaced): popups' ids from it must not clash with the next
+    // engine's, which counts from the same base again. Give those tabs fresh UI ids, and follow them everywhere an id is held.
+    void renumber_engine_tabs() {
+        std::vector<TabId> ids;
+        for (const Tab &t : tabs_) ids.push_back(t.id);
+        const browser::TabIdRemap remap(ids, WPE_ENGINE_TAB_ID_BASE, next_id_);
+        if (remap.empty()) return;
+        for (Tab &t : tabs_) {
+            t.id = remap(t.id);
+            t.opener = remap(t.opener);
+        }
+        active_ = remap(active_);
+        video_tab_ = remap(video_tab_);
+        hole_tab_ = remap(hole_tab_);
+        for (auto &pc : pending_closes_) pc.first = remap(pc.first);
+    }
+
     void open_in_engine(Tab &t, const std::string &url) {
         // Discard the least recently shown background tabs first (they keep URL and title).
         size_t live = static_cast<size_t>(std::count_if(tabs_.begin(), tabs_.end(), [](const Tab &x) { return x.live; }));
@@ -1420,6 +1439,7 @@ class App : public wnk::app::Delegate {
             applied_zoom_ = 0;
             screen_->page_->ime(ctx_->ui(), false);
             for (Tab &t : tabs_) t.live = false, t.loading = false;
+            renumber_engine_tabs();
             screen_->page_->show_tab(0);
             refresh_chrome();
             // Only deaths close together count: an engine that ran for minutes before dying is not a restart loop.
