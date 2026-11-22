@@ -127,7 +127,12 @@
         v.removeAttribute('src');
         sources.forEach(s => s.remove());
         try { v.load(); } catch (e) {}
+        // A player the page started with the autoplay attribute is nobody's play() call: it comes back when it is shown again.
+        if (v.hasAttribute('autoplay') && shownAgain) shownAgain.observe(v);
     };
+    const shownAgain = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+        for (const en of entries) if (en.isIntersecting && visible(en.target)) { shownAgain.unobserve(en.target); restore(en.target); }
+    }) : null;
     const restore = v => {
         const r = v.__wrenReleased;
         if (!r) return;
