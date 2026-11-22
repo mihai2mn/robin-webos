@@ -25,11 +25,13 @@
 #include "profile.hpp"
 #include "screens.hpp"
 #include "storage.hpp"
+#include "engine_env.hpp"
 #include "tab_ids.hpp"
 #include "../engine/webos-backend/protocol.h"
 
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
+#include "wnk/net/http_cache.hpp"
 #include "wnk/async/async.hpp"
 #include "wnk/platform/files.hpp"
 #include "wnk/platform/luna.hpp"
@@ -52,6 +54,7 @@
 #include <vector>
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 // A string launch parameter ({"target": "https://..."}), empty when absent or not a string.
@@ -274,7 +277,11 @@ class App : public wnk::app::Delegate {
         if (id == active_ && tabs_.size() > 1) {
             TabId next = then != 0 && then != id && tab(then) != nullptr ? then : 0;
             if (next == 0) next = tabs_[index + 1 < tabs_.size() ? index + 1 : index - 1].id;
+            // The tab being closed still has its view while the next is shown, but it is leaving: it must not count against
+            // the live-tab limit, nor be the one discarded to make room.
+            closing_tab_ = id;
             activate(next);
+            closing_tab_ = 0;
         }
         release_video_of(id, "tab closed");
         if (live) engine_.tab_close(id);
@@ -487,6 +494,12 @@ class App : public wnk::app::Delegate {
         close_overlays();
         std::vector<TabId> ids;
         for (const Tab &t : tabs_) ids.push_back(t.id);
+        // The New Tab page is made and shown first: closing the old tabs then never has to show (load, or discard another
+        // for) a neighbour that is closed a moment later.
+        Tab fresh;
+        fresh.id = next_id_++;
+        tabs_.push_back(fresh);
+        activate(fresh.id);
         for (TabId id : ids) close_tab(id);
     }
 
@@ -711,6 +724,7 @@ class App : public wnk::app::Delegate {
             // Focus set in on_start lands before the first layout; settle it on the first frame.
             focused_once_ = true;
             focus_content();
+            if (!profile_notice_.empty()) ctx.ui().toast(profile_notice_, 9000);
         }
         // Keep the page size in step with the content area.
         const wnk::Rect r = screen_->page_->screen_rect();
@@ -1144,6 +1158,14 @@ class App : public wnk::app::Delegate {
             refresh_chrome();  // the Home page's recent tiles
         }
         const uint32_t what = (cookies ? WPE_CLEAR_COOKIES_AND_SITE_DATA : 0u) | (cache ? WPE_CLEAR_CACHE : 0u);
+        if (seconds == 0 && (cache || history)) {
+            // Site icons are fetched through the kit's own HTTP cache (the engine's clear does not reach it); the profile's
+            // icon list went with the history, and the loaded-icon table here must not keep drawing them.
+            if (cache) {
+                if (auto *caching = dynamic_cast<wnk::net::CachingTransport *>(ctx_->http().get())) caching->cache().clear();
+            }
+            browser::wren::forget_icons();
+        }
         if (what != 0 && engine_.running()) {
             engine_.clear_data(what, seconds);  // the toast comes with the engine's answer
         } else {
@@ -1230,7 +1252,7 @@ class App : public wnk::app::Delegate {
     bool discard_background_tab(TabId except, const char *why) {
         Tab *victim = nullptr;
         for (Tab &x : tabs_) {
-            if (!x.live || x.id == except || x.id == active_ || (victim != nullptr && x.last_shown_ms >= victim->last_shown_ms))
+            if (!x.live || x.id == except || x.id == active_ || x.id == closing_tab_ || (victim != nullptr && x.last_shown_ms >= victim->last_shown_ms))
                 continue;
             // The opener of a window that is still open (a sign-in popup talks to window.opener) is not discarded.
             const bool opens_live_popup = std::any_of(tabs_.begin(), tabs_.end(), [&x](const Tab &p) { return p.live && p.opener == x.id; });
@@ -1265,7 +1287,8 @@ class App : public wnk::app::Delegate {
 
     void open_in_engine(Tab &t, const std::string &url) {
         // Discard the least recently shown background tabs first (they keep URL and title).
-        size_t live = static_cast<size_t>(std::count_if(tabs_.begin(), tabs_.end(), [](const Tab &x) { return x.live; }));
+        size_t live = static_cast<size_t>(
+            std::count_if(tabs_.begin(), tabs_.end(), [&](const Tab &x) { return x.live && x.id != closing_tab_; }));
         while (live >= kMaxLiveTabs && discard_background_tab(t.id, "too many open pages")) --live;
         engine_.tab_open(t.id, url);
         t.live = true;
@@ -1549,8 +1572,19 @@ class App : public wnk::app::Delegate {
         if (!params.empty()) {
             const auto j = nlohmann::json::parse(params, nullptr, false);
             if (j.is_object() && j.contains("wpebEnv") && j["wpebEnv"].is_object())
-                for (const auto &[k, v] : j["wpebEnv"].items())
-                    if (v.is_string()) l.extra_env.emplace_back(k, v.get<std::string>());
+            {
+                // A release app id passes only the harmless names unless <data folder>/dev-switches exists (engine_env.hpp).
+                const bool unlocked = browser::app_id_is_dev(ctx.launch().app_id) || ::access((data_dir_ + "/dev-switches").c_str(), F_OK) == 0;
+                for (const auto &[k, v] : j["wpebEnv"].items()) {
+                    if (!v.is_string()) continue;
+                    if (browser::engine_env_allowed(k, unlocked)) {
+                        l.extra_env.emplace_back(k, v.get<std::string>());
+                    } else if (browser::engine_env_listed(k)) {
+                        WNK_LOGW(kCat, "engine env %s ignored: this app id only passes harmless names (create %s/dev-switches to allow it)",
+                                 k.c_str(), data_dir_.c_str());
+                    }
+                }
+            }
         }
         l.data_dir = data_dir_ + "/webkit";
         l.cache_dir = l.data_dir + "/cache";
@@ -1599,13 +1633,18 @@ class App : public wnk::app::Delegate {
              wnk::platform::storage_candidates(ctx.launch().app_id, ctx.launch().app_dir, ctx.runtime_dir())) {
             if (c.purpose != "data" || !wnk::platform::probe_writable(c).writable) continue;
             std::string why;
-            const std::string dir = browser::own_usable_dir(c.directory + own, &why);
+            const std::string dir = browser::own_usable_profile_dir(c.directory + own, &why);
             if (!why.empty()) WNK_LOGW(kCat, "profile folder %s", why.c_str());
-            if (!dir.empty()) return dir;
+            if (!dir.empty()) {
+                if (dir != c.directory + own)
+                    profile_notice_ = "Your saved bookmarks and history are in a folder this app cannot use. Starting with an empty profile.";
+                return dir;
+            }
         }
         const std::string fallback = runtime_dir(ctx) + own;
         std::string why;
-        const std::string dir = browser::own_usable_dir(fallback, &why);
+        const std::string dir = browser::own_usable_profile_dir(fallback, &why);
+        profile_notice_ = "No folder for saved data was usable: bookmarks and history will be lost when the app closes.";
         WNK_LOGE(kCat, "no persistent profile folder; using %s%s%s", dir.empty() ? fallback.c_str() : dir.c_str(),
             why.empty() ? "" : " (", why.empty() ? "" : (why + ")").c_str());
         return dir.empty() ? fallback : dir;
@@ -1639,6 +1678,8 @@ class App : public wnk::app::Delegate {
     bool focused_once_ = false;
     int32_t last_x_ = 0, last_y_ = 0;
     int restarts_ = 0;
+    std::string profile_notice_;  // set when the profile folder is not the usual one (data_dir): shown once at start
+    TabId closing_tab_ = 0;  // close_tab: the tab being closed while its neighbour is shown (not counted, not discarded)
     double engine_started_ms_ = 0;  // when start_engine last ran
     static constexpr double kCrashLoopMs = 20000;
     double crash_at_ms_ = -1e9;  // the last web-process crash

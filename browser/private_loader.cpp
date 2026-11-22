@@ -101,7 +101,14 @@ bool prepare_private_loader(const std::string &engine_exe, const std::string &en
     const std::string app_folder = slash == std::string::npos ? dir : dir.substr(slash + 1);
     const auto rslash = runtime_dir.rfind('/');
     const std::string runtime_folder = rslash == std::string::npos ? runtime_dir : runtime_dir.substr(rslash + 1);
-    if (dir.compare(0, 5, "/tmp/") != 0 || app_folder != runtime_folder) {
+    // The runtime folder is the app's own, or its "<folder>-<uid>" fallback (storage.cpp own_usable_dir, when /tmp/<folder> is
+    // another user's): then the engine's loader is still in /tmp/<folder>, a foreign folder, which the check below guards.
+    bool runtime_is_ours = app_folder == runtime_folder;
+    if (!runtime_is_ours && runtime_folder.size() > app_folder.size() + 1 && runtime_folder.compare(0, app_folder.size() + 1, app_folder + "-") == 0) {
+        const std::string uid = runtime_folder.substr(app_folder.size() + 1);
+        runtime_is_ours = uid.find_first_not_of("0123456789") == std::string::npos;
+    }
+    if (dir.compare(0, 5, "/tmp/") != 0 || !runtime_is_ours) {
         choice.why = "the system's loader " + want;
         return true;
     }

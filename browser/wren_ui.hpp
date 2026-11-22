@@ -277,4 +277,7 @@ class QuickActions : public Overlay {
     HintPill *hints_;
 };
 
+// Forgets which site icons were loaded (they are fetched again when drawn): after clearing browsing data.
+void forget_icons();
+
 }  // namespace browser::wren
