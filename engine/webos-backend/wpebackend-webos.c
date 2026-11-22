@@ -540,6 +540,7 @@ struct target {
     struct wl_keyboard *keyboard;
     struct wl_webos_exported *video; // the page's video window (wpeb_webos_video_open), NULL without one
     unsigned video_seq; // bumped by every wpeb_webos_video_open on this target (g_video_lock)
+    char video_assigned[128]; // the id the compositor gave t->video (window_id_assigned; g_video_lock)
     bool frame_at_size; // a frame was committed since the last change of size (g_video_lock; see wpeb_webos_video_open)
     char video_id[128]; // its window id: a sink addresses its own window by it, whichever page is shown by then
     enum wpeb_crop_mode video_crop_mode;
@@ -1229,14 +1230,19 @@ __attribute__((visibility("default"))) struct wpe_loader_interface _wpe_loader_i
 // (engine/gst/wpebmediasink.c, same process) asks for it; the window id goes to the UI's Starfish pipeline
 // (option.windowId). One video window per page target; the newest attached target is the one shown.
 
-static char g_video_id[128]; // window_id_assigned (g_video_lock)
 static struct timespec g_video_commit_at; // the last set_exported_window (CLOCK_MONOTONIC, g_video_lock)
 
+// The id belongs to the exported object it came for (listener data: its target), not to one slot of the process: two sinks
+// opening at the same time (two videos of one page prerolling together, another tab of this web process) each wait for their own
+// window's id. With one slot both could take the second window's id, and LG was given a window that no longer existed (TV,
+// 2026-11-22: two hardware videos on one page, both black).
 static void video_window_id_assigned(void *data, struct wl_webos_exported *exported, const char *id, uint32_t type)
 {
-    (void)data; (void)exported; (void)type;
+    struct target *t = data;
+    (void)type;
     pthread_mutex_lock(&g_video_lock);
-    snprintf(g_video_id, sizeof(g_video_id), "%s", id ? id : "");
+    if (target_alive(t) && t->video == exported)
+        snprintf(t->video_assigned, sizeof(t->video_assigned), "%s", id ? id : "");
     pthread_cond_broadcast(&g_video_cond);
     pthread_mutex_unlock(&g_video_lock);
     LOG("video window id %s", id ? id : "(none)");
@@ -1246,6 +1252,7 @@ static const struct wl_webos_exported_listener video_listener = { video_window_i
 static void target_close_video(struct target *t)
 {
     t->video_id[0] = '\0';
+    t->video_assigned[0] = '\0';
     video_register(t, false);
     if (t->video) {
         wl_webos_exported_destroy(t->video);
@@ -1295,21 +1302,23 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
                                                 t->renderer->webos_major);
     t->video_place_state = 0;
     memset(&t->video_last_plan, 0, sizeof(t->video_last_plan));
-    g_video_id[0] = '\0';
     t->video_id[0] = '\0';
+    t->video_assigned[0] = '\0';
     const unsigned seq = ++t->video_seq;
     t->video = wl_webos_foreign_export_element(t->renderer->foreign, t->surface, WL_WEBOS_FOREIGN_WEBOS_EXPORTED_TYPE_VIDEO_OBJECT);
     struct wl_webos_exported *const mine = t->video;
     // The event arrives on the target's queue, which WebKit's compositing thread dispatches.
     wl_proxy_set_queue((struct wl_proxy *)t->video, t->queue);
-    wl_webos_exported_add_listener(t->video, &video_listener, NULL);
+    wl_webos_exported_add_listener(t->video, &video_listener, t);
     wl_display_flush(t->renderer->display);
     struct timespec until;
     clock_gettime(CLOCK_REALTIME, &until);
     until.tv_sec += timeout_ms / 1000;
     until.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
     if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
-    while (!g_video_id[0] && pthread_cond_timedwait(&g_video_cond, &g_video_lock, &until) == 0) { }
+    // t is looked at only while it is alive (see below).
+    while (target_alive(t) && t->video == mine && !t->video_assigned[0] &&
+           pthread_cond_timedwait(&g_video_cond, &g_video_lock, &until) == 0) { }
     // The wait let go of the lock: the page may have been closed (target_deinitialize closes its window, target_destroy frees
     // it), or another open may have replaced the window. Then nothing of t may be touched.
     if (!target_alive(t) || t->video != mine || t->video_seq != seq) {
@@ -1317,13 +1326,13 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
         LOG("video window: the page or its window went away while the id was awaited");
         return 0;
     }
-    int ok = g_video_id[0] != '\0';
+    int ok = t->video_assigned[0] != '\0';
     if (ok) {
-        snprintf(id, size, "%s", g_video_id);
-        snprintf(t->video_id, sizeof(t->video_id), "%s", g_video_id);
+        snprintf(id, size, "%s", t->video_assigned);
+        snprintf(t->video_id, sizeof(t->video_id), "%s", t->video_assigned);
         video_register(t, true);
         LOG("video window ready: id=%s foreign=v%u webos=%d crop_mode=%s (env=%s)",
-            g_video_id, t->renderer->foreign_version, t->renderer->webos_major,
+            t->video_id, t->renderer->foreign_version, t->renderer->webos_major,
             wpeb_crop_mode_name(t->video_crop_mode), crop_env && *crop_env ? crop_env : "auto");
     } else {
         LOG("video window: no id within %u ms", timeout_ms);
@@ -1432,6 +1441,22 @@ __attribute__((visibility("default"))) void wpeb_webos_video_place_id(const char
 __attribute__((visibility("default"))) int64_t wpeb_webos_video_last_commit_us(void)
 {
     return (int64_t)g_video_commit_at.tv_sec * 1000000 + g_video_commit_at.tv_nsec / 1000;
+}
+
+// Whether the shown page already has a video window (of another sink: the asking sink has none yet). The media sink asks it at
+// preroll: a video that is not playing does not take the page's window and LG's decoder away from the one that has them (two
+// hardware videos on one page: the preloading one took them from the playing one, TV 2026-11-22).
+__attribute__((visibility("default"))) int wpeb_webos_video_shown_window_busy(void)
+{
+    pthread_mutex_lock(&g_video_lock);
+    const struct target *t = g_shown_target;
+    const int busy = t && t->video && t->video_id[0];
+    char id[128]; // = sizeof(struct target.video_id)
+    snprintf(id, sizeof(id), "%s", busy ? t->video_id : "");
+    pthread_mutex_unlock(&g_video_lock);
+    if (busy)
+        LOG("video window: the page's window %s belongs to another video: a video that is not playing waits for its play", id);
+    return busy;
 }
 
 // Closes the window with this id only (the window of the page that is shown now stays when another page's sink stops).
