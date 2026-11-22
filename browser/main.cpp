@@ -25,6 +25,7 @@
 #include "profile.hpp"
 #include "screens.hpp"
 #include "storage.hpp"
+#include "engine_env.hpp"
 #include "tab_ids.hpp"
 #include "../engine/webos-backend/protocol.h"
 
@@ -52,6 +53,7 @@
 #include <vector>
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 // A string launch parameter ({"target": "https://..."}), empty when absent or not a string.
@@ -1545,8 +1547,19 @@ class App : public wnk::app::Delegate {
         if (!params.empty()) {
             const auto j = nlohmann::json::parse(params, nullptr, false);
             if (j.is_object() && j.contains("wpebEnv") && j["wpebEnv"].is_object())
-                for (const auto &[k, v] : j["wpebEnv"].items())
-                    if (v.is_string()) l.extra_env.emplace_back(k, v.get<std::string>());
+            {
+                // A release app id passes only the harmless names unless <data folder>/dev-switches exists (engine_env.hpp).
+                const bool unlocked = browser::app_id_is_dev(ctx.launch().app_id) || ::access((data_dir_ + "/dev-switches").c_str(), F_OK) == 0;
+                for (const auto &[k, v] : j["wpebEnv"].items()) {
+                    if (!v.is_string()) continue;
+                    if (browser::engine_env_allowed(k, unlocked)) {
+                        l.extra_env.emplace_back(k, v.get<std::string>());
+                    } else if (browser::engine_env_listed(k)) {
+                        WNK_LOGW(kCat, "engine env %s ignored: this app id only passes harmless names (create %s/dev-switches to allow it)",
+                                 k.c_str(), data_dir_.c_str());
+                    }
+                }
+            }
         }
         l.data_dir = data_dir_ + "/webkit";
         l.cache_dir = l.data_dir + "/cache";
