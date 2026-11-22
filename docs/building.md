@@ -134,4 +134,32 @@ The ipk bundles open-source libraries under their own licences:
 - the ad blocker: adblock-rust (MPL-2.0), rustc-hash (`engine/ubo/vendor`, MIT or Apache-2.0), and the filter
   lists (named in `tools/ubo/update.py`).
 
-See [NOTES.md](../NOTES.md) for toolchain details.
+The full inventory, with the gaps that remain in the package, is in [NOTICE.md](../NOTICE.md).
+
+## What a release must attach or link
+
+The ipk is a binary of GPL-3.0 and LGPL code. Whoever publishes it must also make the corresponding source available
+from the same place (GPL-3.0 section 6). For a GitHub release, do all of this:
+
+1. **Tag the exact commit.** `BUILD-INFO.txt` names the commit the ipks were built from. The tag must point at it.
+2. **Name the source in the ipk.** Build with `SOURCE_URL=https://github.com/<owner>/<repo>/tree/<tag>` in the
+   environment. `package-release.sh` hands it to the kit, which writes it into `licenses/SOURCE.txt`. Without it the
+   file says the source is not set.
+3. **Attach a source archive that includes the app kit.** GitHub's automatic source archive leaves out submodules.
+   Make one: `git archive --prefix=wren-<tag>/ -o wren-<tag>-source.tar <tag>`, then append the kit at the commit
+   `BUILD-INFO.txt` lists as `kit` (`git -C third_party/webos-native-app-kit archive --prefix=wren-<tag>/third_party/webos-native-app-kit/ <kit commit>`),
+   and compress it.
+4. **Say how the engine was built.** The release text should list: the toolchain (`toolchain/ct-ng.defconfig`, GCC 14.2,
+   glibc 2.28), Buildroot commit `cdd3776b` with `buildroot-external/`, WPE WebKit **2.54.3** (the tarball from
+   wpewebkit.org plus `buildroot-external/patches/wpewebkit/2.54.3/`, all in the source archive), and the
+   `libWPEWebKit` md5 from `BUILD-INFO.txt`.
+5. **Offer the sources of the libraries Buildroot built.** GStreamer, FFmpeg, GLib, GnuTLS and the others are
+   LGPL or GPL. Run Buildroot's `make legal-info` for the same configuration and attach its `sources/` archive and
+   `manifest.csv`, or state in the release text a written offer to supply them, valid for at least three years.
+   Attaching is simpler and does not depend on anyone answering mail. GitHub allows 2 GiB per release file.
+6. **Attach the filter list snapshot.** `tools/ubo/update.py` downloads whatever the lists say on the build day, and
+   they are not pinned. Attach the `lists/` it produced and the `ubo/COMMIT` file as `filter-lists-<date>.tar.xz`.
+7. **Attach `MD5SUMS` and `BUILD-INFO.txt`** with the ipks. `BUILD-INFO.txt` holds no local paths.
+8. **Fix the licence gaps** listed at the end of [NOTICE.md](../NOTICE.md) first.
+
+The check is simple: someone with only the release page should be able to rebuild what the ipk contains.
