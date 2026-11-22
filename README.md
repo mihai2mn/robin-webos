@@ -169,6 +169,7 @@ with an AI image tool at the maintainer's request and traced to vector; it uses 
 - [How it works](docs/architecture.md) and [video](docs/video.md)
 - [Building](docs/building.md) and the [patch series](docs/patches.md)
 - [Release notes for 1.0.0](docs/release-notes-1.0.0.md)
+- [Changelog](CHANGELOG.md): what changed since the last release
 - [Everything else](docs/README.md)
 
 ## Contributing
