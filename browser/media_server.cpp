@@ -540,9 +540,11 @@ void MediaServer::serve(int fd, uint64_t id) {
         qcv.notify_all();
     };
     const auto release = [&] {
+        // mutex_ first, then the owner (as release_owner): between a compare-and-swap outside the lock and the unload, a newer
+        // stream's Load could take the decoder, and this stream then unloaded that stream's fresh pipeline.
+        std::lock_guard<std::mutex> lock(mutex_);
         uint64_t mine = id;
         if (owner_.compare_exchange_strong(mine, 0)) {
-            std::lock_guard<std::mutex> lock(mutex_);
             clear_hole();  // the stream that owned the plane is gone (under mutex_, like the AREA store)
             lg_.unload();
             if (backend_ && ndl_loaded_) backend_->unload();
