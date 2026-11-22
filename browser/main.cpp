@@ -31,6 +31,7 @@
 
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
+#include "wnk/net/http_cache.hpp"
 #include "wnk/async/async.hpp"
 #include "wnk/platform/files.hpp"
 #include "wnk/platform/luna.hpp"
@@ -1146,6 +1147,14 @@ class App : public wnk::app::Delegate {
             refresh_chrome();  // the Home page's recent tiles
         }
         const uint32_t what = (cookies ? WPE_CLEAR_COOKIES_AND_SITE_DATA : 0u) | (cache ? WPE_CLEAR_CACHE : 0u);
+        if (seconds == 0 && (cache || history)) {
+            // Site icons are fetched through the kit's own HTTP cache (the engine's clear does not reach it); the profile's
+            // icon list went with the history, and the loaded-icon table here must not keep drawing them.
+            if (cache) {
+                if (auto *caching = dynamic_cast<wnk::net::CachingTransport *>(ctx_->http().get())) caching->cache().clear();
+            }
+            browser::wren::forget_icons();
+        }
         if (what != 0 && engine_.running()) {
             engine_.clear_data(what, seconds);  // the toast comes with the engine's answer
         } else {

@@ -93,6 +93,9 @@ struct IconEntry {
     std::string key;
 };
 std::map<std::string, IconEntry> g_icons;
+}  // namespace
+void forget_icons() { g_icons.clear(); }
+namespace {
 
 wnk::render::TextureId icon_texture(Ui &ui, const std::string &icon) {
     wnk::ui::ImageSource *src = ui.images();
