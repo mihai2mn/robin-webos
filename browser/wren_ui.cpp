@@ -890,10 +890,8 @@ void TabOverview::rebuild(Ui &ui, const std::vector<TabInfo> &tabs, uint32_t act
         if (t.id == active) shown = &card;
     }
     count_->set_text(std::to_string(tabs.size()) + (tabs.size() == 1 ? " OPEN" : " OPEN"));
-    if (colour_keys_seen())
-        hints_->set_hints({{"OK", {}, "Switch"}, {"", kRed, "Close tab"}, {"CH ±", {}, "Next / previous"}, {"BACK", {}, "Return"}});
-    else
-        hints_->set_hints({{"OK", {}, "Switch"}, {"▶", {}, "Close button"}, {"CH ±", {}, "Next / previous"}, {"BACK", {}, "Return"}});
+    // No colour key closes a tab here (Red is "all tabs", and an open overview owns the remote): only the card's close button does.
+    hints_->set_hints({{"OK", {}, "Switch"}, {"▶", {}, "Close button"}, {"CH ±", {}, "Next / previous"}, {"BACK", {}, "Return"}});
     if (visible() && shown != nullptr) ui.focus(shown);
     invalidate();
 }
