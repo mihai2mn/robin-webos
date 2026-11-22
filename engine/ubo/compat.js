@@ -415,7 +415,8 @@
                       ['visibility', 'visible'], ['opacity', '1'], ['object-fit', 'contain']];
         // A video inside the fullscreen container fills the screen but keeps the page's own stacking: the player's controls are its siblings
         // (or cousins), drawn by the page above it, and a video on top of them would punch its hole through them.
-        const FILL_IN = FILL.filter(([k]) => k !== 'z-index');
+        // Not forced visible either: a video the page keeps hidden (an idle ad element, a spare player) stays hidden.
+        const FILL_IN = FILL.filter(([k]) => !['z-index', 'visibility', 'opacity'].includes(k));
         const fillVideo = (v, el) => {
             const wasStatic = getComputedStyle(v).position === 'static';
             strip(v, el);
@@ -430,10 +431,11 @@
             }
         };
         // A video that is on the hardware plane and is the player's picture: not hidden, not empty, not a thumbnail by the page's own styles.
-        const mainPicture = v => {
+        const mainPicture = (v, thumbs = true) => {
             if (!v.isConnected || saved.has(v) || v.__wrenPolicy !== 'hw' || getComputedStyle(v).display === 'none') return false;
             const r = v.getBoundingClientRect();
-            return r.width > 0 && r.height > 0 && !(r.width <= 320 && r.height <= 180);
+            // At enter() the page's own size is the player's (a small player is still the main picture); later additions are judged by size too.
+            return r.width > 0 && r.height > 0 && !(thumbs && r.width <= 320 && r.height <= 180);
         };
         const isFrame = n => n.tagName === 'IFRAME' || n.tagName === 'FRAME';
         // While a container is fullscreen: a video the page puts into it (a player re-mounting its element, a new source element) is made
@@ -456,7 +458,7 @@
             // A container: the page's own CSS (:fullscreen video { ... }) cannot match an emulated fullscreen, so its video is made to fill
             // the screen here too, and freed from its own trapping ancestors.
             if (!(el instanceof HTMLVideoElement) && !isFrame(el))
-                for (const v of videosIn(el)) if (v.isConnected && v.__wrenPolicy === 'hw') fillVideo(v, el);
+                for (const v of videosIn(el)) if (mainPicture(v, false)) fillVideo(v, el);
             put(el, FILL.concat([['background-color', '#000']]));
             if (watch) watch.disconnect();
             watch = new MutationObserver(muts => {
