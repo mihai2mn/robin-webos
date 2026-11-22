@@ -1177,7 +1177,12 @@ static gboolean wpeb_audio_hw_set_caps(GstBaseSink *sink, GstCaps *caps)
         const GValue *v = gst_structure_get_value(s, "codec_data");
         GstBuffer *cd = v && G_VALUE_HOLDS(v, GST_TYPE_BUFFER) ? gst_value_get_buffer(v) : NULL;
         GstMapInfo m;
-        if (!cd || !gst_buffer_map(cd, &m, GST_MAP_READ) || m.size < 2) {
+        if (!cd || !gst_buffer_map(cd, &m, GST_MAP_READ)) {
+            GST_ELEMENT_ERROR(self, STREAM, FORMAT, ("AAC without codec_data"), (NULL));
+            return FALSE;
+        }
+        if (m.size < 2) {
+            gst_buffer_unmap(cd, &m);
             GST_ELEMENT_ERROR(self, STREAM, FORMAT, ("AAC without codec_data"), (NULL));
             return FALSE;
         }
