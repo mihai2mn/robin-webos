@@ -33,6 +33,7 @@ own README with more detail.
 | 0024 webcore-gstreamer-webcodecs-int-varargs-32bit | a 64-bit value was passed as an int vararg: crash in WebCodecs decoder set-up on 32-bit |
 | 0025 upstream-2.54.3-to-2.54-head | `webkitglib/2.54` queue after 2.54.3 (`c01fbd906..9715f4680`, 21 commits, 58 tarball `Source/` files) carried as one patch until upstream cuts `wpewebkit-2.54.4.tar.xz` |
 | 0026 webcore-mse-back-buffer-limit | plain MediaSource kept every played second: keep at most `MSE_MAX_BACK_BUFFER_SECONDS` (default 30, 0 = off) behind the playhead; after a seek back also drops data more than that far ahead of the new position |
+| 0027 wtf-memory-kill-after-consecutive-polls | a brief footprint spike above the kill threshold (a large media append) killed the web process: now only after `MEMORY_KILL_CONSECUTIVE_POLLS` (default 3) measurements in a row, or at once 12.5% above |
 
 Details of 0015 to 0021 and how they were checked: [jit-armv7.md](jit-armv7.md).
 

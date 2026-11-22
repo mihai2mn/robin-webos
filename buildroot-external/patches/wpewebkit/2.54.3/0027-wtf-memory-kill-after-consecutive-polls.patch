@@ -1,0 +1,78 @@
+From: Wren <wren@localhost>
+Subject: [PATCH] WTF MemoryPressureHandler: kill only after several consecutive measurements above the threshold
+
+shrinkOrDie() released memory synchronously and killed the process when the footprint was still above the kill threshold at
+that one measurement. A footprint that is only briefly above it is normal when a page appends a large media segment: the
+data is copied several times (page ArrayBuffer, WebCore SharedBuffer, GStreamer buffers) and the footprint falls back some
+seconds later (TV: +50..+190 MB spikes of 17-30 MB appends; one such spike, 738 MB against a 676 MB threshold, killed a web
+process that was at 520-560 MB seconds before and after).
+
+Now the process is killed only when the footprint is above the threshold after the release in several measurements in a
+row (MEMORY_KILL_CONSECUTIVE_POLLS, default 3, 1 = the old behaviour, at most 30), or at once when it is 12.5% above the
+threshold (a runaway). Each measurement that finds the footprint below the threshold starts the count again.
+---
+--- a/Source/WTF/wtf/MemoryPressureHandler.h
++++ b/Source/WTF/wtf/MemoryPressureHandler.h
+@@ -234,6 +234,7 @@
+ 
+     void measurementTimerFired();
+     void shrinkOrDie(size_t killThreshold);
++    unsigned m_consecutivePollsAboveKillThreshold { 0 };
+     void setMemoryUsagePolicyBasedOnFootprint(size_t);
+ 
+     unsigned m_pageCount { 0 };
+--- a/Source/WTF/wtf/MemoryPressureHandler.cpp
++++ b/Source/WTF/wtf/MemoryPressureHandler.cpp
+@@ -28,6 +28,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <cstdlib>
+ #include <functional>
+ #include <wtf/Logging.h>
+ #include <wtf/MathExtras.h>
+@@ -180,6 +181,21 @@
+     return policyForFootprint(memoryFootprint());
+ }
+ 
++// How many measurements in a row must find the footprint above the kill threshold (after releasing what can be released)
++// before the process is killed. A large media append is copied several times and the footprint falls back seconds later,
++// so one measurement above the threshold is no reason to kill. MEMORY_KILL_CONSECUTIVE_POLLS: 1 = the old behaviour,
++// default 3 (the measurement interval is a few seconds). A footprint 12.5% above the threshold is a runaway: killed at once.
++static unsigned killPollsRequired()
++{
++    static const unsigned polls = [] {
++        long n = 3;
++        if (const char* value = getenv("MEMORY_KILL_CONSECUTIVE_POLLS"))
++            n = strtol(value, nullptr, 10);
++        return static_cast<unsigned>(std::clamp<long>(n, 1, 30));
++    }();
++    return polls;
++}
++
+ void MemoryPressureHandler::shrinkOrDie(size_t killThreshold)
+ {
+     RELEASE_LOG(MemoryPressure, "Process is above the memory kill threshold. Trying to shrink down.");
+@@ -190,6 +206,14 @@
+ 
+     if (footprint < killThreshold) {
+         RELEASE_LOG(MemoryPressure, "Shrank below memory kill threshold. Process gets to live.");
++        m_consecutivePollsAboveKillThreshold = 0;
++        setMemoryUsagePolicyBasedOnFootprint(footprint);
++        return;
++    }
++
++    bool isRunaway = footprint >= killThreshold + killThreshold / 8;
++    if (!isRunaway && ++m_consecutivePollsAboveKillThreshold < killPollsRequired()) {
++        RELEASE_LOG(MemoryPressure, "Still above the memory kill threshold (%u of %u measurements); waiting.", m_consecutivePollsAboveKillThreshold, killPollsRequired());
+         setMemoryUsagePolicyBasedOnFootprint(footprint);
+         return;
+     }
+@@ -239,6 +263,7 @@
+         return;
+     }
+ 
++    m_consecutivePollsAboveKillThreshold = 0;
+     setMemoryUsagePolicyBasedOnFootprint(footprint);
+ 
+     switch (m_memoryUsagePolicy) {

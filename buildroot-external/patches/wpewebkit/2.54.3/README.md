@@ -32,3 +32,5 @@ Rebased from the 2.50.5 set and regenerated exactly against 2.54.3 (no fuzz). Dr
   After a seek back out of the buffered media (playhead > 5 s behind the previous check and not inside the buffer) it also drops
   data more than the same number of seconds beyond the playhead, so the re-fetched segments do not come on top of it (4K: about
   +90 MB at once before). A seek inside the buffer removes nothing.
+- 0027 kills the web process only when the footprint is above the kill threshold (after the release) in `MEMORY_KILL_CONSECUTIVE_POLLS` measurements in a row
+  (default 3, 1 = old behaviour), or at once when it is 12.5% above (runaway). Spikes of 17-30 MB media appends fall back within ~10 s.
