@@ -390,7 +390,13 @@
         let watch = null;
         const fillNew = el => {
             if (el instanceof HTMLVideoElement || isFrame(el)) return;
-            for (const v of videosIn(el)) if (v.isConnected && !saved.has(v)) fillVideo(v, el);
+            for (const v of videosIn(el)) {
+                if (!v.isConnected || saved.has(v) || v.__wrenPolicy === 'sw') continue;
+                // Only the player's main picture: a thumbnail/preview element (hidden, or small by the page's own styles) stays as the page made it.
+                const r = v.getBoundingClientRect();
+                if (getComputedStyle(v).display === 'none' || r.width * r.height < 0.25 * innerWidth * innerHeight) continue;
+                fillVideo(v, el);
+            }
         };
         const enter = el => {
             const swap = !!emu.el;               // another element asks while one is fullscreen: switch, one change event, no exit
@@ -406,7 +412,9 @@
                 for (const v of videosIn(el)) if (v.isConnected && v.__wrenPolicy === 'hw') fillVideo(v, el);
             put(el, FILL.concat([['background-color', '#000']]));
             if (watch) watch.disconnect();
-            watch = new MutationObserver(() => { if (emu.el === el) fillNew(el); });
+            watch = new MutationObserver(muts => {
+                if (emu.el === el && muts.some(m => [...m.addedNodes].some(n => n.nodeType === 1 && videosIn(n).length))) fillNew(el);
+            });
             watch.observe(el, { childList: true, subtree: true });
             for (const node of [document.documentElement, document.body]) if (node) put(node, [['overflow', 'hidden']]);
             document.documentElement.setAttribute('wren-emulated-fullscreen', '');
