@@ -2505,8 +2505,8 @@ int main(int, char **)
     // on heavy pages. Without settings WebKit sizes its limit from the physical RAM (it sees all 2.6 GB), so pressure
     // handling only starts when memchute is already killing apps. Must be set before the session exists.
     // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=0: WebKit's own.
-    // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=<n>: the process limit; the thresholds below are fractions of it (conservative / strict) and
-    // the kill threshold stays off (a killed tab is worse than a slow one).
+    // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=<n>: the process limit; the thresholds below are fractions of it (conservative / strict / kill).
+    // The kill threshold (1.3 x the limit, WPE_BROWSER_DEBUG_MEM_KILL=0: off) ends a web process that goes on growing while the TV swaps.
     {
         const long limit_mb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "520").c_str());
         if (limit_mb > 0) {
