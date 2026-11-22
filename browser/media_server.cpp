@@ -381,6 +381,7 @@ void MediaServer::serve(int fd, uint64_t id) {
     std::deque<Unit> queues[2];  // [0] video, [1] audio
     uint64_t generation = 0;     // qm; a flush or load drops what was queued before it
     uint64_t next_seq = 0;       // qm; Unit::seq of the next unit queued
+    uint64_t reload_epoch = 0;   // mutex_ and qm (both held to change it): counts the retries begun; the feeder reads it under either
     uint64_t arm_seq = 0;        // qm; counts the starts of a feed (load, reload, flush): the feeder arms its start filter for each
     uint64_t arm_gen = 0;        // qm; units of an older generation do not belong to that start
     bool stop = false;
@@ -479,13 +480,16 @@ void MediaServer::serve(int fd, uint64_t id) {
             }
             // The unit leaves the queue before qm is let go: FLUSH, LOAD and UNLOAD clear the queues under qm alone, which freed the
             // buffer the decoder was reading (LG's Feed gets its address). A unit the decoder refuses goes back where it was.
+            const uint64_t epoch = reload_epoch;
             Unit unit = std::move(u);
             queues[pick].pop_front();
             ql.unlock();
-            bool full = false;
+            bool full = false, requeue = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (owner_.load() == id && backend_ && (use_lg_ || ndl_loaded_)) {
+                if (reload_epoch != epoch) {
+                    requeue = true;  // a retry began after this unit was taken out: it goes to the reloaded pipeline, behind the replay
+                } else if (owner_.load() == id && backend_ && (use_lg_ || ndl_loaded_)) {
                     if (use_lg_) {
                         if (pick == 0 || lg_.has_audio())
                             full = lg_.feed(pick == 1, unit.packet.data.data(), unit.packet.data.size(), unit.packet.pts_us) ==
@@ -494,14 +498,17 @@ void MediaServer::serve(int fd, uint64_t id) {
                         full = backend_->feed(unit.packet) == wnk::media::MediaBackend::Feed::Full;
                     }
                 }
+                // qm while mutex_ is still held (the lock order): a retry (mutex_, then qm) cannot come between this feed and the replay
+                // bookkeeping below, so what the pipeline was given is in the replay it takes.
+                ql.lock();
             }
-            ql.lock();
-            if (full && generation == g) {
+            if ((full || requeue) && generation == g && (full || owner_.load() == id)) {
                 // Back in front of what came after it (by arrival: a retry may have put its replay in front meanwhile).
                 auto &q = queues[pick];
                 auto at = q.begin();
                 while (at != q.end() && at->seq < unit.seq) ++at;
                 q.insert(at, std::move(unit));
+                if (requeue) continue;
                 ++full_waits;
                 blocked_until[pick] = Clock::now() + std::chrono::milliseconds(10);
                 if (owner_.load() == id && replay_ok && use_lg_ && !retry_wanted.load() && lg_.error() != 0 && lg_.frames_presented() == 0) retry_wanted = true;
@@ -688,22 +695,26 @@ void MediaServer::serve(int fd, uint64_t id) {
         ++retries;
         bool lost = false;
         std::deque<Unit> again;
-        {
-            std::lock_guard<std::mutex> ql(qm);
-            ready = false;
-            again.swap(replay);
-            replay_bytes = 0;
-            replay_ok = false;
-        }
         const int delay_ms = retries == 1 ? 500 : 1500;
         WNK_LOGW(kCat, "stream %llu: LG pipeline error %d before its first picture: attempt %d to load it again in %d ms%s", static_cast<unsigned long long>(id),
                  code, retries + 1, delay_ms, retries >= 2 ? " (Starfish backend)" : "");
         {
             // use_lg_ is the owner's: a stream that lost the decoder meanwhile leaves it (and the pipeline) to the new owner.
+            // mutex_ before the replay is taken: the feeder is not in the middle of a feed, so the unit it was feeding is in the replay
+            // (it used to be fed to the failed pipeline after the swap and then missed from both); a unit it took out of the queue and
+            // has not fed yet goes back into it (reload_epoch).
             std::lock_guard<std::mutex> lock(mutex_);
             if (owner_.load() != id) {
                 lost = true;
             } else {
+                {
+                    std::lock_guard<std::mutex> ql(qm);
+                    ready = false;
+                    again.swap(replay);
+                    replay_bytes = 0;
+                    replay_ok = false;
+                    ++reload_epoch;
+                }
                 lg_.unload();
                 use_lg_ = false;
             }
