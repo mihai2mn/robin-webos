@@ -540,6 +540,7 @@ struct target {
     struct wl_keyboard *keyboard;
     struct wl_webos_exported *video; // the page's video window (wpeb_webos_video_open), NULL without one
     unsigned video_seq; // bumped by every wpeb_webos_video_open on this target (g_video_lock)
+    bool frame_at_size; // a frame was committed since the last change of size (g_video_lock; see wpeb_webos_video_open)
     char video_id[128]; // its window id: a sink addresses its own window by it, whichever page is shown by then
     enum wpeb_crop_mode video_crop_mode;
     int video_place_state; // 0=none, 1=window, 2=crop, 3=squash, 4=park (for transition logging)
@@ -710,6 +711,7 @@ static void target_remove_role(struct target *t)
 
 // Hardware video window (end of file).
 static pthread_mutex_t g_video_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_video_cond = PTHREAD_COND_INITIALIZER; // g_video_lock: a window id arrived, a frame at the new size was committed
 static struct target *g_shown_target; // the last attached page target (g_video_lock)
 static void target_close_video(struct target *t); // g_video_lock held
 struct target;
@@ -1114,6 +1116,11 @@ static void target_resize(void *data, uint32_t width, uint32_t height)
 {
     struct target *t = data;
     LOG("page target resize %ux%u -> %ux%u (surface height %d)", t->width, t->height, width, height, surface_height(width, height));
+    if (t->width != width || t->height != height) {
+        pthread_mutex_lock(&g_video_lock);
+        t->frame_at_size = false;
+        pthread_mutex_unlock(&g_video_lock);
+    }
     t->width = width;
     t->height = height;
     if (t->window)
@@ -1146,6 +1153,12 @@ static void target_frame_rendered(void *data)
     struct target *t = data;
     g_tr_rendered++;
     trace_frames(t);
+    pthread_mutex_lock(&g_video_lock); // the surface has a buffer of its current size now (see wpeb_webos_video_open)
+    if (!t->frame_at_size) {
+        t->frame_at_size = true;
+        pthread_cond_broadcast(&g_video_cond);
+    }
+    pthread_mutex_unlock(&g_video_lock);
     if (target_hold_frames(t) && t->surface) {
         // A frame that was already being drawn when the page was detached: unmap again in the same flush.
         LOG("frame drawn while detached: unmapped again");
@@ -1216,7 +1229,6 @@ __attribute__((visibility("default"))) struct wpe_loader_interface _wpe_loader_i
 // (engine/gst/wpebmediasink.c, same process) asks for it; the window id goes to the UI's Starfish pipeline
 // (option.windowId). One video window per page target; the newest attached target is the one shown.
 
-static pthread_cond_t g_video_cond = PTHREAD_COND_INITIALIZER;
 static char g_video_id[128]; // window_id_assigned (g_video_lock)
 static struct timespec g_video_commit_at; // the last set_exported_window (CLOCK_MONOTONIC, g_video_lock)
 
@@ -1257,6 +1269,27 @@ __attribute__((visibility("default"))) int wpeb_webos_video_open(char *id, size_
         return 0;
     }
     target_close_video(t);
+    // A window exported while the surface's last committed buffer is still of its old size (the page was just resized to the
+    // screen: its first frame at the new size comes about 100 ms later) never shows the video plane, although LG decodes and
+    // presents into it (TV, 2026-11-22: every black start of a static page had the export before that frame, every good one
+    // after it; waiting for the frame made the one race in ten show the picture). Wait for that frame, 500 ms at most (a page
+    // that draws nothing, such as a hidden tab, gets its window as before).
+    if (!t->frame_at_size) {
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += 500000000L;
+        if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
+        const gint64 w0 = g_get_monotonic_time();
+        while (target_alive(t) && g_shown_target == t && !t->frame_at_size &&
+               pthread_cond_timedwait(&g_video_cond, &g_video_lock, &until) == 0) { }
+        if (!target_alive(t) || g_shown_target != t || !t->surface) {
+            pthread_mutex_unlock(&g_video_lock);
+            LOG("video window: the page went away while its first frame at the new size was awaited");
+            return 0;
+        }
+        LOG("video window: waited %lld ms for the page's first frame at %ux%u%s", (long long)((g_get_monotonic_time() - w0) / 1000),
+            t->width, t->height, t->frame_at_size ? "" : " (none came: exported anyway)");
+    }
     const char *crop_env = getenv("WPE_BROWSER_DEBUG_VIDEO_CROP");
     t->video_crop_mode = wpeb_crop_mode_resolve(crop_env, getenv("WPEB_NO_CROP"), getenv("WPEB_CROP_FALLBACK"),
                                                 t->renderer->webos_major);
