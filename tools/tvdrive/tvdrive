@@ -50,6 +50,14 @@ EOF
 }
 
 cmd=${1:-}; [ $# -gt 0 ] && shift
+# Commands that drive the app refuse to run while another owner holds the dev-app lock (the lock's first line must start with
+# $TVDRIVE_OWNER). Two agents ran over each other's tests because they did not look at the answer of "lock".
+case "$cmd" in open|close|move|nudge|click|scroll|drag|key|type)
+  held=$(tvssh "head -n1 $LOCKDIR/owner 2>/dev/null" 2>/dev/null || true)
+  if [ -n "$held" ]; then
+    case "$held" in "${TVDRIVE_OWNER:-<unset>}"*) ;; *) die "the TV is locked by '$held' (you are '${TVDRIVE_OWNER:-unset}'): not running '$cmd'. Take the lock first and export TVDRIVE_OWNER=<your lock name>." ;; esac
+  fi ;;
+esac
 case "$cmd" in
   ''|help|-h|--help) usage ;;
 
