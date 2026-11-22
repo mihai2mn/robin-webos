@@ -681,7 +681,19 @@
     {
         const mk = HTMLMediaElement.prototype.setMediaKeys;
         if (mk) HTMLMediaElement.prototype.setMediaKeys = function (keys) {
-            if (keys) { this.__wrenEmeActive = true; try { this.setAttribute('wren-policy', 'protected'); } catch (e) {} }
+            if (keys) {
+                this.__wrenEmeActive = true;
+                if (this instanceof HTMLVideoElement && policy.on && this.getAttribute('wren-policy') !== 'page') {
+                    // Keys set after the first decision: decide again now, before the player starts (the attribute is read once at start), and
+                    // reload a running software player at its media time (not an MSE stream: it cannot be reloaded).
+                    const running = this.__wrenPolicy;
+                    decide(this);
+                    const blob = String(this.currentSrc || this.src || '').startsWith('blob:');
+                    if (running === 'sw' && this.__wrenPolicy === 'hw' && !blob && (this.currentSrc || this.getAttribute('src') || this.querySelector('source'))) transition(this);
+                } else {
+                    try { this.setAttribute('wren-policy', 'protected'); } catch (e) {}
+                }
+            }
             return mk.apply(this, arguments);
         };
     }
