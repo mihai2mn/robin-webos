@@ -97,7 +97,8 @@ constexpr double kChromeDwellMs = 350;  // the pointer rests this long at the to
 constexpr double kChromeHideDelayMs = 250;  // the toolbar must be unwanted this long before it slides away (no flicker when a reason flips back and forth)
 constexpr float kChromeLeaveMargin = 24.0f;  // logical px below the toolbar that send it away again
 constexpr float kChromeRevealEdge = 6.0f;  // logical px at the top of the screen that bring the toolbar back
-constexpr int kMaxRestarts = 3;
+constexpr int kMaxRestarts = 3;  // engine deaths in a row; an engine that stayed up kRestartForgiveMs starts the count again
+constexpr double kRestartForgiveMs = 5 * 60 * 1000;
 constexpr double kHoldOkMs = 550;  // OK held this long opens quick actions
 // Background tabs beyond this many keep only their URL and title (Chromium's tab discarding); they reload
 // when shown again. Each live tab costs WebKit memory, and a TV has little to spare.
@@ -1421,6 +1422,8 @@ class App : public wnk::app::Delegate {
             for (Tab &t : tabs_) t.live = false, t.loading = false;
             screen_->page_->show_tab(0);
             refresh_chrome();
+            // Only deaths close together count: an engine that ran for minutes before dying is not a restart loop.
+            if (ctx_->ui().now_ms() - engine_started_ms_ >= kRestartForgiveMs) restarts_ = 0;
             if (restarts_ < kMaxRestarts) {
                 ++restarts_;
                 ctx_->ui().toast("The web engine stopped (" + why + "). Restarting...", 4000);
@@ -1452,6 +1455,7 @@ class App : public wnk::app::Delegate {
 
     void start_engine() {
         auto &ctx = *ctx_;
+        engine_started_ms_ = ctx.ui().now_ms();
         browser::EngineLaunch l;
         const char *override_dir = std::getenv("WPE_BROWSER_ENGINE_DIR");
         l.engine_dir = override_dir && *override_dir ? override_dir : ctx.launch().app_dir + "/engine";
@@ -1605,6 +1609,7 @@ class App : public wnk::app::Delegate {
     bool focused_once_ = false;
     int32_t last_x_ = 0, last_y_ = 0;
     int restarts_ = 0;
+    double engine_started_ms_ = 0;  // when start_engine last ran
     static constexpr double kCrashLoopMs = 20000;
     double crash_at_ms_ = -1e9;  // the last web-process crash
     bool restart_pending_ = false;
