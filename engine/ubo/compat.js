@@ -232,6 +232,21 @@
     // reads the element's box and the budget; a later call (a fullscreen transition) re-reads only what a transition
     // changes, fullscreen; the page's own marking is never overruled.
     const boxArea = v => { const r = v.getBoundingClientRect(); return r.width * r.height; };
+    // Videos that had no box at their first decision: decided again when they get one (shown, laid out, sized).
+    const boxWatch = typeof ResizeObserver === 'function' ? new ResizeObserver(entries => {
+        for (const en of entries) {
+            const v = en.target, area = en.contentRect.width * en.contentRect.height;
+            if (!(area > 0)) continue;
+            boxWatch.unobserve(v);
+            v.__wrenWatched = false;
+            if (!policy.on || !v.isConnected || v.getAttribute('wren-policy') === 'page') continue;
+            v.__wrenBox = area;
+            if (String(v.currentSrc || v.src || '').startsWith('blob:')) { log({ reload: false, reason: 'mse' }); continue; }
+            const running = v.__wrenPolicy;
+            decide(v);
+            if (v.__wrenPolicy !== running && (v.currentSrc || v.getAttribute('src') || v.querySelector('source'))) transition(v);
+        }
+    }) : null;
     const decide = v => {
         if (!(v instanceof HTMLVideoElement)) return;
         // Detached: nothing to measure yet. The floor's preview marking (above) already keeps a detached preview off the decoder; the decision
@@ -261,13 +276,15 @@
         // server (it is silent); LG's media pipeline plays the page's audio (AAC, or decoded Opus/Vorbis as PCM) next to the hardware
         // video. Previews are muted (the isPreview rule), so they stay in the page.
         else if (!v.muted) why = 'sound';
-        // A box that is unknown (detached, not laid out, display:none: area 0) counts as big: a big muted background video must not start on the CPU
-        // because it was measured before its CSS applied. The element is measured again at loadedmetadata (below).
-        else if (first ? !(boxArea(v) > 0) || boxArea(v) > policy.box : !(v.__wrenBox > 0) || v.__wrenBox > policy.box) why = 'box';
+        // No layout box (not laid out, display:none, zero size: area 0) is not a big box: a hidden muted preview must not take the single
+        // hardware decoder. It stays in software for now and is decided again when it first gets a box (ResizeObserver below) and at
+        // loadedmetadata; only a real, big box sends it to the hardware plane.
+        else if (first ? boxArea(v) > policy.box : v.__wrenBox > policy.box) why = 'box';
         else if (first && playing().length >= policy.players) why = 'budget';
         else why = '';
         if (first) {
-            if (v.__wrenBox === undefined) v.__wrenBox = v.getBoundingClientRect().width * v.getBoundingClientRect().height;
+            if (v.__wrenBox === undefined) v.__wrenBox = boxArea(v);
+            if (!(v.__wrenBox > 0) && boxWatch && !v.__wrenWatched) { v.__wrenWatched = true; boxWatch.observe(v); }
             v.__wrenDecided = true;
             // A small pre-existing marking is the page's: it stays, and the element is never reloaded for the policy.
             if (!keep && !stale && v.hasAttribute('wren-software') && !v.__wrenPreview) keep = true;
