@@ -112,7 +112,7 @@ from a recorder script). It needs a rooted TV. See [usage.md](docs/usage.md) and
 ## Reporting a bug
 
 Plug a USB drive into the TV, then in the browser: hold OK, **Settings**, **Help and feedback**, **Save logs to USB**.
-Attach the `wren-logs-….txt` file to a bug report at TODO(owner): this fork's issue tracker. Logs are cleared when
+Attach the `wren-logs-….txt` file to a bug report in this repository's issue tracker (the Issues tab). Logs are cleared when
 the TV restarts, so save them first.
 
 The in-app "Report a problem" row still shows upstream's issue address. Do not use it for this fork.

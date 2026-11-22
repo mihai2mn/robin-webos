@@ -2,7 +2,7 @@
 
 These are upstream's notes. Upstream developed and tested on an LG OLED65C1 (webOS 6.5.3, firmware 03.53.45). This fork was
 tested only on an LG CX (webOS 5.3); the rows below are not re-tested for it. Reports are very welcome
-(TODO(owner): this fork's issue tracker; upstream's is the [bug report form](https://github.com/sostk/webos-wpe-browser/issues/new?template=bug_report.yml)).
+(open them in this repository's issue tracker, not upstream's).
 
 | webOS (internal release) | Years | glibc | Wren |
 |---|---|---|---|
