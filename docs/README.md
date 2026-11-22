@@ -1,6 +1,6 @@
-# Wren documentation
+# Robin documentation
 
-Wren is by [sostk](https://github.com/sostk/webos-wpe-browser). This is the documentation of a fork of it.
+Robin is based on Wren by [sostk](https://github.com/sostk/webos-wpe-browser). This is the documentation of Robin, an independent fork of it.
 
 | Document | What's in it |
 |---|---|
@@ -13,9 +13,8 @@ Wren is by [sostk](https://github.com/sostk/webos-wpe-browser). This is the docu
 | [video.md](video.md) | hardware video through Starfish, audio, the hybrid policy, known issues |
 | [engine64.md](engine64.md) | the optional 64-bit engine |
 | [ad-blocking.md](ad-blocking.md) | the uBO style ad blocker and My filters |
-| [lg-chromium-media.md](lg-chromium-media.md) | how LG's Chromium drives the media pipeline, and how Wren matches it |
-| [release-notes-0.3.3-cx1.md](release-notes-0.3.3-cx1.md) | what is new over upstream 0.3.3, known limits, install size, going back |
+| [lg-chromium-media.md](lg-chromium-media.md) | how LG's Chromium drives the media pipeline, and how Robin matches it |
+| [release-notes-1.0.0.md](release-notes-1.0.0.md) | what is new over Wren 0.3.3, known limits, install size, keeping your data |
 | [widevine-cdm-abi.md](widevine-cdm-abi.md) | the TV's Widevine CE CDM interface |
 | [webkit-like-chromium.md](webkit-like-chromium.md) | how Chromium on webOS gets a JIT and GPU drawing, and doing the same with WebKit |
 
-The development log, with decisions, TV findings and measurements, is [NOTES.md](../NOTES.md).

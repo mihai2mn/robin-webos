@@ -14,7 +14,7 @@ process as shared memory (SwapChain::Type::SharedMemory, no MESA_image_dma_buf_e
 
 Device status: C1/webOS 6.5.3 root probes passed for Mali compositing and WebGL
 with CPU Skia painting. GPU Skia painting corrupts tiles; app-jail validation
-remains pending. Keep Mesa as the default fallback. See NOTES.md.
+remains pending. Keep Mesa as the default fallback..
 Upstream: not sent yet.
 Signed-off-by: webos-wpe-browser <poudelswastik@gmail.com>
 ---

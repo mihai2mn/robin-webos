@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # The whole softfp engine from scratch on one machine, unattended: crosstool-ng toolchain, Buildroot (at the commit
-# NOTES.md records), every package with WebKit's JIT (WPEB_SOFTFP_JIT, patches/wpewebkit/*), then the staged engine.
+# the development notes (not in the repository) records), every package with WebKit's JIT (WPEB_SOFTFP_JIT, patches/wpewebkit/*), then the staged engine.
 #   bash tools/build-engine.sh start      detached container; JOBS=24 by default (WebKit wants ~2 GB of RAM per job)
 #   bash tools/build-engine.sh status     stage and the last lines of the log
 #   bash tools/build-engine.sh stop
@@ -37,7 +37,7 @@ case "${1:-status}" in
       cp /src/toolchain/ct-ng.defconfig /build/ctng/defconfig
       (cd /build/ctng && ct-ng defconfig && ct-ng "build.$JOBS")
     fi
-    # linux/dma-buf.h appeared in Linux 4.6; WebKit's GBM code includes it (NOTES.md 2026-11-10). The sysroot is read-only.
+    # linux/dma-buf.h appeared in Linux 4.6; WebKit's GBM code includes it (the development notes (not in the repository) 2026-11-10). The sysroot is read-only.
     inc="/build/x-tools/$tuple/$tuple/sysroot/usr/include/linux"
     if [ ! -f "$inc/dma-buf.h" ]; then
       chmod u+w "$inc"; cp /src/toolchain/extra-headers/linux/dma-buf.h "$inc/"; chmod u-w "$inc"
