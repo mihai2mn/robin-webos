@@ -120,8 +120,9 @@
     const mainPlaying = () => [...mains].some(v => v.isConnected && !v.paused && !v.ended && isMain(v));
     const visible = v => { if (!v.isConnected) return false; const r = v.getBoundingClientRect(); const s = getComputedStyle(v);
         return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05; };
-    const release = v => {
-        if (v.__wrenReleased || isMain(v)) return;
+    // force: the software limit stops a video whatever its width is (a 640 px box already counts as "main" by isMain)
+    const release = (v, force) => {
+        if (v.__wrenReleased || (isMain(v) && !force)) return;
         const src = v.getAttribute('src'), sources = [...v.querySelectorAll('source')];
         if (!src && !sources.length) return;
         // An MSE player (blob: source) cannot give its stream back and get it again: load() closes its MediaSource and restore() would
@@ -298,7 +299,7 @@
         v.__wrenPolicy = 'stop';
         v.setAttribute('wren-policy', why);
         if (v.hasAttribute('wren-software')) v.removeAttribute('wren-software');
-        release(v); // before the mark: release() ends in load(), which a held video skips
+        release(v, true); // before the mark: release() ends in load(), which a held video skips
         v.__wrenCap = why;
         report(v, 'stopped:' + why);
     };
