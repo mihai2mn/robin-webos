@@ -527,7 +527,10 @@ static void area_painted(WpebVideoSink *self, WpebMediaArea a)
         self->area_pending = TRUE;
         try_send = now >= self->area_next_us;
     }
+    /* The window and its id together, under the lock: set_caps (streaming thread) and stop() change them. */
     const gboolean have_window = self->have_window;
+    char vid[sizeof(self->vid)];
+    g_strlcpy(vid, self->vid, sizeof(vid));
     const int vw = self->video_width, vh = self->video_height;
     g_mutex_unlock(&self->lock);
     /* This is WebKit's main thread: it must never wait for the socket. A streaming thread inside a blocked write
@@ -544,7 +547,7 @@ static void area_painted(WpebVideoSink *self, WpebMediaArea a)
     }
     if (have_window && video_window.place) {
         const int64_t t0 = now_us();
-        video_window_place(self->vid, vw, vh, a.x, a.y, a.width, a.height, 0);
+        video_window_place(vid, vw, vh, a.x, a.y, a.width, a.height, 0);
         self->place_us = now_us() - t0;
         g_mutex_lock(&self->lock);
         self->unflushed_at_us = now_us();
@@ -717,12 +720,17 @@ static gboolean wpeb_video_sink_stop(GstBaseSink *sink)
         close(self->fd);
     g_atomic_int_set(&self->fd, -1);
     g_mutex_unlock(&self->io_lock);
-    if (self->have_window && video_window.close_id && self->vid[0])
-        video_window.close_id(self->vid);
-    else if (self->have_window && video_window.close)
-        video_window.close();
+    g_mutex_lock(&self->lock);
+    const gboolean had_window = self->have_window;
+    char vid[sizeof(self->vid)];
+    g_strlcpy(vid, self->vid, sizeof(vid));
     self->vid[0] = '\0';
     self->have_window = FALSE;
+    g_mutex_unlock(&self->lock);
+    if (had_window && video_window.close_id && vid[0])
+        video_window.close_id(vid);
+    else if (had_window && video_window.close)
+        video_window.close();
     GST_INFO_OBJECT(self, "stopped after %" G_GUINT64_FORMAT " access units", self->sent);
     return TRUE;
 }
@@ -795,17 +803,24 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
         GST_INFO_OBJECT(self, "HDR (transfer %u)%s%s", load.hdr.transfer, load.hdr.has_mastering ? ", mastering display" : "",
                         load.hdr.has_light_level ? ", light level" : "");
     video_window_init();
-    if (video_window.open && !self->have_window && !g_getenv("WPE_BROWSER_DEBUG_NO_VIDEO_WINDOW"))
-        self->have_window = video_window.open(load.window_id, sizeof(load.window_id), 1000) != 0;
-    else if (self->have_window)
+    /* have_window and vid are written by this thread and stop(), and read by area_painted on WebKit's main thread: the id is
+     * set before the window is said to exist, both under the lock, so a reader never sees a window with a half-copied id. */
+    gboolean have_window = self->have_window;
+    if (video_window.open && !have_window && !g_getenv("WPE_BROWSER_DEBUG_NO_VIDEO_WINDOW"))
+        have_window = video_window.open(load.window_id, sizeof(load.window_id), 1000) != 0;
+    else if (have_window)
         /* A codec change on a sink that has its window already (MSE changeType, an H.264 <-> VP9/HEVC switch): the new LOAD
          * names the same window. Without it the LOAD went out with no window id (the UI then does not take the LG path) and the
          * window was forgotten, so the hole stopped following and stop() never closed it. */
         g_strlcpy(load.window_id, self->vid, sizeof(load.window_id));
-    if (self->have_window && !load.window_id[0])
-        self->have_window = FALSE;
-    if (self->have_window) {
+    if (have_window && !load.window_id[0])
+        have_window = FALSE;
+    g_mutex_lock(&self->lock);
+    if (have_window)
         g_strlcpy(self->vid, load.window_id, sizeof(self->vid));
+    self->have_window = have_window;
+    g_mutex_unlock(&self->lock);
+    if (have_window) {
         GST_INFO_OBJECT(self, "video window %s on the page surface", load.window_id);
         /* At once, not on the next painted frame: the window is new and LG's pipeline is about to show the first
          * frame in it (this is the streaming thread: no flush here, see video_window_place). */
@@ -907,16 +922,18 @@ static GstFlowReturn wpeb_video_sink_render(GstBaseSink *sink, GstBuffer *buffer
      * screen, no animation) paints none, and the picture stayed black (TV, 2026-11-22). When none followed within 120 ms the
      * placement is flushed on its own (the same rectangle again: harmless when a frame did carry it). */
     int rect[6];
+    char vid[sizeof(self->vid)];
     gboolean flush_place = FALSE;
     g_mutex_lock(&self->lock);
     if (self->unflushed_at_us && self->have_window && now_us() - self->unflushed_at_us > 120000) {
         memcpy(rect, self->place_rect, sizeof(rect));
+        g_strlcpy(vid, self->vid, sizeof(vid));
         self->unflushed_at_us = 0;
         flush_place = TRUE;
     }
     g_mutex_unlock(&self->lock);
     if (flush_place)
-        video_window_place(self->vid, rect[0], rect[1], rect[2], rect[3], rect[4], rect[5], 1);
+        video_window_place(vid, rect[0], rect[1], rect[2], rect[3], rect[4], rect[5], 1);
     GST_LOG_OBJECT(self, "unit %" G_GUINT64_FORMAT ": media %" G_GINT64_FORMAT " us, %" G_GSIZE_FORMAT " bytes", self->sent + 1, pts_us, size);
     if (++self->sent == 1)
         GST_INFO_OBJECT(self, "first access unit: media time %" G_GINT64_FORMAT " us, %" G_GSIZE_FORMAT " bytes", pts_us, map.size);
