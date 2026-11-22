@@ -575,6 +575,16 @@ void MediaServer::serve(int fd, uint64_t id) {
 
     bool force_ndl = false;  // the last attempt after LG's pipeline failed to start: the Starfish backend's decoder
     int retries = 0;
+    bool close_stream = false;  // reader thread: a (re)load failed; the connection is closed (below) so the page gets a media error
+    // No decoder any more (qm held): nothing will consume the queues, which are not capped. Closing the connection makes the web
+    // process's sink fail its next write ("Hardware video service lost"): the page gets a media error instead of a stall.
+    const auto close_without_decoder = [&](const char *what) {
+        queues[0].clear();
+        queues[1].clear();
+        ++generation;
+        close_stream = true;
+        WNK_LOGW(kCat, "stream %llu: %s failed: closing the stream", static_cast<unsigned long long>(id), what);
+    };
     // What do_load did. Lost: a reload (retry or recovery) found the decoder no longer this stream's: a newer stream's Load or the UI
     // took it while the reload waited without mutex_, and taking it back would leave that stream without a picture.
     enum class Loaded { Yes, No, Lost };
@@ -712,6 +722,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             // What was fed goes first again (per stream in order), ahead of what came meanwhile.
             for (auto it = again.rbegin(); it != again.rend(); ++it) queues[it->packet.type == wnk::media::TrackType::Audio ? 1 : 0].push_front(std::move(*it));
             ready = r == Loaded::Yes;
+            if (!ready) close_without_decoder("the retry");  // as do_recover: a failed retry left the stream black and its queues growing
             qcv.notify_all();
         }
     };
@@ -720,7 +731,6 @@ void MediaServer::serve(int fd, uint64_t id) {
     // and feed it from the next keyframe. Not more than three times in a minute, then it is left to the page (its own recovery).
     std::deque<Clock::time_point> recoveries;
     bool cap_logged = false;     // reader thread: the "not reloaded" line is printed once per error episode (a Load or a reload starts a new one)
-    bool close_stream = false;  // reader thread: the reload failed; the connection is closed (below) so the page gets a media error
     const auto do_recover = [&] {
         if (!recover_wanted.exchange(false)) return;
         if (!pending_valid || !use_lg_ || owner_.load() != id) return;  // as do_retry: only the stream that owns the pipeline reloads it
@@ -765,15 +775,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             replay_ok = false;  // no replay for a stream that has shown pictures
             replay.clear();
             ready = r == Loaded::Yes;
-            if (!ready) {
-                // No decoder any more: nothing will consume the queues, which are not capped. Closing the connection makes the web process's
-                // sink fail its next write ("Hardware video service lost"): the page gets a media error instead of a stall.
-                queues[0].clear();
-                queues[1].clear();
-                ++generation;
-                close_stream = true;
-                WNK_LOGW(kCat, "stream %llu: the reload failed: closing the stream", static_cast<unsigned long long>(id));
-            }
+            if (!ready) close_without_decoder("the reload");
             qcv.notify_all();
         }
     };
