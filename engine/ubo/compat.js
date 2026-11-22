@@ -102,9 +102,15 @@
         if (markVideo) markVideo(v);
     };
     const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
-    if (srcDesc && srcDesc.set) Object.defineProperty(HTMLMediaElement.prototype, 'src', { ...srcDesc, set(value) { mark(this); srcDesc.set.call(this, value); } });
+    // A video stopped by the software limit (see held() below) keeps its source for later instead of starting a player: it must not fall onto the
+    // hardware decoder, and it must not decode in software.
+    if (srcDesc && srcDesc.set) Object.defineProperty(HTMLMediaElement.prototype, 'src', { ...srcDesc, set(value) {
+        mark(this);
+        if (held(this)) { this.__wrenReleased = { src: String(value), sources: [] }; return; }
+        srcDesc.set.call(this, value);
+    } });
     const load = HTMLMediaElement.prototype.load;
-    HTMLMediaElement.prototype.load = function () { mark(this); return load.apply(this, arguments); };
+    HTMLMediaElement.prototype.load = function () { mark(this); if (held(this)) return; return load.apply(this, arguments); };
     new MutationObserver(records => {
         for (const r of records) for (const n of r.addedNodes) {
             if (n.nodeType !== 1) continue;
@@ -114,8 +120,9 @@
     const mainPlaying = () => [...mains].some(v => v.isConnected && !v.paused && !v.ended && isMain(v));
     const visible = v => { if (!v.isConnected) return false; const r = v.getBoundingClientRect(); const s = getComputedStyle(v);
         return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05; };
-    const release = v => {
-        if (v.__wrenReleased || isMain(v)) return;
+    // force: the software limit stops a video whatever its width is (a 640 px box already counts as "main" by isMain)
+    const release = (v, force) => {
+        if (v.__wrenReleased || (isMain(v) && !force)) return;
         const src = v.getAttribute('src'), sources = [...v.querySelectorAll('source')];
         if (!src && !sources.length) return;
         // An MSE player (blob: source) cannot give its stream back and get it again: load() closes its MediaSource and restore() would
@@ -131,7 +138,7 @@
         if (v.hasAttribute('autoplay') && shownAgain) shownAgain.observe(v);
     };
     const shownAgain = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
-        for (const en of entries) if (en.isIntersecting && visible(en.target)) { shownAgain.unobserve(en.target); restore(en.target); }
+        for (const en of entries) if (en.isIntersecting && visible(en.target) && !held(en.target)) { shownAgain.unobserve(en.target); restore(en.target); }
     }) : null;
     const restore = v => {
         const r = v.__wrenReleased;
@@ -144,6 +151,13 @@
     const play = HTMLMediaElement.prototype.play;
     HTMLMediaElement.prototype.play = function () {
         if (this instanceof HTMLVideoElement) {
+            // Stopped by the software limit: the page's own play() gets the same answer while the limit is still exceeded.
+            if (this.__wrenCap) {
+                if (held(this)) {
+                    if (!userActive()) return Promise.reject(new DOMException('Too many software videos', 'NotAllowedError'));
+                    free(this); // somebody asked for it: it plays as a main video would
+                } else if (this.__wrenCap) unhold(this);
+            }
             // A software preview (wren-software, WebKit patch 0010) never touches the hardware decoder: let it play.
             if (!isMain(this) && !this.hasAttribute('wren-software') && mainPlaying())
                 return Promise.reject(new DOMException('A main video is playing', 'NotAllowedError'));
@@ -184,6 +198,8 @@
     const policy = window.__wrenVideoPolicy = {
         // CSS pixels, both dimensions: at the TV's devicePixelRatio (2) this is half the screen's width and height.
         box: 960 * 540,
+        // The largest stream (width x height) a software video may have: above it the video is stopped (loadedmetadata).
+        maxPixels: 1280 * 720,
         // How many videos may decode in software at once (each also composites on the CPU).
         players: 2,
         // Set by the engine when it asked for the hybrid policy (engine/src/main.cpp, add_hybrid_video): without it a
@@ -252,8 +268,44 @@
             if (v.__wrenPolicy !== running && (v.currentSrc || v.getAttribute('src') || v.querySelector('source'))) transition(v);
         }
     }) : null;
+    // The software limit (a memory bar: the web process is killed at about 830 MB, and a software decode costs about 100 MB a video at 1080p and
+    // more at 4K): at most policy.players videos are GIVEN software at a time (counted at every decision, not those playing: a page that
+    // starts several videos in one go would see none playing at each decision), and none whose stream is above policy.maxPixels (known only at
+    // loadedmetadata). A video over either limit is STOPPED: not the hardware decoder (one decoder per app: it would take the main video's),
+    // not software. Its stream is given back as release() does for a hidden paused preview, and play() answers NotAllowedError meanwhile.
+    const given = except => allVideos().filter(x => x !== except && x.isConnected && x.__wrenPolicy === 'sw' && !x.__wrenReleased &&
+        x.getAttribute('wren-policy') !== 'page').length;
+    // A stop is for videos nobody asked for. The hold ends for good (the cap never stops this element again) when the page's play() comes with a
+    // user activation, or the element is unmuted, gets controls or goes fullscreen: it is then decided as a main video would be (the hardware plane).
+    let lastGesture = 0;
+    for (const ev of ['pointerdown', 'mousedown', 'keydown', 'touchstart', 'click']) addEventListener(ev, e => { if (e.isTrusted) lastGesture = Date.now(); }, true);
+    const userActive = () => navigator.userActivation ? navigator.userActivation.isActive : Date.now() - lastGesture < 5000;
+    const free = v => { // end the hold for good: not software, not stopped; the caller restores the stream
+        v.__wrenCap = null; v.__wrenNoCap = true; v.__wrenPolicy = 'hw'; v.setAttribute('wren-policy', 'asked');
+        if (v.hasAttribute('wren-software')) v.removeAttribute('wren-software');
+        report(v, 'hardware:asked');
+    };
+    const held = v => {
+        if (!v.__wrenCap) return false;
+        if (!v.muted || v.controls || inFullscreen(v)) { free(v); restore(v); return false; }
+        return v.__wrenCap === 'size' || given(v) >= policy.players;
+    };
+    const unhold = v => { // the budget has room again (a stopped video's own play() asks)
+        v.__wrenCap = null; v.__wrenPolicy = 'sw'; v.setAttribute('wren-policy', 'small');
+        if (!v.hasAttribute('wren-software')) v.setAttribute('wren-software', '');
+    };
+    const stopVideo = (v, why) => {
+        v.__wrenDecided = true;
+        v.__wrenPolicy = 'stop';
+        v.setAttribute('wren-policy', why);
+        if (v.hasAttribute('wren-software')) v.removeAttribute('wren-software');
+        release(v, true); // before the mark: release() ends in load(), which a held video skips
+        v.__wrenCap = why;
+        report(v, 'stopped:' + why);
+    };
     const decide = v => {
         if (!(v instanceof HTMLVideoElement)) return;
+        if (v.__wrenCap && held(v)) return; // stopped: nothing re-decides it into software or onto the decoder
         // Detached: nothing to measure yet. The floor's preview marking (above) already keeps a detached preview off the decoder; the decision
         // is made when the element is inserted (the insertion observer calls this again), measured.
         if (!v.isConnected && v.__wrenDecided !== true) return;
@@ -284,8 +336,9 @@
         // No layout box (not laid out, display:none, zero size: area 0) is not a big box: a hidden muted preview must not take the single
         // hardware decoder. It stays in software for now and is decided again when it first gets a box (ResizeObserver below) and at
         // loadedmetadata; only a real, big box sends it to the hardware plane.
+        else if (v.__wrenNoCap) why = 'asked'; // a stopped video somebody asked for (play() with a user activation, sound, controls): a main video from then on
         else if (first ? boxArea(v) > policy.box : v.__wrenBox > policy.box) why = 'box';
-        else if (first && playing().length >= policy.players) why = 'budget';
+        else if (first && given(v) >= policy.players) { stopVideo(v, 'budget'); return; }
         else why = '';
         if (first) {
             if (v.__wrenBox === undefined) v.__wrenBox = boxArea(v);
@@ -686,7 +739,10 @@
     // element is measured again, once, and a changed answer is applied like a fullscreen transition's (reload at its media time).
     document.addEventListener('loadedmetadata', e => {
         const v = e.target;
-        if (!(v instanceof HTMLVideoElement) || !policy.on || v.__wrenRechecked || !v.__wrenDecided || v.getAttribute('wren-policy') === 'page') return;
+        if (!(v instanceof HTMLVideoElement) || !policy.on || !v.__wrenDecided || v.getAttribute('wren-policy') === 'page') return;
+        // A software video whose stream is bigger than the limit is stopped whatever its box is (not an MSE stream: it cannot give it back).
+        if (v.__wrenPolicy === 'sw' && !v.__wrenNoCap && v.videoWidth * v.videoHeight > policy.maxPixels && !String(v.currentSrc || v.src || '').startsWith('blob:')) { stopVideo(v, 'size'); return; }
+        if (v.__wrenRechecked) return;
         v.__wrenRechecked = true;
         const area = boxArea(v);
         if (area === v.__wrenBox) return;
