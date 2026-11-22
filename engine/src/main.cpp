@@ -1423,12 +1423,13 @@ long web_process_footprint_kb()
                     gchar *status = nullptr;
                     if (g_file_get_contents(status_path, &status, nullptr, nullptr)) {
                         long rss = 0, swap = 0;
-                        for (gchar **l = g_strsplit(status, "\n", 0), **it = l; *it; ++it) {
+                        gchar **lines = g_strsplit(status, "\n", 0);
+                        for (gchar **it = lines; *it; ++it) {
                             long v;
                             if (sscanf(*it, "VmRSS: %ld", &v) == 1) rss = v;
                             else if (sscanf(*it, "VmSwap: %ld", &v) == 1) swap = v;
-                            if (!*(it + 1)) { g_strfreev(l); break; }
                         }
+                        g_strfreev(lines);
                         best = std::max(best, rss + swap);
                         g_free(status);
                     }
