@@ -34,5 +34,5 @@ for p in pkgs:
         out.append(f.name)
         out.append(f.read_text(encoding="utf-8", errors="replace").rstrip())
     out.append("")
-(ubo / "THIRD-PARTY-CRATES.txt").write_text("\n".join(out) + "\n", encoding="utf-8")
+(ubo / "THIRD-PARTY-CRATES.txt").write_text("\n".join(out) + "\n", encoding="utf-8", newline="\n")
 print(f"{len(pkgs)} crates -> engine/ubo/THIRD-PARTY-CRATES.txt")

@@ -168,7 +168,7 @@ OUTPUTS = [("browser/branding/robin-icon-512.png", 512), ("docs/screenshots/robi
            ("browser/largeIcon.png", 130), ("browser/icon.png", 80), ("browser/icons/robin-mark.png", 96)]
 
 if __name__ == "__main__":
-    (ROOT / "browser/branding/robin-icon.svg").write_text(svg(), encoding="utf-8")
+    (ROOT / "browser/branding/robin-icon.svg").write_text(svg(), encoding="utf-8", newline="\n")
     cache = {}
     for rel, size in OUTPUTS:
         if size not in cache:
