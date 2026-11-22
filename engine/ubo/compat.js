@@ -47,6 +47,17 @@
     for (const name of ['TouchEvent', 'Touch', 'TouchList']) { try { delete window[name]; } catch (e) {} }
     try { delete Document.prototype.createTouch; delete Document.prototype.createTouchList; } catch (e) {}
 
+    // CSS blur: an element with filter: blur() (or a backdrop blur) is painted on the CPU, on the web process's main thread, every time
+    // it repaints; a page that repaints one often keeps that thread busy and every tab stops answering (TV, 2026-11-22: the main thread
+    // at 100% in SkBlurEngine under RenderLayer::applyFilters). will-change: filter gives the element its own composited layer, and the
+    // compositor applies the filter on the GPU instead (GraphicsLayerCoordinated takes any filter). The element already is a stacking
+    // context and a containing block because of its filter, so the layout does not change.
+    const blurToGpu = style => {
+        const f = style.getPropertyValue('filter') + style.getPropertyValue('backdrop-filter') + style.getPropertyValue('-webkit-backdrop-filter');
+        if (f.indexOf('blur(') >= 0 && !style.getPropertyValue('will-change')) {
+            try { style.setProperty('will-change', style.getPropertyValue('filter') ? 'filter' : 'backdrop-filter'); } catch (e) {}
+        }
+    };
     // CSS: @media rules with hover/pointer conditions, in the style sheets the page can read (its own and CORS ones).
     const done = new WeakSet();
     const rewrite = list => {
@@ -58,10 +69,21 @@
             } else if (rule.cssRules) {
                 rewrite(rule.cssRules); // @supports, @layer, ...
             }
+            if (rule.style) blurToGpu(rule.style);
         }
     };
+    // Shadow roots (web components keep their own sheets, often adopted ones) are swept too.
+    const roots = new Set();
+    const sheetsOf = root => {
+        const out = [];
+        try { for (const s of root.styleSheets) out.push(s); } catch (e) {}
+        try { for (const s of root.adoptedStyleSheets || []) out.push(s); } catch (e) {}
+        return out;
+    };
     const sweep = () => {
-        for (const sheet of document.styleSheets) {
+        const all = sheetsOf(document);
+        for (const r of roots) for (const s of sheetsOf(r)) all.push(s);
+        for (const sheet of all) {
             if (done.has(sheet)) continue;
             let rules;
             try { rules = sheet.cssRules; } catch (e) { continue; } // cross-origin without CORS: not readable
@@ -75,7 +97,57 @@
     document.addEventListener('DOMContentLoaded', sweep);
     addEventListener('load', sweep);
     addEventListener('load', e => { if (e.target && (e.target.tagName === 'LINK' || e.target.tagName === 'STYLE')) later(); }, true);
-    new MutationObserver(later).observe(document, { childList: true, subtree: true });
+    const sweepObserver = new MutationObserver(later);
+    sweepObserver.observe(document, { childList: true, subtree: true });
+    {
+        const attach = Element.prototype.attachShadow;
+        if (attach) Element.prototype.attachShadow = function () {
+            const root = attach.apply(this, arguments);
+            roots.add(root);
+            try { sweepObserver.observe(root, { childList: true, subtree: true }); } catch (e) {}
+            later();
+            return root;
+        };
+    }
+
+    // Endless animations off screen: a page's loading spinners below the fold (feeds put one in every lazy post) spin forever, and
+    // an animated SVG element is not a composited layer, so every tick restyles and repaints on the web process's main thread. On the
+    // TV that kept the main thread at 95 % on a feed page with seven of them, all off screen, and every tab stopped answering
+    // (2026-11-23). An infinite animation is paused while its element is outside the viewport and resumed when it comes back.
+    // Finite animations and transitions are left alone, and a page's own pause() stays paused.
+    if (typeof IntersectionObserver === 'function' && document.getAnimations) {
+        const tracked = new WeakMap();   // element -> its infinite animations that this code paused or watches
+        const pausedByUs = new WeakSet();
+        const io = new IntersectionObserver(entries => {
+            for (const en of entries) {
+                const list = tracked.get(en.target);
+                if (!list) continue;
+                for (const a of list) {
+                    try {
+                        if (!en.isIntersecting && a.playState === 'running') { a.pause(); pausedByUs.add(a); }
+                        else if (en.isIntersecting && pausedByUs.has(a)) { pausedByUs.delete(a); a.play(); }
+                    } catch (e) {}
+                }
+            }
+        }, { rootMargin: '200px' });
+        const scan = () => {
+            if (document.visibilityState === 'hidden') return;
+            let anims;
+            try { anims = document.getAnimations(); } catch (e) { return; }
+            for (const a of anims) {
+                const t = a.effect && a.effect.target;
+                if (!t || a.playState !== 'running') continue;
+                let infinite = false;
+                try { infinite = a.effect.getTiming().iterations === Infinity; } catch (e) {}
+                if (!infinite) continue;
+                let list = tracked.get(t);
+                if (!list) { list = new Set(); tracked.set(t, list); io.observe(t); }
+                if (!list.has(a)) { list.add(a); io.unobserve(t); io.observe(t); }   // re-observe: the callback runs again for the new one
+            }
+        };
+        setInterval(scan, 1500);
+        addEventListener('load', () => setTimeout(scan, 300));
+    }
 
     // Video: the TV has one hardware video decoder per app, and every video plays on it. A thumbnail's hover preview
     // that starts while the page's main video plays takes the decoder away from it (and enough of those switches have
@@ -273,8 +345,11 @@
     // starts several videos in one go would see none playing at each decision), and none whose stream is above policy.maxPixels (known only at
     // loadedmetadata). A video over either limit is STOPPED: not the hardware decoder (one decoder per app: it would take the main video's),
     // not software. Its stream is given back as release() does for a hidden paused preview, and play() answers NotAllowedError meanwhile.
+    // Counted: software videos that play or are set to play by themselves. A paused one without autoplay (a front page's hover
+    // previews, preloaded for every thumbnail and waiting for the pointer) decodes nothing; counting those stopped every
+    // preview on such a page once two were loaded (TV, 2026-11-23).
     const given = except => allVideos().filter(x => x !== except && x.isConnected && x.__wrenPolicy === 'sw' && !x.__wrenReleased &&
-        x.getAttribute('wren-policy') !== 'page').length;
+        x.getAttribute('wren-policy') !== 'page' && (!x.paused || x.autoplay)).length;
     // A stop is for videos nobody asked for. The hold ends for good (the cap never stops this element again) when the page's play() comes with a
     // user activation, or the element is unmuted, gets controls or goes fullscreen: it is then decided as a main video would be (the hardware plane).
     let lastGesture = 0;

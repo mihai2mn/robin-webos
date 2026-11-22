@@ -164,6 +164,7 @@ struct _WpebVideoSink {
     gint playing;      /* PAUSED_TO_PLAYING .. PLAYING_TO_PAUSED (atomic) */
     gint deferred;     /* atomic: the LOAD (and the window) wait for this video's next played unit (see set_caps, load_video) */
     gint lost;         /* atomic: another video took the page's window and LG's decoder; taken back at this one's next play */
+    guint wait_key;    /* streaming thread: after a flush, units dropped until a keyframe (0 = not waiting; else units still allowed) */
     /* Paused nudge (see nudge_schedule). */
     gint nudge_armed;    /* atomic: a settle timer is pending */
     gint nudging;        /* atomic: LG was told to play for the nudge and not told to pause again yet */
@@ -1113,6 +1114,22 @@ static GstFlowReturn wpeb_video_sink_render(GstBaseSink *sink, GstBuffer *buffer
             send_msg(self, WPEB_MEDIA_TRACKS, 0, &has_audio, sizeof(has_audio));
         }
     }
+    /* After a flush (a seek, or a player that re-appends after switching quality) the decoder restarts without a reference
+     * frame. When the first units after it are delta frames, LG's decoder kept the picture black: at 4K until the next
+     * new LOAD (a change of resolution brought it back), and the stream after a seek started with frame types 1 and no IDR
+     * (TV, 2026-11-23). Delta units are dropped until a keyframe; after 240 units (several seconds) without one the stream
+     * goes on as it is, for a demuxer that marks no keyframes at all. */
+    if (self->wait_key) {
+        if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT) && --self->wait_key) {
+            GST_LOG_OBJECT(self, "after a flush: delta unit dropped until a keyframe");
+            return GST_FLOW_OK;
+        }
+        if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
+            GST_WARNING_OBJECT(self, "after a flush: no keyframe in 240 units, feeding delta units");
+        else
+            GST_INFO_OBJECT(self, "after a flush: first keyframe, feeding again");
+        self->wait_key = 0;
+    }
     /* Media time, as Chromium feeds LG's pipeline (a seek re-anchors it there: WPEB_MEDIA_FLUSH). */
     int64_t pts_us = self->last_pts_us = media_time_us(&sink->segment, buffer, self->last_pts_us);
     GstMapInfo map;
@@ -1170,6 +1187,9 @@ static gboolean wpeb_video_sink_event(GstBaseSink *sink, GstEvent *event)
     WpebVideoSink *self = WPEB_VIDEO_SINK(sink);
     if (GST_EVENT_TYPE(event) == GST_EVENT_FLUSH_STOP) {
         send_ctl(self, WPEB_MEDIA_FLUSH, NULL, 0);
+        /* After a flush LG's decoder has no reference frame: the first unit it gets must be a keyframe (see render). */
+        if (!g_getenv("WPE_BROWSER_DEBUG_NO_KEY_WAIT"))
+            self->wait_key = 240;
     } else if (GST_EVENT_TYPE(event) == GST_EVENT_EOS) {
         uint32_t audio = 0;
         send_msg(self, WPEB_MEDIA_EOS, 0, &audio, sizeof(audio));
