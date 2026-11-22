@@ -1,0 +1,65 @@
+name: Site doesn't work
+description: A website loads but looks wrong, won't play, or won't let you in
+labels: [site-compat]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Robin is a full browser, but a TV is a slow computer with a remote instead of a mouse, and some sites notice. This form helps narrow down why one site fails.
+
+        Logs help here too: hold OK → **Settings** → **Help and feedback** → **Save logs to USB**, then attach the file.
+  - type: input
+    id: site
+    attributes:
+      label: Website
+      description: The site, and the page if it matters
+      placeholder: e.g. example.com/watch
+    validations:
+      required: true
+  - type: checkboxes
+    id: symptoms
+    attributes:
+      label: What goes wrong
+      options:
+        - label: The page is blank, black or cut off
+        - label: The layout is broken or text is unreadable
+        - label: A video won't play, or plays black
+        - label: Video plays but stutters, or sound is missing
+        - label: I can't click, scroll or type into something
+        - label: It asks me to sign in, verify, or update my browser
+        - label: The page closes or Robin restarts
+  - type: dropdown
+    id: blocker
+    attributes:
+      label: Does it work with the ad blocker off?
+      description: Robin → `wren://adblock` → turn off "Block ads and trackers", reload the page
+      options:
+        - "Yes, it works with the blocker off"
+        - "No, same problem"
+        - "I didn't try"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: TV model and webOS version
+      placeholder: e.g. OLED48CX5LC, webOS 5.3
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Robin version
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: Details
+      description: What you did and what you saw. A photo of the screen helps.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Drag the robin-logs-….txt file here.

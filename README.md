@@ -171,6 +171,11 @@ with an AI image tool at the maintainer's request and traced to vector; it uses 
 - [Release notes for 1.0.0](docs/release-notes-1.0.0.md)
 - [Everything else](docs/README.md)
 
+## Contributing
+
+Reports from other TV models help most: use the **Works on my TV** form in the [issue tracker](https://github.com/mihai2mn/robin-webos/issues/new/choose).
+For code, see [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: [SECURITY.md](SECURITY.md).
+
 ## Licence
 
 GPL-3.0-or-later, see [LICENSE](LICENSE). Third-party code, fonts, icons and filter lists keep their own licences,

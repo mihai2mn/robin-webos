@@ -1,0 +1,16 @@
+name: Idea or request
+description: Something Robin should do that it doesn't
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like?
+      description: Describe what you want to do on the TV, not only the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What you do today instead, and what gets in the way.

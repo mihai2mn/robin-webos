@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing Robin! The logs help most. To save them:
+        Thanks for testing Robin. The logs help most. To save them:
 
         1. **Don't turn off the TV**: the logs are cleared when it restarts. If Robin crashed, open it again first.
         2. Plug a USB drive into the TV.
@@ -13,11 +13,13 @@ body:
         4. A message names the file (`robin-logs-….txt`). Attach that file below.
 
         Web addresses in the file keep only the site and page path. Search terms and tokens are removed. The file still shows which sites you visited, so please read it before you attach it.
+
+        A site that loads but looks or behaves wrong has its own form: **Site doesn't work**.
   - type: input
     id: model
     attributes:
       label: TV model
-      placeholder: e.g. OLED65C1, 43UP7500
+      placeholder: e.g. OLED48CX5LC, OLED65C1, 43UP7500
     validations:
       required: true
   - type: input
@@ -25,7 +27,7 @@ body:
     attributes:
       label: webOS version
       description: Settings → General → About This TV (or the "TV:" line at the top of the log file)
-      placeholder: e.g. webOS 6.5.3
+      placeholder: e.g. webOS 5.3
     validations:
       required: true
   - type: input
@@ -33,20 +35,33 @@ body:
     attributes:
       label: Robin version
       description: Robin → Settings → About Robin
-      placeholder: e.g. 0.3.0
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: What is it about?
+      options:
+        - Video or sound
+        - Crash, freeze or black screen
+        - Remote, pointer or keyboard
+        - Ad blocker
+        - Bookmarks, history, tabs or settings
+        - Install or start
+        - Something else
     validations:
       required: true
   - type: input
     id: site
     attributes:
       label: Website
-      description: Which site, if it happens on one (just the site is fine)
-      placeholder: e.g. youtube.com
+      description: Which site, if it happens on one (the site name is enough)
   - type: textarea
     id: what
     attributes:
       label: What happened
-      description: What you did, what you expected, what happened instead (a crash, a black screen, no sound, a key that does nothing...)
+      description: What you did, what you expected, and what happened instead.
     validations:
       required: true
   - type: textarea
@@ -54,11 +69,3 @@ body:
     attributes:
       label: Logs
       description: Drag the robin-logs-….txt file here. If you have no USB drive, say so.
-  - type: dropdown
-    id: root
-    attributes:
-      label: Is your TV rooted?
-      options:
-        - "No"
-        - "Yes"
-        - "Don't know"

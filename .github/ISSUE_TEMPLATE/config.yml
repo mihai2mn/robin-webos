@@ -1,1 +1,11 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
+contact_links:
+  - name: Rooting your TV and the Homebrew Channel
+    url: https://www.webosbrew.org/
+    about: Robin needs a rooted TV. Help with rooting is at webOS Homebrew, not here.
+  - name: Wren (the project Robin is based on)
+    url: https://github.com/sostk/webos-wpe-browser
+    about: For Wren itself. Please report Robin's bugs here, not to Wren.
+  - name: Security problem
+    url: https://github.com/mihai2mn/robin-webos/security/advisories/new
+    about: Report it privately, not as a public issue.

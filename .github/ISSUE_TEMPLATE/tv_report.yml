@@ -1,0 +1,57 @@
+name: Works on my TV
+description: Tell us how Robin runs on your TV model, good or bad
+labels: [tv-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Robin was tested on one TV, an LG CX on webOS 5.3. A short report from any other model helps everyone decide whether to install it. It does not need to be a bug.
+  - type: input
+    id: model
+    attributes:
+      label: TV model
+      placeholder: e.g. OLED65C1
+    validations:
+      required: true
+  - type: input
+    id: webos
+    attributes:
+      label: webOS version
+      placeholder: e.g. webOS 6.5.3
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Robin version
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: overall
+    attributes:
+      label: Overall
+      options:
+        - Works well
+        - Works with problems
+        - Starts but is unusable
+        - Doesn't install or start
+    validations:
+      required: true
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What works
+      options:
+        - label: Browsing ordinary sites
+        - label: YouTube
+        - label: Other video sites
+        - label: Full screen video
+        - label: Sound
+        - label: The remote's play, pause and seek keys
+        - label: The ad blocker
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything that stood out, good or bad
