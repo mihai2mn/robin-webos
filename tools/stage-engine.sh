@@ -34,9 +34,9 @@ grep -qx 'BR2_ARM_EABIHF=y' "$BR/.config" && HF=yes
 STAGE_GLIBC=${STAGE_GLIBC:-1}
 [ "$HF" = yes ] && STAGE_GLIBC=0  # hard-float bundles glibc in lib/ (below)
 if [ "$HF" = yes ]; then
-    LOADER_LINK=${LOADER_LINK:-/tmp/org.sostk.wpebrowser/ld-linux-armhf.so.3}
+    LOADER_LINK=${LOADER_LINK:-/tmp/io.github.mihai2mn.robin/ld-linux-armhf.so.3}
 else
-    LOADER_LINK=${LOADER_LINK:-/tmp/org.sostk.wpebrowser/ld-linux.so.3}
+    LOADER_LINK=${LOADER_LINK:-/tmp/io.github.mihai2mn.robin/ld-linux.so.3}
 fi
 # gconv modules of the toolchain's glibc (Buildroot does not copy them to the target unless asked).
 TOOLCHAIN_GCONV=${TOOLCHAIN_GCONV:-/build/x-tools/arm-webos-linux-gnueabi/arm-webos-linux-gnueabi/sysroot/usr/lib/gconv}

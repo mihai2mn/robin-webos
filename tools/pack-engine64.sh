@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Packs the staged aarch64 engine (tools/engine-aarch64.sh stage -> build/engine-stage-aarch64/engine/) into an
-# ipk that adds `engine64/` next to the existing 32-bit `engine/` in the installed Wren app, so the official 0.3.3
+# ipk that adds `engine64/` next to the existing 32-bit `engine/` in the installed Robin app, so the official 0.3.3
 # UI can launch it (browser/ is NOT modified: step 4 of the plan is cancelled).
 #
 #   bash tools/pack-engine64.sh ipk                  add-on ipk: engine64/ only, nothing else changes
@@ -34,7 +34,7 @@ stage=${STAGE:-$project/build/engine-stage-aarch64/engine}
 launcher=${LAUNCHER:-$project/build/launcher/wpe-engine}
 out=${OUT:-$project/dist}
 version=${VERSION:-0.3.3-ubo3}
-app=${APP_DIR:-/usr/palm/applications/org.sostk.wpebrowser}
+app=${APP_DIR:-/usr/palm/applications/io.github.mihai2mn.robin}
 tv_free_mb=${TV_FREE_MB:-443}        # free MB on /media/developer, measured on the TV 2026-11-19
 tv_app_mb=${TV_APP_MB:-221}         # the installed engine/ tree (220.8 MB); the app itself is ~5 MB more
 STRIP=${STRIP:-$HOME/webos-browser-build/br-out-aarch64/host/bin/aarch64-buildroot-linux-gnu-strip}
@@ -143,8 +143,8 @@ if [ "$mode" = report ]; then
         [ -d "$stage/$d" ] && printf '   %-24s %5s MB\n' "$d/" "$(du_mb "$stage/$d")"
     done
     echo "== launcher: $launcher $([ -f "$launcher" ] && echo "($(mb "$(stat -c %s "$launcher")") MB, static 32-bit ARM)" || echo "(MISSING: bash tools/build-launcher.sh)")"
-    echo "== targets: $out/org.sostk.wpebrowser_$version-engine64_arm.ipk (add-on)"
-    echo "            $out/org.sostk.wpebrowser_$version-engine64-replace_arm.ipk (swap)"
+    echo "== targets: $out/io.github.mihai2mn.robin_$version-engine64_arm.ipk (add-on)"
+    echo "            $out/io.github.mihai2mn.robin_$version-engine64-replace_arm.ipk (swap)"
     exit 0
 fi
 
@@ -213,7 +213,7 @@ Architecture: arm
 Installed-Size: $sizekb
 Maintainer: webos-native-app-kit <noreply@example.org>
 License: GPL-3.0-or-later
-Description: Wren $pkg
+Description: Robin $pkg
 webOS-Package-Format-Version: 2
 webOS-Packager-Version: wren-engine64/1
 EOF
@@ -237,9 +237,9 @@ if [ "$mode" = ipk ]; then
         echo "   ! only $left MB would be left on /media/developer after installing (443 MB free now)." >&2
         echo "     The 32-bit engine ($tv_app_mb MB with the app) stays where it is: consider the 'replace' mode." >&2
     fi
-    mkipk "$root" "$out/org.sostk.wpebrowser_${version}-engine64_arm.ipk" "org.sostk.wpebrowser.engine64" "$version" $((sz*1024))
+    mkipk "$root" "$out/io.github.mihai2mn.robin_${version}-engine64_arm.ipk" "io.github.mihai2mn.robin.engine64" "$version" $((sz*1024))
     rm -rf "$root"
-    echo "   install: ares-install -d <tv> $out/org.sostk.wpebrowser_${version}-engine64_arm.ipk"
+    echo "   install: ares-install -d <tv> $out/io.github.mihai2mn.robin_${version}-engine64_arm.ipk"
     echo "            (or: scp to /media/developer/temp/ and ipkg install)"
     exit 0
 fi
@@ -264,7 +264,7 @@ if [ "$mode" = replace ]; then
     chmod 0755 "$root$app/engine/wpe-engine"
     if [ -n "$engine32" ] && [ -d "$engine32" ]; then
         # The installed 32-bit engine tree, copied in as engine32/: it keeps its own lib/, libexec/, ubo/ layout, so
-        # its own loader link (/tmp/org.sostk.wpebrowser/ld-linux.so.3 -> engine32/lib/glibc) still works from there.
+        # its own loader link (/tmp/io.github.mihai2mn.robin/ld-linux.so.3 -> engine32/lib/glibc) still works from there.
         echo "   copying the 32-bit engine from $engine32 ($(du_mb "$engine32") MB) as engine/wpe-engine32/..."
         mkdir -p "$root$app/engine/wpe-engine32"
         cp -a "$engine32"/. "$root$app/engine/wpe-engine32/"
@@ -279,9 +279,9 @@ EOF
     sz=$(du -sm "$root$app/engine" | cut -f1)
     lsz=$(mb "$(stat -c %s "$root$app/engine/wpe-engine")")
     echo "   engine/ (launcher + engine32 + engine64): $sz MB, launcher: $lsz MB"
-    mkipk "$root" "$out/org.sostk.wpebrowser_${version}-engine64-replace_arm.ipk" "org.sostk.wpebrowser.engine64" "$version" $((sz*1024))
+    mkipk "$root" "$out/io.github.mihai2mn.robin_${version}-engine64-replace_arm.ipk" "io.github.mihai2mn.robin.engine64" "$version" $((sz*1024))
     rm -rf "$root"
-    echo "   install: ares-install -d <tv> $out/org.sostk.wpebrowser_${version}-engine64-replace_arm.ipk"
+    echo "   install: ares-install -d <tv> $out/io.github.mihai2mn.robin_${version}-engine64-replace_arm.ipk"
     exit 0
 fi
 

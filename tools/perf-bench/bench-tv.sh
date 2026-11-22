@@ -13,7 +13,7 @@ set -u
 LABEL=${1:?label}; RUNS=${2:-2}
 here=$(cd "$(dirname "$0")" && pwd); root=$(cd "$here/../.." && pwd)
 OUT=${OUT:-$root/build/plan/build/bench/$LABEL}; mkdir -p "$OUT"
-APP=org.sostk.wpebrowser.dev; LOCK=/tmp/wren-devapp.lock; OWNER=${OWNER:-wren-build}; PORT=18899
+APP=io.github.mihai2mn.robin.dev; LOCK=/tmp/wren-devapp.lock; OWNER=${OWNER:-wren-build}; PORT=18899
 IDLE_MIN=${IDLE_MIN:-85}; PAGES=${PAGES:-"https://en.wikipedia.org/wiki/Romania https://www.bbc.com/news https://www.theguardian.com/international"}
 ONLY=${ONLY:-"jsb pages scroll video"}  # which parts to run, e.g. ONLY=pages; PAGE_ENV='"WREN_UBO":"0"' adds wpebEnv entries to the page loads
 penv=""; [ -n "${PAGE_ENV:-}" ] && penv=",\"wpebEnv\":{$PAGE_ENV}"

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Performance benchmark on the TV (ares device "tv" unless ARES_DEVICE is set). Uses the installed Wren; changes
-# nothing on the TV except starting and closing Wren and a test server in /tmp/emetest (removed at the end).
+# Performance benchmark on the TV (ares device "tv" unless ARES_DEVICE is set). Uses the installed Robin; changes
+# nothing on the TV except starting and closing Robin and a test server in /tmp/emetest (removed at the end).
 #   tools/perf-bench/run.sh LABEL [RUNS]
-# For each site: a cold start of Wren with that URL (app start + page load), with the web process's CPU time and
+# For each site: a cold start of Robin with that URL (app start + page load), with the web process's CPU time and
 # memory once the page has loaded; then the scroll benchmark page; then the UI process's CPU use over 10 s on a still
 # page. Results: build/perf-bench/LABEL.txt.
 #   WPEB_ENV='{"JSC_thresholdForJITAfterWarmUp":"100"}'   engine environment for every launch (launch param wpebEnv)
@@ -15,9 +15,9 @@ here=$(cd "$(dirname "$0")" && pwd); root=$(cd "$here/../.." && pwd)
 out="$root/build/perf-bench"; mkdir -p "$out"; rep="$out/$label.txt"; : > "$rep"
 read -r -a sites <<< "${SITES:-https://en.wikipedia.org/wiki/Wren https://www.bbc.com/news https://github.com/about}"
 env_json=${WPEB_ENV:+,\"wpebEnv\":$WPEB_ENV}
-app=org.sostk.wpebrowser; logs=/tmp/org.sostk.wpebrowser
+app=io.github.mihai2mn.robin; logs=/tmp/io.github.mihai2mn.robin
 sh_tv() { ares-shell -d "$dev" -r "$1" 2>/dev/null; }
-# Whatever ends the run (a failure, an interrupt, the end): close Wren, stop the test server, remove its folder.
+# Whatever ends the run (a failure, an interrupt, the end): close Robin, stop the test server, remove its folder.
 cleanup() {
     ares-launch -d "$dev" --close "$app" >/dev/null 2>&1 || true
     sh_tv "pkill minihttpd; rm -rf /tmp/emetest" || true
@@ -44,7 +44,7 @@ say "== $label  $(date -u +%FT%TZ)  $(git -C "$root" rev-parse --short HEAD)  en
 for site in "${sites[@]}"; do
     for ((r = 1; r <= runs; r++)); do
         launch "$site"
-        # Wren restores the last session's tabs at start, so the page's tab number varies: match its host.
+        # Robin restores the last session's tabs at start, so the page's tab number varies: match its host.
         host=${site#*://}; host=${host%%/*}
         if wait_for "$logs/engine.log" "timing:.*| $host" 120; then
             t=$(sh_tv "grep -m1 'timing:.*| $host' $logs/engine.log | sed 's/.*timing: //'")
@@ -74,4 +74,4 @@ done
 cpu=$(sh_tv "p=\$(pgrep -f '$app/wpebrowser' | head -1); a=\$(awk '{print \$14+\$15}' /proc/\$p/stat); sleep 10; b=\$(awk '{print \$14+\$15}' /proc/\$p/stat); echo \$((b-a))")
 say "ui-cpu still page: ${cpu:-?} ticks / 10 s (100 ticks = one core for 1 s)"
 
-say "== done"   # the EXIT trap closes Wren and removes /tmp/emetest
+say "== done"   # the EXIT trap closes Robin and removes /tmp/emetest

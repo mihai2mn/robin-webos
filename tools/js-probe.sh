@@ -10,7 +10,7 @@ mkdir -p "$out"
 cc -O1 -Wall -I"$src/common" -o "$out/js-probe" "$src/tools/js-probe.c"
 # A hard-float engine names its loader in the app's runtime folder (browser/private_loader.cpp); do the same here.
 if [ -f "$engine/lib/ld-linux-armhf.so.3" ]; then
-    link=/tmp/org.sostk.wpebrowser/ld-linux-armhf.so.3
+    link=/tmp/io.github.mihai2mn.robin/ld-linux-armhf.so.3
     mkdir -p "$(dirname "$link")"
     ln -sfn "$engine/lib/ld-linux-armhf.so.3" "$link"
 fi

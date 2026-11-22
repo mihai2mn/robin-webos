@@ -9,7 +9,7 @@ docker/run.sh '/build/br-out/host/bin/arm-webos-linux-gnueabi-gcc -O2 -static -o
 ares-shell -d tv -r 'mkdir -p /tmp/emetest'
 ares-push -d tv build/minihttpd tools/eme-test/eme.html /tmp/emetest/
 ares-shell -d tv -r 'cd /tmp/emetest && (setsid ./minihttpd 8099 /tmp/emetest /tmp/emetest/report.txt </dev/null >/dev/null 2>&1 &)'
-ares-launch -d tv org.sostk.wpebrowser -p '{"target":"http://127.0.0.1:8099/eme.html?quick&codec=avc1"}'
+ares-launch -d tv io.github.mihai2mn.robin -p '{"target":"http://127.0.0.1:8099/eme.html?quick&codec=avc1"}'
 ares-shell -d tv -r 'sleep 70; cat /tmp/emetest/report.txt'
 ares-shell -d tv -r 'kill $(pidof minihttpd); rm -rf /tmp/emetest'
 ```
