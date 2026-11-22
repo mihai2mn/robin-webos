@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Wren's TV interface (the design approved on 2026-11-14): a dark ambient background with soft colour glows, glass
-// panels (translucent fills, hairline borders, a top highlight), Manrope, one ice-blue accent, and a focus style of
+// Robin's TV interface (from Wren) (the design approved on 2026-11-14): a dark ambient background with soft colour glows, glass
+// panels (translucent fills, hairline borders, a top highlight), Manrope, one orange-red accent, and a focus style of
 // a white ring with an accent halo. Everything works with the arrows, OK and Back alone (remotes without colour
 // buttons); colour keys are shortcuts whose hints appear once such a key has been pressed.
 //
@@ -33,8 +33,8 @@ inline constexpr Color kInk = Color::hex(0x06080DFF);       // the background un
 inline constexpr Color kText = Color::hex(0xF2F4F8FF);
 inline constexpr Color kSoft = Color::hex(0xC3CBDAFF);      // secondary text on glass
 inline constexpr Color kMuted = Color::hex(0xA9B2C3FF);     // captions, hosts
-inline constexpr Color kAccent = Color::hex(0xB9D3FFFF);    // ice blue
-inline constexpr Color kAccentDeep = Color::hex(0x8FA2FFFF);
+inline constexpr Color kAccent = Color::hex(0xF2693AFF);    // robin breast orange-red (tools/branding/make-icons.py ACCENT)
+inline constexpr Color kAccentDeep = Color::hex(0xD14A1FFF);
 inline constexpr Color kOnAccent = Color::hex(0x0A0D14FF);  // text on accent and on monograms
 inline constexpr Color kSecure = Color::hex(0x9FF0D2FF);
 inline constexpr Color kRed = Color::hex(0xF06A6FFF), kGreen = Color::hex(0x4FD99AFF), kYellow = Color::hex(0xF3C94FFF),

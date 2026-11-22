@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "screens.hpp"
 
+#include "version.hpp"
+
 #include "wnk/ui/forms.hpp"
 #include "wnk/ui/ui.hpp"
 #include "wnk/ui/widgets.hpp"
@@ -176,8 +178,10 @@ class SettingsScreen : public PageScreen {
         privacy.add<wnk::ui::ValueRow>("Bookmarks").set_value(std::to_string(p.bookmarks().size()))
             .set_on_click([h](Ui &ui) { h.show_bookmarks(ui); });
 
-        auto &about = section("About Wren");
-        about.add<wnk::ui::ValueRow>("Version").set_value("0.3.3");
+        auto &about = section("About Robin");
+        about.add<wnk::ui::ValueRow>("Version").set_value(kAppVersion);
+        about.add<wnk::ui::ValueRow>("Based on").set_value(kBasedOn);
+        about.add<wnk::ui::ValueRow>("Upstream").set_value(kUpstreamUrl);
         const std::string engine = h.engine_version ? h.engine_version() : std::string();
         about.add<wnk::ui::ValueRow>("Engine").set_value(engine.empty() ? "WPE WebKit (not running)" : "WPE WebKit " + engine);
         about.add<wnk::ui::ValueRow>("Licence").set_value("GPL-3.0-or-later");
@@ -188,7 +192,7 @@ class SettingsScreen : public PageScreen {
             .set_on_click([h](Ui &ui) {
                 if (h.save_logs) h.save_logs(ui);
             });
-        help.add<wnk::ui::ValueRow>("Report a problem").set_value("github.com/sostk/webos-wpe-browser/issues");
+        help.add<wnk::ui::ValueRow>("Report a problem").set_value(kIssuesUrl);
     }
 };
 

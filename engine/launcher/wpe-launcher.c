@@ -15,7 +15,7 @@
  *             <app>/engine64/wpe-engine
  *
  * Selection, in order:
- *   1. $WPE_BROWSER_DEBUG_ENGINE=32|64  (Wren's launch parameter {"wpebEnv":{"WPE_BROWSER_DEBUG_ENGINE":"64"}} gets
+ *   1. $WPE_BROWSER_DEBUG_ENGINE=32|64  (Robin's launch parameter {"wpebEnv":{"WPE_BROWSER_DEBUG_ENGINE":"64"}} gets
  *      through the UI's extra_env filter, which accepts names starting with WPE_BROWSER_DEBUG: engine_client.cpp:202)
  *   2. a file named "engine64" in $WPE_BROWSER_DATA_DIR whose contents start with "on" (persistent user switch;
  *      absent/unreadable = 32)

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The engine can bring its own glibc. Its executables then name a dynamic loader (PT_INTERP) at a fixed path inside
-// the app's runtime folder, e.g. /tmp/org.sostk.wpebrowser/ld-linux.so.3, because WebKit and GStreamer exec their
+// the app's runtime folder, e.g. /tmp/io.github.mihai2mn.robin/ld-linux.so.3, because WebKit and GStreamer exec their
 // helpers by path and every process must start with the same loader. Before spawning the engine, the UI points that
 // path at a loader:
 //   - softfp engine with engine/lib/glibc/ (bundled glibc 2.28): the bundled loader when the TV's glibc is older

@@ -693,7 +693,7 @@ static void target_add_role(struct target *t)
     char derived[160];
     if (!page_id || !*page_id) {
         const char *app_id = getenv("WPEB_APP_ID");
-        snprintf(derived, sizeof(derived), "%s.page", app_id && *app_id ? app_id : "org.sostk.wpebrowser");
+        snprintf(derived, sizeof(derived), "%s.page", app_id && *app_id ? app_id : "io.github.mihai2mn.robin");
         page_id = derived;
     }
     wl_webos_shell_surface_set_property(t->webos_surface, "appId", page_id);

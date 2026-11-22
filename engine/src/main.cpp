@@ -1259,7 +1259,7 @@ void add_scroll_reporter(WebKitWebView *web_view, uint32_t id)
         webkit_user_script_unref(script);
     }
     // WPE_BROWSER_DEBUG_MESSAGES=1: postMessage traffic to the top frame (e.g. a Cloudflare challenge frame's status
-    // and error codes) goes to the engine log. Listened to from Wren's isolated world, so the page's own functions
+    // and error codes) goes to the engine log. Listened to from Robin's isolated world, so the page's own functions
     // stay untouched; WPE_BROWSER_DEBUG_CONSOLE wraps them and bot checks notice that.
     static const bool messages = getenv("WPE_BROWSER_DEBUG_MESSAGES") != nullptr;
     if (messages && webkit_user_content_manager_register_script_message_handler(ucm, "wpebMessage", kScrollWorld)) {
@@ -1808,7 +1808,7 @@ void clear_data(const WpeClearData &c)
 // (engine/ubo/engine.dat, engine/lib/web-extensions/libwren-ubo.so) and offers its settings at wren://adblock:
 // on/off, the extra filter lists (engine/ubo/lists/catalog.ini) and the sites where ads are allowed. They are kept in
 // $WPE_BROWSER_DATA_DIR/ubo-settings.ini and sent to the web process when they change ("wren-ubo:state" (basass)).
-// "My filters", the user's own rules (uBO syntax, e.g. site-specific fixes with Wren's generic scriptlets), are
+// "My filters", the user's own rules (uBO syntax, e.g. site-specific fixes with Robin's generic scriptlets), are
 // kept as text in $WPE_BROWSER_DATA_DIR/ubo-my-filters.txt and parsed in the web process: never part of the package.
 // WREN_UBO=0 in the environment turns the blocker off altogether. It never runs on YouTube (engine/ubo/extension.c).
 struct UboList {
@@ -1929,7 +1929,7 @@ void ubo_save_my_filters()
 void ubo_save_settings()
 {
     GKeyFile *kf = g_key_file_new();
-    g_key_file_set_comment(kf, nullptr, nullptr, " Wren ad blocker settings (wren://adblock)", nullptr);
+    g_key_file_set_comment(kf, nullptr, nullptr, " Robin ad blocker settings (wren://adblock)", nullptr);
     g_key_file_set_boolean(kf, "ubo", "enabled", ubo.on);
     std::vector<const gchar *> a, l;
     for (const std::string &s : ubo.allowed) a.push_back(s.c_str());
@@ -1989,7 +1989,7 @@ std::string ubo_page()
     std::string h = R"HTML(<!doctype html><html><head><meta charset="utf-8"><title>Ad blocker settings</title>
 <meta name="viewport" content="width=device-width">
 <style>
-:root{color-scheme:dark;--bg:#0b1020;--card:#151c33;--ink:#e8ecf8;--dim:#9aa6c4;--on:#3f7cff;--line:#28314f}
+:root{color-scheme:dark;--bg:#0b1020;--card:#151c33;--ink:#e8ecf8;--dim:#9aa6c4;--on:#f2693a;--line:#28314f}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:22px/1.4 system-ui,sans-serif;padding:40px 64px}
 h1{font-size:40px;margin:0 0 6px}h2{font-size:26px;margin:36px 0 12px;color:var(--dim);font-weight:600}
 p.note{color:var(--dim);margin:0 0 20px}
@@ -2009,7 +2009,7 @@ code{font-size:18px;color:var(--ink)}
 #saved{position:fixed;right:40px;top:30px;background:var(--on);padding:10px 18px;border-radius:12px;opacity:0;transition:opacity .2s}
 </style></head><body>
 <div id="saved">Saved</div>
-<h1>Ad blocker</h1><p class="note">uBlock Origin's lists, matched inside Wren. Changes apply to pages loaded from now on. Never used on YouTube.</p>
+<h1>Ad blocker</h1><p class="note">uBlock Origin's lists, matched inside Robin. Changes apply to pages loaded from now on. Never used on YouTube.</p>
 )HTML";
     h += "<button class=\"row\" data-cmd=\"on\" aria-pressed=\"" + std::string(ubo.on ? "true" : "false") +
          "\"><span class=\"t\">Block ads and trackers<small>uBlock filters, EasyList, EasyPrivacy, malware and Peter Lowe's lists (always used when on)</small></span><span class=\"sw\"></span></button>\n";
@@ -2028,7 +2028,7 @@ code{font-size:18px;color:var(--ink)}
         h += "<div class=\"host\"><span>" + html_escape(a) + "</span><button data-cmd=\"disallow\" data-name=\"" +
              html_escape(a) + "\">Remove</button></div>\n";
     h += "</div><h2>My filters</h2><p class=\"note\">Your own rules, in uBlock Origin's syntax, one per line. They stay on "
-         "this TV (in the browser's data folder), never in the package. Wren's fixes for any site: "
+         "this TV (in the browser's data folder), never in the package. Robin's fixes for any site: "
          "<code>example.com##+js(wren-no-mse)</code> plays plain video files instead of MSE streams, "
          "<code>example.com##+js(wren-media-debug)</code> logs media details.</p>"
          "<textarea id=\"mine\" rows=\"8\" spellcheck=\"false\" autocapitalize=\"off\">" + html_escape(ubo.my_filters) +
@@ -2083,7 +2083,7 @@ void on_wren_scheme(WebKitURISchemeRequest *request, gpointer)
         body = ubo_page();
     } else if (g_str_has_prefix(uri, "wren://adblock")) {
         body = "<!doctype html><meta charset=utf-8><title>Ad blocker</title><body style=\"font:24px system-ui;padding:48px\">"
-               "This Wren package has no ad blocker.";
+               "This Robin package has no ad blocker.";
     } else {
         GError *e = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "No such page: try wren://adblock");
         webkit_uri_scheme_request_finish_error(request, e);

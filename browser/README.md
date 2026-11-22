@@ -1,13 +1,13 @@
 # WPE Browser
 
-`org.sostk.wpebrowser`, a native webOS TV app on the [webOS native app kit](https://github.com/Native-Webos/webos-native-app-kit),
+`io.github.mihai2mn.robin`, a native webOS TV app on the [webOS native app kit](https://github.com/Native-Webos/webos-native-app-kit),
 made with its `tools/new-app.py`. The kit is not copied in: this folder points at it through
 `WNK_KIT_DIR` (environment or `-DWNK_KIT_DIR=`), else `../third_party/webos-native-app-kit`.
 
 ```sh
 ./build.sh            # host build and smoke test (e2e.wpebrowser.starts_and_quits)
 ./build.sh run        # on the desktop: arrow keys, Enter, Escape
-./build.sh webos      # build/webos-release/dist/org.sostk.wpebrowser_0.1.0_arm.ipk, package-checked
+./build.sh webos      # build/webos-release/dist/io.github.mihai2mn.robin_0.1.0_arm.ipk, package-checked
 ARES_DEVICE=tv ./build.sh install && ./build.sh launch
 ```
 

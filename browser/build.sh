@@ -30,9 +30,9 @@ case "${1:-host}" in
         cmake --build --preset webos-release --target wnk-ipks
         ls -l build/webos-release/dist/ ;;
     install)
-        ipk="$(ls -t build/webos-release/dist/org.sostk.wpebrowser_*_arm.ipk 2>/dev/null | head -n 1)"
+        ipk="$(ls -t build/webos-release/dist/io.github.mihai2mn.robin_*_arm.ipk 2>/dev/null | head -n 1)"
         [[ -n "$ipk" ]] || die "no package yet: ./build.sh webos"
         exec "$KIT_ROOT/tools/install.sh" "$ipk" ;;
-    launch) exec "$KIT_ROOT/tools/launch.sh" org.sostk.wpebrowser ;;
+    launch) exec "$KIT_ROOT/tools/launch.sh" io.github.mihai2mn.robin ;;
     *) die "usage: ./build.sh [host|asan|run|webos|install|launch]" ;;
 esac
