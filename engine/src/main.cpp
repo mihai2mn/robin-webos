@@ -2512,13 +2512,24 @@ int main(int, char **)
         if (limit_mb > 0) {
             WebKitMemoryPressureSettings *mp = webkit_memory_pressure_settings_new();
             webkit_memory_pressure_settings_set_memory_limit(mp, static_cast<guint>(limit_mb));
-            // strict first: the setter asserts conservative < strict, and the default strict is below 0.5
-            webkit_memory_pressure_settings_set_strict_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.55").c_str()));
-            webkit_memory_pressure_settings_set_conservative_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.35").c_str()));
+            // The setters silently ignore a value that breaks conservative < strict < kill (g_return_if_fail), and each checks
+            // against what is set so far: conservative goes to a low value first so any strict can follow, then the real
+            // conservative, then (below) the kill threshold. A value that did not take is logged.
+            const double conservative = atof(env_or("WPE_BROWSER_DEBUG_MEM_CONSERVATIVE", "0.35").c_str());
+            const double strict = atof(env_or("WPE_BROWSER_DEBUG_MEM_STRICT", "0.55").c_str());
+            webkit_memory_pressure_settings_set_conservative_threshold(mp, 0.01);
+            webkit_memory_pressure_settings_set_strict_threshold(mp, strict);
+            webkit_memory_pressure_settings_set_conservative_threshold(mp, conservative);
+            if (webkit_memory_pressure_settings_get_strict_threshold(mp) != strict || webkit_memory_pressure_settings_get_conservative_threshold(mp) != conservative)
+                log_msg("memory pressure: conservative %.2f / strict %.2f rejected (need 0 < conservative < strict < 1): using %.2f / %.2f", conservative, strict,
+                    webkit_memory_pressure_settings_get_conservative_threshold(mp), webkit_memory_pressure_settings_get_strict_threshold(mp));
             // The kill threshold (a multiple of the limit, WebKit measures resident + swapped): a web process that goes on growing past
             // its limit while the TV is already swapping (2026-11-20: 585 MB at a 420 MB limit, swap full, the whole TV frozen) is
             // ended, and the UI reloads the tab (browser/main.cpp: crashed tabs). 0 = never.
-            webkit_memory_pressure_settings_set_kill_threshold(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_KILL", "1.3").c_str()));
+            const double kill = atof(env_or("WPE_BROWSER_DEBUG_MEM_KILL", "1.3").c_str());
+            webkit_memory_pressure_settings_set_kill_threshold(mp, kill);
+            if (webkit_memory_pressure_settings_get_kill_threshold(mp) != kill)
+                log_msg("memory pressure: kill threshold %.2f rejected (0 or above strict %.2f)", kill, webkit_memory_pressure_settings_get_strict_threshold(mp));
             webkit_memory_pressure_settings_set_poll_interval(mp, atof(env_or("WPE_BROWSER_DEBUG_MEM_POLL_S", "2").c_str()));
             webkit_network_session_set_memory_pressure_settings(mp);  // the network process
             g.context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", mp, nullptr));  // the web processes
