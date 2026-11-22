@@ -93,6 +93,12 @@ std::string str(const nlohmann::json &j, const char *key) {
     return it != j.end() && it->is_string() ? it->get<std::string>() : std::string();
 }
 
+// A value of the wrong type (a hand-edited or damaged file) is the default, never an exception: json::value() throws on it.
+bool flag(const nlohmann::json &j, const char *key, bool def) {
+    auto it = j.find(key);
+    return it != j.end() && it->is_boolean() ? it->get<bool>() : def;
+}
+
 int64_t num(const nlohmann::json &j, const char *key) {
     auto it = j.find(key);
     return it != j.end() && it->is_number_integer() ? it->get<int64_t>() : 0;
@@ -125,11 +131,11 @@ void Profile::load(const std::string &dir) {
     ::mkdir(dir_.c_str(), 0700);
 
     if (auto j = parse_or_keep(path(kSettings), false); j.is_object()) {
-        settings.show_bookmarks_bar = j.value("show_bookmarks_bar", settings.show_bookmarks_bar);
-        settings.search_engine = std::clamp(j.value("search_engine", 0), 0, static_cast<int>(kSearchEngines.size()) - 1);
-        settings.zoom = std::clamp(j.value("zoom", 0), 0, static_cast<int>(kZoomLevels.size()) - 1);
-        settings.restore_session = j.value("restore_session", false);
-        settings.sharp_text = j.value("sharp_text", settings.sharp_text);
+        settings.show_bookmarks_bar = flag(j, "show_bookmarks_bar", settings.show_bookmarks_bar);
+        settings.search_engine = static_cast<int>(std::clamp<int64_t>(num(j, "search_engine"), 0, static_cast<int64_t>(kSearchEngines.size()) - 1));
+        settings.zoom = static_cast<int>(std::clamp<int64_t>(num(j, "zoom"), 0, static_cast<int64_t>(kZoomLevels.size()) - 1));
+        settings.restore_session = flag(j, "restore_session", false);
+        settings.sharp_text = flag(j, "sharp_text", settings.sharp_text);
     }
     if (auto j = parse_or_keep(path(kBookmarks), true); j.is_array()) {
         for (const auto &b : j) {

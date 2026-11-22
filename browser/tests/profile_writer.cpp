@@ -105,6 +105,26 @@ int main() {
         check(!fs::exists(dir + "/empty/history.json.corrupt"), "an empty file is not kept aside");
     }
 
+    // 4. Wrong value types in settings.json fall back to defaults instead of throwing.
+    {
+        fs::create_directories(dir + "/types");
+        put(dir + "/types/settings.json",
+            "{\"show_bookmarks_bar\":\"yes\",\"search_engine\":\"1\",\"zoom\":null,\"restore_session\":3,\"sharp_text\":[]}");
+        browser::Profile p;
+        bool threw = false;
+        try { p.load(dir + "/types"); } catch (...) { threw = true; }
+        check(!threw, "wrong value types do not throw");
+        check(p.settings.show_bookmarks_bar == true && p.settings.search_engine == 0 && p.settings.zoom == 0 &&
+                  p.settings.restore_session == false && p.settings.sharp_text == true,
+              "wrong value types give the defaults");
+        put(dir + "/types/settings.json", "{\"search_engine\":2,\"zoom\":99,\"restore_session\":true,\"show_bookmarks_bar\":false}");
+        browser::Profile q;
+        q.load(dir + "/types");
+        check(q.settings.search_engine == 2 && q.settings.zoom == static_cast<int>(browser::kZoomLevels.size()) - 1 &&
+                  q.settings.restore_session && !q.settings.show_bookmarks_bar,
+              "right types are read and clamped");
+    }
+
     std::error_code ec;
     fs::remove_all(dir, ec);
     return failures == 0 ? 0 : 1;
