@@ -579,6 +579,10 @@ void MediaServer::serve(int fd, uint64_t id) {
     // software chain for a muted element when this backend takes the audio), so only these two values change.
     uint32_t vol_permille = 1000;
     bool vol_muted = false;
+    // The element's pause state (WPEB_MEDIA_PAUSE, as applied): kept for the stream and applied after every load, as LG's player starts
+    // playing on its first feed by itself. A pause that came while the Load was held (the stream did not own the decoder yet), or
+    // before a retry or recovery reloaded the pipeline, was lost: the video played under a paused element.
+    bool paused_state = false;
 
     bool force_ndl = false;  // the last attempt after LG's pipeline failed to start: the Starfish backend's decoder
     int retries = 0;
@@ -660,6 +664,10 @@ void MediaServer::serve(int fd, uint64_t id) {
         }
         if (ndl_loaded_ && starfish_) starfish_->set_volume(static_cast<int>(vol_permille / 10), vol_muted);
         if (use_lg_) lg_.set_volume(vol_permille, vol_muted);
+        if (paused_state) {
+            if (use_lg_) lg_.pause(true);
+            else if (ndl_loaded_) b.pause(true);
+        }
         if (use_lg_ || ndl_loaded_)
             WNK_LOGI(kCat, "stream %llu: %s for %s %ux%u @ %.2f fps%s%s%s", static_cast<unsigned long long>(id),
                      use_lg_ ? "LG media pipeline" : "NDL", codec_label(l.codec), l.width, l.height, l.fps_milli / 1000.0,
@@ -957,6 +965,7 @@ void MediaServer::serve(int fd, uint64_t id) {
             // decoder has shown its buffered pictures: pausing then cut the end of the video off (TV: the last 2 s of a clip
             // never appeared). A decoder that was told the stream ended is left to drain.
             if (paused != 0 && eos_pushed.load()) break;
+            paused_state = paused != 0;
             std::lock_guard<std::mutex> lock(mutex_);
             if (owner_.load() == id) {
                 if (use_lg_) lg_.pause(paused != 0);
