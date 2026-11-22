@@ -231,8 +231,12 @@
     // Called on every new start of a player (the hooks above) and after a fullscreen transition. The first decision
     // reads the element's box and the budget; a later call (a fullscreen transition) re-reads only what a transition
     // changes, fullscreen; the page's own marking is never overruled.
+    const boxArea = v => { const r = v.getBoundingClientRect(); return r.width * r.height; };
     const decide = v => {
         if (!(v instanceof HTMLVideoElement)) return;
+        // Detached: nothing to measure yet. The floor's preview marking (above) already keeps a detached preview off the decoder; the decision
+        // is made when the element is inserted (the insertion observer calls this again), measured.
+        if (!v.isConnected && v.__wrenDecided !== true) return;
         reconcile(v);
         const first = v.__wrenDecided !== true;
         let keep = v.getAttribute('wren-policy') === 'page'; // the page's own marking; decided once, then remembered
@@ -257,7 +261,9 @@
         // server (it is silent); LG's media pipeline plays the page's audio (AAC, or decoded Opus/Vorbis as PCM) next to the hardware
         // video. Previews are muted (the isPreview rule), so they stay in the page.
         else if (!v.muted) why = 'sound';
-        else if (first ? v.getBoundingClientRect().width * v.getBoundingClientRect().height > policy.box : v.__wrenBox > policy.box) why = 'box';
+        // A box that is unknown (detached, not laid out, display:none: area 0) counts as big: a big muted background video must not start on the CPU
+        // because it was measured before its CSS applied. The element is measured again at loadedmetadata (below).
+        else if (first ? !(boxArea(v) > 0) || boxArea(v) > policy.box : !(v.__wrenBox > 0) || v.__wrenBox > policy.box) why = 'box';
         else if (first && playing().length >= policy.players) why = 'budget';
         else why = '';
         if (first) {
@@ -654,6 +660,20 @@
     for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener(ev, onFullscreenChange, true);
     // A muted video in the page that is unmuted (a preview the user turns the sound on for) is decided again: with sound it belongs on the
     // hardware plane, so it is reloaded there at its media time, as for a fullscreen transition (not an MSE stream: it cannot be reloaded).
+    // The size the first decision saw may have been before layout (a 300x150 default, a detached element): once the media is known, the
+    // element is measured again, once, and a changed answer is applied like a fullscreen transition's (reload at its media time).
+    document.addEventListener('loadedmetadata', e => {
+        const v = e.target;
+        if (!(v instanceof HTMLVideoElement) || !policy.on || v.__wrenRechecked || !v.__wrenDecided || v.getAttribute('wren-policy') === 'page') return;
+        v.__wrenRechecked = true;
+        const area = boxArea(v);
+        if (area === v.__wrenBox) return;
+        v.__wrenBox = area;
+        if (String(v.currentSrc || v.src || '').startsWith('blob:')) { log({ reload: false, reason: 'mse' }); return; }
+        const running = v.__wrenPolicy;
+        decide(v);
+        if (v.__wrenPolicy !== running) transition(v);
+    }, true);
     document.addEventListener('volumechange', e => {
         const v = e.target;
         if (!(v instanceof HTMLVideoElement) || !policy.on || v.muted || v.volume === 0) return;
