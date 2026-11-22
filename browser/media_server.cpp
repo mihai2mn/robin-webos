@@ -786,7 +786,14 @@ void MediaServer::serve(int fd, uint64_t id) {
         if (audio_state == AudioState::Unknown && waited)
             WNK_LOGW(kCat, "stream %llu: no word from the audio side: video only", static_cast<unsigned long long>(id));
         load_pending = false;
-        do_load(pending, false);
+        if (do_load(pending, false) == Loaded::No) {
+            // Neither decoder took the stream: as a failed reload, the page gets a media error instead of a black video.
+            std::lock_guard<std::mutex> ql(qm);
+            ready = false;
+            close_without_decoder("the load");
+            qcv.notify_all();
+            return;
+        }
         set_ready(true);
     };
 
