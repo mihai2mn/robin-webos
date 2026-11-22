@@ -586,9 +586,16 @@ constexpr const char *kScrollScript = R"JS((function () {
     // The element that scrolls the content: the document, or (web apps, sites with a fixed layout) the largest
     // element that scrolls vertically and covers most of the screen. Spatial navigation only scrolls the box that holds
     // the focused link, so with nothing focusable on screen such a box never moves under the arrow keys.
+    // The search below is a getComputedStyle per element (up to 5000): its result is kept for the document and used while that
+    // element is still in the page and still scrolls; "none found" is kept for 2 s. A resize drops both.
+    var scrollerCache = null, noScrollerAt = 0;
+    addEventListener('resize', function () { scrollerCache = null; noScrollerAt = 0; });
     function scroller() {
         var doc = document.scrollingElement || document.documentElement;
         if (doc && doc.scrollHeight > doc.clientHeight + 4) return doc;
+        if (scrollerCache && scrollerCache.isConnected && scrollerCache.scrollHeight > scrollerCache.clientHeight + 4) return scrollerCache;
+        scrollerCache = null;
+        if (noScrollerAt && Date.now() - noScrollerAt < 2000) return doc;
         var best = null, bestArea = innerWidth * innerHeight * 0.3;
         var all = document.body ? document.body.getElementsByTagName('*') : [];
         for (var i = 0; i < all.length && i < 5000; i++) {
@@ -599,13 +606,15 @@ constexpr const char *kScrollScript = R"JS((function () {
             var area = el.clientWidth * el.clientHeight;
             if (area > bestArea) { best = el; bestArea = area; }
         }
+        scrollerCache = best;
+        noScrollerAt = best ? 0 : Date.now();
         return best || doc;
     }
     // Up / Down that changed nothing: spatial navigation moved no focus, nothing scrolled and the page did not take
     // the key (defaultPrevented: web apps with their own remote handling). Down then scrolls the content box itself;
     // Up does too unless the content is at its top, where it brings the toolbar (wpebEdge). Typing never counts.
     addEventListener('keydown', function (ev) {
-        if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+        if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown' || ev.defaultPrevented) return;
         var a = document.activeElement;
         if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return;
         var y = window.scrollY, s = scroller(), st = s ? s.scrollTop : 0;
