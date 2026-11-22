@@ -2574,7 +2574,7 @@ int main(int, char **)
             if (webkit_memory_pressure_settings_get_strict_threshold(mp) != strict || webkit_memory_pressure_settings_get_conservative_threshold(mp) != conservative)
                 log_msg("memory pressure: conservative %.2f / strict %.2f rejected (need 0 < conservative < strict < 1): using %.2f / %.2f", conservative, strict,
                     webkit_memory_pressure_settings_get_conservative_threshold(mp), webkit_memory_pressure_settings_get_strict_threshold(mp));
-            // The kill threshold (a multiple of the limit, WebKit measures resident + swapped): a web process that goes on growing past
+            // The kill threshold (a multiple of the limit; WebKit compares the process's resident size, /proc/self/statm: swap is not counted): a web process that goes on growing past
             // its limit while the TV is already swapping (2026-11-20: 585 MB at a 420 MB limit, swap full, the whole TV frozen) is
             // ended, and the UI reloads the tab (browser/main.cpp: crashed tabs). 0 = never.
             // 1.6 (832 MB at the 520 MB limit), was 1.3: a 1080p MediaSource stream with 17-50 MB segments sits at 600-780 MB
