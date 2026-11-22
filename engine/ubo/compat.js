@@ -118,12 +118,21 @@
         if (v.__wrenReleased || isMain(v)) return;
         const src = v.getAttribute('src'), sources = [...v.querySelectorAll('source')];
         if (!src && !sources.length) return;
+        // An MSE player (blob: source) cannot give its stream back and get it again: load() closes its MediaSource and restore() would
+        // re-attach a URL nothing feeds. It keeps what it has.
+        const blob = s => String(s || '').startsWith('blob:');
+        if (blob(src) || blob(v.currentSrc) || sources.some(s => blob(s.getAttribute('src')))) return;
         v.__wrenReleased = { src, sources: sources.map(s => s.cloneNode(true)) };
         try { v.pause(); } catch (e) {}
         v.removeAttribute('src');
         sources.forEach(s => s.remove());
         try { v.load(); } catch (e) {}
+        // A player the page started with the autoplay attribute is nobody's play() call: it comes back when it is shown again.
+        if (v.hasAttribute('autoplay') && shownAgain) shownAgain.observe(v);
     };
+    const shownAgain = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+        for (const en of entries) if (en.isIntersecting && visible(en.target)) { shownAgain.unobserve(en.target); restore(en.target); }
+    }) : null;
     const restore = v => {
         const r = v.__wrenReleased;
         if (!r) return;
@@ -182,6 +191,23 @@
         on: false,
         current: () => document.fullscreenElement || document.webkitFullscreenElement || null,
     };
+    // A muted, controls-less video that is laid out at thumbnail size (by the page's own styles).
+    const isThumb = v => {
+        if (!v.muted || v.controls) return false;
+        const r = v.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && r.width <= 320 && r.height <= 180;
+    };
+    // Whether a video is, or is inside (through shadow hosts and slots), the fullscreen element: only those go to the hardware plane with it.
+    const inFullscreen = v => {
+        const fs = policy.current();
+        if (!fs) return false;
+        for (let n = v; n;) {
+            if (n === fs) return true;
+            const p = n.assignedSlot || n.parentNode;
+            n = p instanceof ShadowRoot ? p.host : p;
+        }
+        return false;
+    };
     // Engine-provided settings (hybrid_video_script() fills this with {on: true}; an older engine leaves it undefined).
     if (envelope) Object.assign(policy, envelope);
     // Readings of the page (the engine log prints them: hybrid video: …): the policy's decisions, the transitions, and
@@ -210,8 +236,27 @@
     // Called on every new start of a player (the hooks above) and after a fullscreen transition. The first decision
     // reads the element's box and the budget; a later call (a fullscreen transition) re-reads only what a transition
     // changes, fullscreen; the page's own marking is never overruled.
+    const boxArea = v => { const r = v.getBoundingClientRect(); return r.width * r.height; };
+    // Videos that had no box at their first decision: decided again when they get one (shown, laid out, sized).
+    const boxWatch = typeof ResizeObserver === 'function' ? new ResizeObserver(entries => {
+        for (const en of entries) {
+            const v = en.target, area = en.contentRect.width * en.contentRect.height;
+            if (!(area > 0)) continue;
+            boxWatch.unobserve(v);
+            v.__wrenWatched = false;
+            if (!policy.on || !v.isConnected || v.getAttribute('wren-policy') === 'page') continue;
+            v.__wrenBox = area;
+            if (String(v.currentSrc || v.src || '').startsWith('blob:')) { log({ reload: false, reason: 'mse' }); continue; }
+            const running = v.__wrenPolicy;
+            decide(v);
+            if (v.__wrenPolicy !== running && (v.currentSrc || v.getAttribute('src') || v.querySelector('source'))) transition(v);
+        }
+    }) : null;
     const decide = v => {
         if (!(v instanceof HTMLVideoElement)) return;
+        // Detached: nothing to measure yet. The floor's preview marking (above) already keeps a detached preview off the decoder; the decision
+        // is made when the element is inserted (the insertion observer calls this again), measured.
+        if (!v.isConnected && v.__wrenDecided !== true) return;
         reconcile(v);
         const first = v.__wrenDecided !== true;
         let keep = v.getAttribute('wren-policy') === 'page'; // the page's own marking; decided once, then remembered
@@ -229,17 +274,22 @@
         if (keep) why = v.hasAttribute('wren-hw') ? 'page' : '';
         else if (!policy.on) why = v.__wrenPreview ? '' : 'off';
         else if (v.__wrenEmeActive) why = 'protected';
-        else if (policy.current()) why = 'fullscreen';
+        // A thumbnail-sized muted preview inside the player (a seek-bar preview) does not take the decoder from the main picture.
+        else if (inFullscreen(v) && !isThumb(v)) why = 'fullscreen';
         else if (v.controls && !v.muted) why = 'controls';
         // Sound only plays on the hardware plane: a software video's audio would go to PulseAudio, and webOS 5 TVs have no PulseAudio
         // server (it is silent); LG's media pipeline plays the page's audio (AAC, or decoded Opus/Vorbis as PCM) next to the hardware
         // video. Previews are muted (the isPreview rule), so they stay in the page.
         else if (!v.muted) why = 'sound';
-        else if (first ? v.getBoundingClientRect().width * v.getBoundingClientRect().height > policy.box : v.__wrenBox > policy.box) why = 'box';
+        // No layout box (not laid out, display:none, zero size: area 0) is not a big box: a hidden muted preview must not take the single
+        // hardware decoder. It stays in software for now and is decided again when it first gets a box (ResizeObserver below) and at
+        // loadedmetadata; only a real, big box sends it to the hardware plane.
+        else if (first ? boxArea(v) > policy.box : v.__wrenBox > policy.box) why = 'box';
         else if (first && playing().length >= policy.players) why = 'budget';
         else why = '';
         if (first) {
-            if (v.__wrenBox === undefined) v.__wrenBox = v.getBoundingClientRect().width * v.getBoundingClientRect().height;
+            if (v.__wrenBox === undefined) v.__wrenBox = boxArea(v);
+            if (!(v.__wrenBox > 0) && boxWatch && !v.__wrenWatched) { v.__wrenWatched = true; boxWatch.observe(v); }
             v.__wrenDecided = true;
             // A small pre-existing marking is the page's: it stays, and the element is never reloaded for the policy.
             if (!keep && !stale && v.hasAttribute('wren-software') && !v.__wrenPreview) keep = true;
@@ -329,10 +379,22 @@
         // Not a snapshot of the style attribute: a page that changes its own inline style while fullscreen keeps its change, and a
         // page whose CSP forbids inline styles (setAttribute('style') is blocked, CSSOM is not) gets its CSSOM-set styles back.
         const saved = new Map();
+        // Longhands only: a shorthand read from an inline style that has just its longhands (padding-top: 56.25%) answers '' and, restored,
+        // would wipe them. Every shorthand written here sets one value on all of its longhands.
+        const LONGHANDS = {
+            margin: ['margin-top', 'margin-right', 'margin-bottom', 'margin-left'],
+            padding: ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'],
+            border: ['border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width'],
+            overflow: ['overflow-x', 'overflow-y'],
+            mask: ['mask-image', '-webkit-mask-image'],
+            '-webkit-mask': ['-webkit-mask-image'],
+            transition: ['transition-property'],
+        };
+        const longhands = props => props.flatMap(([k, v]) => LONGHANDS[k] ? LONGHANDS[k].map(l => [l, v]) : [[k, v]]);
         const put = (node, props) => {
             let m = saved.get(node);
             if (!m) saved.set(node, m = new Map());
-            for (const [k, v] of props) {
+            for (const [k, v] of longhands(props)) {
                 if (!m.has(k)) m.set(k, { orig: node.style.getPropertyValue(k), prio: node.style.getPropertyPriority(k) });
                 node.style.setProperty(k, v, 'important');
                 m.get(k).ours = node.style.getPropertyValue(k);
@@ -385,7 +447,8 @@
                       ['visibility', 'visible'], ['opacity', '1'], ['object-fit', 'contain']];
         // A video inside the fullscreen container fills the screen but keeps the page's own stacking: the player's controls are its siblings
         // (or cousins), drawn by the page above it, and a video on top of them would punch its hole through them.
-        const FILL_IN = FILL.filter(([k]) => k !== 'z-index');
+        // Not forced visible either: a video the page keeps hidden (an idle ad element, a spare player) stays hidden.
+        const FILL_IN = FILL.filter(([k]) => !['z-index', 'visibility', 'opacity'].includes(k));
         const fillVideo = (v, el) => {
             const wasStatic = getComputedStyle(v).position === 'static';
             strip(v, el);
@@ -400,10 +463,11 @@
             }
         };
         // A video that is on the hardware plane and is the player's picture: not hidden, not empty, not a thumbnail by the page's own styles.
-        const mainPicture = v => {
+        const mainPicture = (v, thumbs = true) => {
             if (!v.isConnected || saved.has(v) || v.__wrenPolicy !== 'hw' || getComputedStyle(v).display === 'none') return false;
             const r = v.getBoundingClientRect();
-            return r.width > 0 && r.height > 0 && !(r.width <= 320 && r.height <= 180);
+            // At enter() the page's own size is the player's (a small player is still the main picture); later additions are judged by size too.
+            return r.width > 0 && r.height > 0 && !(thumbs && r.width <= 320 && r.height <= 180);
         };
         const isFrame = n => n.tagName === 'IFRAME' || n.tagName === 'FRAME';
         // While a container is fullscreen: a video the page puts into it (a player re-mounting its element, a new source element) is made
@@ -416,6 +480,7 @@
         // A video decided while a container is fullscreen (a new element, or one promoted to the hardware plane by the transition itself).
         onDecided = v => { if (emu.el && !(emu.el instanceof HTMLVideoElement) && !isFrame(emu.el) && mainPicture(v) && videosIn(emu.el).includes(v)) fillVideo(v, emu.el); };
         const enter = el => {
+            if (emu.el === el) return;           // already fullscreen: no swap, no second fullscreenchange
             const swap = !!emu.el;               // another element asks while one is fullscreen: switch, one change event, no exit
             if (swap) { restoreStyles(); emu.el = null; }
             emu.el = el;
@@ -426,7 +491,7 @@
             // A container: the page's own CSS (:fullscreen video { ... }) cannot match an emulated fullscreen, so its video is made to fill
             // the screen here too, and freed from its own trapping ancestors.
             if (!(el instanceof HTMLVideoElement) && !isFrame(el))
-                for (const v of videosIn(el)) if (v.isConnected && v.__wrenPolicy === 'hw') fillVideo(v, el);
+                for (const v of videosIn(el)) if (mainPicture(v, false)) fillVideo(v, el);
             put(el, FILL.concat([['background-color', '#000']]));
             if (watch) watch.disconnect();
             watch = new MutationObserver(muts => {
@@ -464,16 +529,42 @@
             else if (emu.el.parentNode !== emu.parent) { emu.parent = emu.el.parentNode; strip(emu.el); }
         }, 500);
         for (const name of ['pagehide', 'popstate', 'hashchange']) addEventListener(name, () => { if (emu.el) leave(); });
+        // Every element matching a selector in the document, through shadow roots.
+        const deepAll = sel => {
+            const out = [];
+            const walk = root => {
+                out.push(...root.querySelectorAll(sel));
+                for (const x of root.querySelectorAll('*')) { const s = shadowOf(x); if (s) walk(s); }
+            };
+            walk(document);
+            return out;
+        };
+        const frameMayFullscreen = frame => {
+            let origin = '';
+            try { origin = new URL(frame.getAttribute('src') || 'about:blank', location.href).origin; } catch (x) {}
+            for (const part of (frame.getAttribute('allow') || '').split(';')) {
+                const t = part.trim().split(/\s+/).filter(Boolean);
+                if (t[0] !== 'fullscreen') continue;
+                const list = t.slice(1);
+                return list.length === 0 || list.includes("'src'") || list.includes('*') || list.includes(origin);
+            }
+            if (frame.allowFullscreen || frame.hasAttribute('allowfullscreen') || frame.hasAttribute('webkitallowfullscreen')) return true;
+            try { return !!frame.contentDocument; } catch (x) { return false; }   // same origin: allowed by default
+        };
         addEventListener('message', e => {
             const d = e.data;
             if (!d || typeof d !== 'object' || !d.wrenFullscreen || e.source === window) return;
             if (d.wrenFullscreen === 'exit') { if (e.source === parent && emu.el) leave(); return; }
-            const frame = [...document.querySelectorAll('iframe, frame')].find(f => f.contentWindow === e.source);
+            const frame = deepAll('iframe, frame').find(f => f.contentWindow === e.source);
             if (!frame) return;
             if (d.wrenFullscreen === 'leave') { if (emu.el === frame) leave(); return; }
-            // 'enter': only with the user's activation, and only for a frame the page allowed to go fullscreen.
-            const allowed = frame.allowFullscreen || /\bfullscreen\b/.test(frame.getAttribute('allow') || '') || (() => { try { return !!frame.contentDocument; } catch (x) { return false; } })();
-            if (allowed && (!navigator.userActivation || navigator.userActivation.isActive)) enter(frame);
+            // 'enter': only with the user's activation, for the frame the user is in (it has the focus: an ad frame the user never touched
+            // cannot take the screen while the page itself has an activation), a frame that is laid out and visible, and one the page allowed to
+            // go fullscreen (the allow attribute parsed: allow="fullscreen 'none'" or a list without 'src'/'*'/its own origin says no).
+            if (!(navigator.userActivation && navigator.userActivation.isActive) || frame.getRootNode().activeElement !== frame) return;
+            const r = frame.getBoundingClientRect(), cs = getComputedStyle(frame);
+            if (r.width <= 0 || r.height <= 0 || cs.visibility === 'hidden' || cs.display === 'none') return;
+            if (frameMayFullscreen(frame)) enter(frame);
         }, true);
         for (const [name, value] of [['fullscreenElement', () => retarget(emu.el)], ['webkitFullscreenElement', () => retarget(emu.el)],
                                      ['webkitCurrentFullScreenElement', () => retarget(emu.el)], ['fullscreen', () => !!emu.el], ['webkitIsFullScreen', () => !!emu.el]]) {
@@ -482,6 +573,22 @@
                 Object.defineProperty(document, name, { configurable: true, get() { return emu.el ? value() : (original && original.get ? original.get.call(document) : null); } });
             } catch (e) {}
         }
+        // A shadow root answers for what is fullscreen inside its own tree (the element in that tree that is, or contains, the fullscreen one).
+        try {
+            const original = Object.getOwnPropertyDescriptor(ShadowRoot.prototype, 'fullscreenElement');
+            Object.defineProperty(ShadowRoot.prototype, 'fullscreenElement', { configurable: true, get() {
+                if (emu.el) {
+                    for (let n = emu.el; n;) {
+                        const r = n.getRootNode();
+                        if (r === this) return n;
+                        if (!(r instanceof ShadowRoot)) break;
+                        n = r.host;
+                    }
+                    return null;
+                }
+                return original && original.get ? original.get.call(this) : null;
+            } });
+        } catch (e) {}
         for (const name of ['requestFullscreen', 'webkitRequestFullscreen', 'webkitRequestFullScreen']) {
             const original = Element.prototype[name];
             if (!original) continue;
@@ -557,6 +664,9 @@
         const work = [];
         for (const v of allVideos()) {
             if (!v.isConnected || v.getAttribute('wren-policy') === 'page' || !policy.on) continue;
+            // Only the fullscreen element's own videos change with the transition (and, on the way out, those that were hardware only for it):
+            // a preview elsewhere on the page is not reloaded onto the single decoder beside the main video.
+            if (v.getAttribute('wren-policy') !== 'fullscreen' && !inFullscreen(v)) continue;
             // An MSE stream (blob: source) cannot be reloaded: load() detaches its MediaSource and the site's player breaks.
             // It keeps the player it started with; the new decision applies on its next natural load.
             if (String(v.currentSrc || v.src || '').startsWith('blob:')) { log({ reload: false, reason: 'mse' }); continue; }
@@ -572,6 +682,20 @@
     for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener(ev, onFullscreenChange, true);
     // A muted video in the page that is unmuted (a preview the user turns the sound on for) is decided again: with sound it belongs on the
     // hardware plane, so it is reloaded there at its media time, as for a fullscreen transition (not an MSE stream: it cannot be reloaded).
+    // The size the first decision saw may have been before layout (a 300x150 default, a detached element): once the media is known, the
+    // element is measured again, once, and a changed answer is applied like a fullscreen transition's (reload at its media time).
+    document.addEventListener('loadedmetadata', e => {
+        const v = e.target;
+        if (!(v instanceof HTMLVideoElement) || !policy.on || v.__wrenRechecked || !v.__wrenDecided || v.getAttribute('wren-policy') === 'page') return;
+        v.__wrenRechecked = true;
+        const area = boxArea(v);
+        if (area === v.__wrenBox) return;
+        v.__wrenBox = area;
+        if (String(v.currentSrc || v.src || '').startsWith('blob:')) { log({ reload: false, reason: 'mse' }); return; }
+        const running = v.__wrenPolicy;
+        decide(v);
+        if (v.__wrenPolicy !== running) transition(v);
+    }, true);
     document.addEventListener('volumechange', e => {
         const v = e.target;
         if (!(v instanceof HTMLVideoElement) || !policy.on || v.muted || v.volume === 0) return;
@@ -599,7 +723,19 @@
     {
         const mk = HTMLMediaElement.prototype.setMediaKeys;
         if (mk) HTMLMediaElement.prototype.setMediaKeys = function (keys) {
-            if (keys) { this.__wrenEmeActive = true; try { this.setAttribute('wren-policy', 'protected'); } catch (e) {} }
+            if (keys) {
+                this.__wrenEmeActive = true;
+                if (this instanceof HTMLVideoElement && policy.on && this.getAttribute('wren-policy') !== 'page') {
+                    // Keys set after the first decision: decide again now, before the player starts (the attribute is read once at start), and
+                    // reload a running software player at its media time (not an MSE stream: it cannot be reloaded).
+                    const running = this.__wrenPolicy;
+                    decide(this);
+                    const blob = String(this.currentSrc || this.src || '').startsWith('blob:');
+                    if (running === 'sw' && this.__wrenPolicy === 'hw' && !blob && (this.currentSrc || this.getAttribute('src') || this.querySelector('source'))) transition(this);
+                } else {
+                    try { this.setAttribute('wren-policy', 'protected'); } catch (e) {}
+                }
+            }
             return mk.apply(this, arguments);
         };
     }

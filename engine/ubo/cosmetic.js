@@ -21,24 +21,31 @@
     // One style element for everything we hide, kept in the document if a page script removes it.
     const style = document.createElement('style');
     style.setAttribute('data-wren', '');
-    let sheet = data.css || '';
+    const sheet = data.css || '';
+    // New rules go into a style element of their own: reassigning the text of one ever-growing sheet re-parses all of it and restyles the
+    // whole page for every batch.
+    const styles = [style];
     const placeStyle = () => {
         const parent = document.head || document.documentElement;
         if (!parent) return false;
-        if (style.parentNode !== parent) parent.appendChild(style);
+        for (const s of styles) if (s.parentNode !== parent) parent.appendChild(s);
         if (style.textContent !== sheet) style.textContent = sheet;
         return true;
     };
     const addRules = css => {
         if (!css) return;
-        sheet += css;
+        const s = document.createElement('style');
+        s.setAttribute('data-wren', '');
+        s.textContent = css;
+        styles.push(s);
         placeStyle();
     };
 
     // Generic hiding: ask for the rules of classes and ids not seen yet in this document.
     const seenClasses = new Set(), seenIds = new Set();
     let pendingClasses = [], pendingIds = [];
-    const collect = root => {
+    // deep: also the subtree (added nodes). An attribute change concerns the element itself only: a class toggled on <body> must not walk the document.
+    const collect = (root, deep = true) => {
         if (data.generichide || !root || root.nodeType !== 1) return;
         const visit = el => {
             if (el.id && !seenIds.has(el.id)) { seenIds.add(el.id); pendingIds.push(el.id); }
@@ -49,6 +56,7 @@
             }
         };
         visit(root);
+        if (!deep) return;
         const all = root.querySelectorAll('[id],[class]');
         for (let i = 0; i < all.length; i++) visit(all[i]);
     };
@@ -61,24 +69,31 @@
     };
 
     // Procedural filters (uBO's :has-text, :upward, :matches-css, :xpath, ... and :remove/:style actions).
-    const textMatcher = arg => {
+    // exact: a plain value must equal the whole string (:matches-css, :matches-attr, as uBO); :has-text and the like look for it inside.
+    const textMatcher = (arg, exact) => {
         const m = /^\/(.+)\/([imsu]*)$/.exec(arg);
         if (m) { try { const re = new RegExp(m[1], m[2]); return s => re.test(s); } catch (e) { return null; } }
-        return s => s.includes(arg);
+        return exact ? s => s === arg : s => s.includes(arg);
     };
     const pairMatcher = arg => {
         // name: value  (matches-css)  or  "name"="value"  (matches-attr); either side may be /regex/.
         const m = /^\s*"?(.+?)"?\s*[:=]\s*"?(.*?)"?\s*$/.exec(arg);
         if (!m) return null;
-        return [textMatcher(m[1]) || (() => false), m[2] === '' ? () => true : (textMatcher(m[2]) || (() => false))];
+        return [textMatcher(m[1], true) || (() => false), m[2] === '' ? () => true : (textMatcher(m[2], true) || (() => false))];
     };
     const ops = {
         'css-selector': (nodes, arg, first) => {
             if (first) return Array.from(document.querySelectorAll(arg));
             const out = [];
+            const sibling = /^\s*[+~]/.test(arg);
             const relative = /^\s*[>]/.test(arg) || /^\s/.test(arg);
             for (const n of nodes) {
-                if (relative) out.push(...n.querySelectorAll(':scope' + arg));
+                if (sibling) {
+                    // A sibling combinator after an operator: querySelectorAll only finds descendants, so ask the parent about the marked node.
+                    if (!n.parentElement) continue;
+                    n.setAttribute('data-wren-ctx', '');
+                    try { out.push(...n.parentElement.querySelectorAll('[data-wren-ctx]' + arg.trim())); } finally { n.removeAttribute('data-wren-ctx'); }
+                } else if (relative) out.push(...n.querySelectorAll(':scope' + arg));
                 else if (n.matches(arg)) out.push(n);
             }
             return out;
@@ -122,11 +137,19 @@
         for (const f of procedural) {
             let nodes = [];
             let ok = true;
-            f.selector.forEach((op, i) => {
+            let first = true;      // no node set yet: the next selector starts from the document
+            f.selector.forEach(op => {
                 if (!ok) return;
                 const fn = ops[op.type];
                 if (!fn) { ok = false; return; }
-                try { nodes = fn(nodes, op.arg, i === 0); } catch (e) { ok = false; }
+                // :matches-path(...) first is a condition on the page, not on nodes: it gates the rest of the filter.
+                if (op.type === 'matches-path' && first) {
+                    const t = textMatcher(op.arg);
+                    if (!t || !t(location.pathname + location.search)) ok = false;
+                    return;
+                }
+                try { nodes = fn(nodes, op.arg, first); } catch (e) { ok = false; }
+                first = false;
             });
             if (!ok) continue;
             const action = f.action;
@@ -146,11 +169,13 @@
 
     // Work in batches: at most every 100 ms while the document changes.
     let scheduled = false;
+    // The procedural filters run again only when nodes were added or an element's class/id changed (not for every mutation of the page).
+    let needProcedural = true;
     const run = () => {
         scheduled = false;
         placeStyle();
         flushGeneric();
-        if (procedural.length) runProcedural();
+        if (procedural.length && needProcedural) { needProcedural = false; runProcedural(); }
     };
     const schedule = () => {
         if (scheduled) return;
@@ -159,10 +184,10 @@
     };
     const observer = new MutationObserver(records => {
         for (const r of records) {
-            if (r.type === 'attributes') collect(r.target);
-            else for (const n of r.addedNodes) collect(n);
+            if (r.type === 'attributes') { collect(r.target, false); if (r.target !== document.documentElement && r.target !== document.body) needProcedural = true; }
+            else if (r.addedNodes.length) { needProcedural = true; for (const n of r.addedNodes) collect(n); }
             if (r.type === 'childList' && r.removedNodes.length) {
-                for (const n of r.removedNodes) if (n === style) { schedule(); break; }
+                for (const n of r.removedNodes) if (styles.includes(n)) { schedule(); break; }
             }
         }
         schedule();
@@ -182,6 +207,6 @@
     };
     const boot = () => { if (!attach()) setTimeout(boot, 10); };
     boot();
-    addEventListener('DOMContentLoaded', () => { attach(); collect(document.documentElement); run(); }, true);
-    addEventListener('load', () => { attach(); schedule(); }, true);
+    addEventListener('DOMContentLoaded', () => { attach(); collect(document.documentElement); needProcedural = true; run(); }, true);
+    addEventListener('load', () => { attach(); needProcedural = true; schedule(); }, true);
 })();
