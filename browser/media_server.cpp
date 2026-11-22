@@ -587,6 +587,8 @@ void MediaServer::serve(int fd, uint64_t id) {
     // before a retry or recovery reloaded the pipeline, was lost: the video played under a paused element.
     bool paused_state = false;
     bool loaded_once = false;  // reader thread: do_load ran for this stream (its areas without an owner no longer make a hole)
+    WpebMediaArea last_area{};  // reader thread: this stream's newest AREA, posted again when it takes the decoder
+    bool have_area = false;
 
     bool force_ndl = false;  // the last attempt after LG's pipeline failed to start: the Starfish backend's decoder
     int retries = 0;
@@ -637,7 +639,13 @@ void MediaServer::serve(int fd, uint64_t id) {
         use_lg_ = ndl_loaded_ = false;
         owner_ = id;
         loaded_once = true;
-        if (hole_id_.load() != id) clear_hole();  // another stream's rectangle no longer applies (this one's AREA may precede its Load)
+        if (hole_id_.load() != id) clear_hole();
+        if (have_area) {
+            // Its areas were kept back while another stream owned the plane (see WPEB_MEDIA_AREA): its newest one makes its hole now (a static
+            // page sends no other).
+            std::lock_guard<std::mutex> al(area_mu_);
+            pending_ = PendingArea{last_area, id, Clock::now(), ++pending_seq_, true, false};
+        }  // another stream's rectangle no longer applies (this one's AREA may precede its Load)
         units = 0;
         full_waits = 0;
         const bool with_audio = audio_state == AudioState::Hardware;
@@ -957,6 +965,12 @@ void MediaServer::serve(int fd, uint64_t id) {
             // Not applied here: the UI commits the newest rectangle together with the page frame it draws
             // (commit_area), so the plane, the hole and the picture move in the same frame instead of the plane
             // running ahead of the page by one engine frame.
+            last_area = a;
+            have_area = true;
+            // One pending slot for all streams: another stream's area would overwrite the owner's newest one and then be dropped by
+            // commit_area (on a static page the plane and the hole stayed in the old place). It is kept for this stream's own Load.
+            const uint64_t owner = owner_.load();
+            if (owner != 0 && owner != id) break;
             std::lock_guard<std::mutex> al(area_mu_);
             pending_ = PendingArea{a, id, Clock::now(), ++pending_seq_, true, !loaded_once};
 
