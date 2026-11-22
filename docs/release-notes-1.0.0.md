@@ -17,7 +17,7 @@ Versions: Robin 1.0.0, based on Wren 0.3.3, WPE WebKit 2.54.3.
   hardware video ([engine64.md](engine64.md)). The 32-bit engine is the default.
 - A small launcher that picks the engine at start.
 - Fixes for black pages in direct mode with WebKit 2.54. Black-picture starts on static pages: 9 of 62 launches before
-  the fix, 0 of 30 with it.
+  the fix, 0 of 40 with it.
 - The shared-memory path skips frames identical to the last one sent.
 
 ### Video
@@ -28,6 +28,9 @@ Versions: Robin 1.0.0, based on Wren 0.3.3, WPE WebKit 2.54.3.
 - The video plane follows the page's scroll, and a video partly off screen is cropped (direct mode on the tested CX).
 - Emulated fullscreen for hardware video, including iframe players.
 - Several fixes for which stream owns the decoder when two tabs play video.
+- Two hardware videos on one page: a video that is not playing can no longer take the picture from the one that is.
+- At most two small videos are decoded in software at once, and none above 720p. Others are stopped until you
+  start them. A news page with four autoplaying background videos went from about 700 MB to about 360 MB.
 
 ### Ad blocking
 
@@ -42,7 +45,7 @@ Versions: Robin 1.0.0, based on Wren 0.3.3, WPE WebKit 2.54.3.
 ### Memory
 
 - Memory limits for the web and network processes. A full-length streaming video on default settings played to its
-  end with the web process peaking at 683 MB against an 832 MB limit.
+  end with the web process peaking at 511 MB against an 832 MB limit.
 - No back/forward page cache by default.
 - The kill check compares resident memory, and a short spike no longer kills the web process (it needs several polls
   in a row).
@@ -81,12 +84,12 @@ The full list is in the [README](../README.md#limits).
 ## Tested hardware
 
 LG CX, webOS 5.3, kernel 4.4.84, about 2.7 GB of RAM. Measurements in these notes are from this TV with the
-development package of 2026-11-22.
+packages of 2026-11-22.
 
 ## Install size
 
-About 230 MB to download, about 546 MB installed, and roughly 380 MB free on the TV's app storage while the installer
-runs. The size is two engines in one package ([building.md](building.md#size)).
+About 230 MB to download and about 550 MB installed. Have about 800 MB free on the TV's app storage before you start:
+an install that runs out of space leaves an app that will not open. The size is two engines in one package ([building.md](building.md#size)).
 
 ## Files in this release
 
