@@ -1,4 +1,4 @@
-# Building Wren
+# Building Robin
 
 This is the build the fork's release package comes from. It is long and needs a lot of disk. Upstream
 planned about 30 GB for the 32-bit engine alone. This fork builds two engines and a private WebKit copy, so plan
@@ -68,6 +68,11 @@ OVERLAY="engine/ubo tools" bash tools/package-release.sh all    # testing only: 
 
 Output: `build/release/*.ipk`, `MD5SUMS` and `BUILD-INFO.txt` (commit, WebKit library md5, inputs used).
 
+Build parameters: `APP_ID_BASE` (default `io.github.mihai2mn.robin`; the dev id adds `.dev`), `SOURCE_REPO` (default
+`https://github.com/mihai2mn/robin-webos`), `RELEASE_TAG` and `SOURCE_URL` (where the source is published; written into
+`licenses/SOURCE.txt`), and the version, which is the one line of the `VERSION` file at the repository root (also read by
+`browser/CMakeLists.txt`, so appinfo, the About screen and the ipk name agree).
+
 **Inputs it does not build itself** (each has its own script above):
 
 | Variable | What | Default |
@@ -105,7 +110,7 @@ Output: `build/release/*.ipk`, `MD5SUMS` and `BUILD-INFO.txt` (commit, WebKit li
 13. `publish` (part of `all`): runs `check`, then replaces the old ipks, `MD5SUMS` and `BUILD-INFO.txt` in `$OUT`.
 11. `sums`: `MD5SUMS` and `BUILD-INFO.txt`.
 
-The `dev` id (`org.sostk.wpebrowser.dev`) installs next to the real app for testing.
+The `dev` id (`io.github.mihai2mn.robin.dev`) installs next to the real app for testing.
 
 ## The UI alone
 
@@ -146,8 +151,8 @@ from the same place (GPL-3.0 section 6). For a GitHub release, do all of this:
    environment. `package-release.sh` hands it to the kit, which writes it into `licenses/SOURCE.txt`. Without it the
    file says the source is not set.
 3. **Attach a source archive that includes the app kit.** GitHub's automatic source archive leaves out submodules.
-   Make one: `git archive --prefix=wren-<tag>/ -o wren-<tag>-source.tar <tag>`, then append the kit at the commit
-   `BUILD-INFO.txt` lists as `kit` (`git -C third_party/webos-native-app-kit archive --prefix=wren-<tag>/third_party/webos-native-app-kit/ <kit commit>`),
+   Make one: `git archive --prefix=robin-<tag>/ -o robin-<tag>-source.tar <tag>`, then append the kit at the commit
+   `BUILD-INFO.txt` lists as `kit` (`git -C third_party/webos-native-app-kit archive --prefix=robin-<tag>/third_party/webos-native-app-kit/ <kit commit>`),
    and compress it.
 4. **Say how the engine was built.** The release text should list: the toolchain (`toolchain/ct-ng.defconfig`, GCC 14.2,
    glibc 2.28), Buildroot commit `cdd3776b` with `buildroot-external/`, WPE WebKit **2.54.3** (the tarball from
@@ -160,6 +165,7 @@ from the same place (GPL-3.0 section 6). For a GitHub release, do all of this:
 6. **Attach the filter list snapshot.** `tools/ubo/update.py` downloads whatever the lists say on the build day, and
    they are not pinned. Attach the `lists/` it produced and the `ubo/COMMIT` file as `filter-lists-<date>.tar.xz`.
 7. **Attach `MD5SUMS` and `BUILD-INFO.txt`** with the ipks. `BUILD-INFO.txt` holds no local paths.
-8. **Fix the licence gaps** listed at the end of [NOTICE.md](../NOTICE.md) first.
+8. **Check the licence material.** `check` fails when the source address, the WebKit manifest, the Mesa and LLVM
+   licences or the ad blocker notices are missing (see [NOTICE.md](../NOTICE.md#package-licence-material)).
 
 The check is simple: someone with only the release page should be able to rebuild what the ipk contains.

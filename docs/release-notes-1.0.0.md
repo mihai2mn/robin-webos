@@ -1,20 +1,21 @@
-# Release notes: 0.3.3-cx1
+# Robin 1.0.0 release notes
 
-A release of the Wren fork for the LG CX. It is built on upstream Wren 0.3.3 and keeps that version number in the
-package file names. The release label `cx1` says it is the first build of this fork. It was tested on one LG CX with
-webOS 5.3. Read [README.md](../README.md) for what this fork is and how it relates to upstream.
+Robin is a web browser for rooted LG webOS TVs, based on Wren 0.3.3 by sostk
+([upstream](https://github.com/sostk/webos-wpe-browser)). This is its first release. It was tested on one LG CX with
+webOS 5.3. Read [README.md](../README.md) for what Robin is and how it relates to Wren.
 
-## What is new over upstream 0.3.3
+Versions: Robin 1.0.0, based on Wren 0.3.3, WPE WebKit 2.54.3.
+
+## What is new over Wren 0.3.3
 
 ### Engine
 
-- WPE WebKit **2.54.3** instead of 2.50.5, with a series of 25 patches, numbered
-  0001 to 0027 ([patches.md](patches.md)).
+- WPE WebKit **2.54.3** instead of 2.50.5, with a series of 25 patches, numbered 0001 to 0027 ([patches.md](patches.md)).
 - WebKit 2.54 turns the JIT off on every 32-bit build. The series brings back the ARMv7 Baseline JIT and DFG on the
   TV's 32-bit softfp userland ([jit-armv7.md](jit-armv7.md)). The RegExp JIT stays off.
 - An optional **64-bit (aarch64) engine** in the same package. It has the 64-bit JIT, draws in software and has no
   hardware video ([engine64.md](engine64.md)). The 32-bit engine is the default.
-- A small static launcher that picks the engine at start.
+- A small launcher that picks the engine at start.
 - Fixes for black pages in direct mode with WebKit 2.54. Black-picture starts on static pages: 9 of 62 launches before
   the fix, 0 of 30 with it.
 - The shared-memory path skips frames identical to the last one sent.
@@ -51,27 +52,29 @@ webOS 5.3. Read [README.md](../README.md) for what this fork is and how it relat
 
 - Remote media keys (play, pause, stop, rewind and fast-forward by 10 s) act on the page's main video.
 - Page zoom is remembered per site. Clearing all history forgets it.
-- Test pages and tools: `tools/tvdrive` drives a dev copy from a PC.
 
-### Packaging
+### Branding and packaging
 
+- New name, icon and accent colour. New app ids: `io.github.mihai2mn.robin` and `io.github.mihai2mn.robin.dev`
+  (shown as "Robin" and "Robin Test"). They install **beside** Wren and do not replace it.
 - `tools/package-release.sh` builds both ipks from a clean clone of a commit and checks them (ELF machine and
-  interpreter, needed libraries, ids, versions). It writes `MD5SUMS` and `BUILD-INFO.txt`.
-- Two ids: `org.sostk.wpebrowser` (replaces an installed upstream Wren) and `org.sostk.wpebrowser.dev` (installs
-  beside it).
-- The build is not bit-for-bit reproducible: the toolchain image, the filter lists and the staged base are not pinned.
+  interpreter, needed libraries, ids, versions, licence files). It writes `MD5SUMS` and `BUILD-INFO.txt`.
+  The build is not bit-for-bit reproducible: the toolchain image, the filter lists and the staged base are not pinned.
+- The package carries its licence material: `licenses/SOURCE.txt` names the source and commit, `engine/licenses/`
+  and `engine64/licenses/` (Mesa and LLVM too) cover the engine libraries, `licenses/ad-blocker/` covers the ad blocker
+  and the filter lists.
+- Tools for working on a rooted TV: `tools/tvdrive` drives a test copy from a PC.
 
 ## Known limits
 
-- One TV model was tested. Other models and webOS versions are untested by this fork.
+- One TV model was tested. Other models and webOS versions are untested.
 - Audio is not confirmed by ear. The logs show the calls reaching LG's pipeline.
 - The RegExp JIT is off on the 32-bit engine.
 - The 64-bit engine is software rendered, shared-memory only and slower to load (Wikipedia 8.2 s against 4.7 s).
 - One hardware video at a time.
 - The package is large (below).
-- Widevine is at software security level and was not tested by this fork.
+- Widevine is at software security level and was not tested with Robin.
 - An overlay with a high z-index can cover an emulated-fullscreen video.
-- The in-app "Report a problem" row shows upstream's issue address. Do not use it for this fork.
 
 The full list is in the [README](../README.md#limitations-and-known-issues).
 
@@ -87,16 +90,29 @@ runs. The size is two engines in one package ([building.md](building.md#size)).
 
 ## Files in this release
 
-- `org.sostk.wpebrowser_0.3.3_arm.ipk` and `org.sostk.wpebrowser.dev_0.3.3_arm.ipk`
+- `io.github.mihai2mn.robin_1.0.0_arm.ipk` and `io.github.mihai2mn.robin.dev_1.0.0_arm.ipk`
 - `MD5SUMS`
 - `BUILD-INFO.txt`: the commit, the WebKit library checksum, the app kit commit
 - Source: see [What a release must attach or link](building.md#what-a-release-must-attach-or-link)
 
-## Going back to upstream
+## Keeping your Wren data
 
-1. Remove this fork from the TV (the Homebrew Channel or `ares-install -d <device> -r org.sostk.wpebrowser`).
-2. Install upstream's release from [sostk/webos-wpe-browser](https://github.com/sostk/webos-wpe-browser).
+Robin starts with an empty profile, because a profile lives in a folder named after the app id. If you used Wren on the
+same TV and want its bookmarks, history, zoom levels and ad blocker settings, copy its folder once. Close both apps
+first. Run this on a PC (`<tv>` is your TV's ssh host; the folder is normally in `/media/developer`):
 
-Both use the app id `org.sostk.wpebrowser`, so installing upstream's ipk over this one also works. Bookmarks and
-history live in the app's data folder. Whether upstream's build reads that folder unchanged was not tested. If it
-misbehaves, remove the app first. If you installed the dev id, remove `org.sostk.wpebrowser.dev` too.
+```sh
+ssh root@<tv> 'find / -maxdepth 3 -name "org.sostk.wpebrowser.data" -not -path "/proc/*" 2>/dev/null'   # shows where it is
+ssh root@<tv> 'cd /media/developer && cp -a org.sostk.wpebrowser.data io.github.mihai2mn.robin.data'
+```
+
+If the first command prints another folder, use that one in the second. Do this before the first start of Robin, or
+delete Robin's own folder first (`rm -rf io.github.mihai2mn.robin.data` in the same place). Use
+`org.sostk.wpebrowser.dev.data` and `io.github.mihai2mn.robin.dev.data` for the test copy. The copy leaves Wren's folder
+untouched. This was written down, not run on a TV.
+
+## Going back to Wren
+
+Robin and Wren are separate apps. To use Wren again, open it. To remove Robin, use the Homebrew Channel or
+`ares-install -d <device> -r io.github.mihai2mn.robin` (and `io.github.mihai2mn.robin.dev` if you installed it). Wren's
+data was never touched. Get Wren from [upstream](https://github.com/sostk/webos-wpe-browser).

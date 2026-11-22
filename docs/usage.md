@@ -1,8 +1,8 @@
-# Using Wren
+# Using Robin
 
 ## The remote
 
-Wren works with the arrows, OK and Back of any LG remote; colour keys are optional shortcuts.
+Robin works with the arrows, OK and Back of any LG remote; colour keys are optional shortcuts.
 
 | Key | Does |
 |---|---|
@@ -21,14 +21,14 @@ The panel stays at the top and the page starts below it, as in a desktop browser
 below) take the whole screen; there the panel comes back with Hold OK → **Toolbar**, or by resting the pointer at the
 top edge.
 
-**TV mode:** on TV web apps (a `tv.` host or a `/tv` path, such as YouTube's TV app) Wren hides its panel and
+**TV mode:** on TV web apps (a `tv.` host or a `/tv` path, such as YouTube's TV app) Robin hides its panel and
 progress line so the page fills the screen. Hold OK → **Toolbar** brings the tabs back. youtube.com links open
 YouTube's TV app; the engine variable `WPE_BROWSER_DESKTOP_YOUTUBE=1` keeps the desktop site.
 
 ## Media keys
 
 The remote's media keys act on the page's **main video**, so they work with players that have no remote support of
-their own. Wren picks the video like this: the one inside the fullscreen element if there is one; otherwise, among the
+their own. Robin picks the video like this: the one inside the fullscreen element if there is one; otherwise, among the
 videos with media (also in same-origin iframes and open shadow roots), a playing video that is not a small muted
 preview first, then a visible, unmuted or large one; an `<audio>` element only if the page has no video. A seek stops at the
 start and at the end (or the seekable range of a live stream). The space bar of a
@@ -36,7 +36,7 @@ keyboard is never a media key: it stays with the page.
 
 ## Zoom per site
 
-Hold OK → **Zoom** (or Menu → zoom) changes the zoom of the **site you are on**, and Wren remembers it for that host.
+Hold OK → **Zoom** (or Menu → zoom) changes the zoom of the **site you are on**, and Robin remembers it for that host.
 The panel says "Remembered for <host>". Pages without a host (the home page) use the default zoom, which is shown as
 "Default for sites without their own zoom". The zoom is applied again when a page of that site loads, in any tab.
 
@@ -45,7 +45,7 @@ The zooms are stored in `zooms.json` in the profile folder (up to 500 sites). Be
 
 ## Launch parameters
 
-`ares-launch -d <device> org.sostk.wpebrowser -p '<json>'`:
+`ares-launch -d <device> io.github.mihai2mn.robin -p '<json>'`:
 
 | Parameter | Effect |
 |---|---|
@@ -60,16 +60,16 @@ The zooms are stored in `zooms.json` in the profile folder (up to 500 sites). Be
 
 ## Logs
 
-On the TV, in `/tmp/org.sostk.wpebrowser/` (cleared when the TV restarts):
+On the TV, in `/tmp/io.github.mihai2mn.robin/` (cleared when the TV restarts):
 
 - `engine.log`: the web engine, this run; `engine.prev.log`: the run before (the crash, if the app was reopened)
 - `events.log`: the interface
 
-**Settings → Help and feedback → Save logs to USB** writes all three to a USB drive as `wren-logs-<date>.txt`, with
+**Settings → Help and feedback → Save logs to USB** writes all three to a USB drive as `robin-logs-<date>.txt`, with
 query strings and fragments cut from web addresses. On a rooted TV they can also be fetched over SSH:
 
 ```sh
-ssh root@<tv-ip> 'cd /tmp/org.sostk.wpebrowser && tail -c 1500000 engine.log engine.prev.log events.log' > wren-logs.txt
+ssh root@<tv-ip> 'cd /tmp/io.github.mihai2mn.robin && tail -c 1500000 engine.log engine.prev.log events.log' > robin-logs.txt
 ```
 
 The logs list the addresses of pages you visited; read them before posting them publicly.

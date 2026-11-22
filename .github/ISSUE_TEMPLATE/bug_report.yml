@@ -1,16 +1,16 @@
 name: Bug report
-description: Something doesn't work in Wren on your TV
+description: Something doesn't work in Robin on your TV
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing Wren! The logs help most. To save them:
+        Thanks for testing Robin! The logs help most. To save them:
 
-        1. **Don't turn off the TV**: the logs are cleared when it restarts. If Wren crashed, open it again first.
+        1. **Don't turn off the TV**: the logs are cleared when it restarts. If Robin crashed, open it again first.
         2. Plug a USB drive into the TV.
-        3. In Wren, **hold OK** and choose **Settings** (or press the Green button, then Settings). Under **Help and feedback**, choose **Save logs to USB**.
-        4. A message names the file (`wren-logs-….txt`). Attach that file below.
+        3. In Robin, **hold OK** and choose **Settings** (or press the Green button, then Settings). Under **Help and feedback**, choose **Save logs to USB**.
+        4. A message names the file (`robin-logs-….txt`). Attach that file below.
 
         Web addresses in the file keep only the site and page path. Search terms and tokens are removed. The file still shows which sites you visited, so please read it before you attach it.
   - type: input
@@ -31,8 +31,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Wren version
-      description: Wren → Settings → About Wren
+      label: Robin version
+      description: Robin → Settings → About Robin
       placeholder: e.g. 0.3.0
     validations:
       required: true
@@ -53,7 +53,7 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Drag the wren-logs-….txt file here. If you have no USB drive, say so.
+      description: Drag the robin-logs-….txt file here. If you have no USB drive, say so.
   - type: dropdown
     id: root
     attributes:
