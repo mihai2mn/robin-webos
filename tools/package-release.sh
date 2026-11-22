@@ -132,7 +132,7 @@ do_backend() {
 # file) is an error here: it is never read as "0 differing".
 wk_diff() {
     local pr=$1 c=$2 out rc=0 line d n
-    out=$(LC_ALL=C diff -rq "$pr" "$c" 2>"$WORK/wk-diff.err") || rc=$?
+    out=$(LC_ALL=C diff -rq --no-dereference "$pr" "$c" 2>"$WORK/wk-diff.err") || rc=$?
     [ "$rc" -le 1 ] || { echo "diff exit $rc: $(head -3 "$WORK/wk-diff.err")" >&2; return 2; }
     out=$(printf '%s\n' "$out" | grep -a -e '^Files ' -e "^Only in $pr" || true)
     while IFS= read -r line; do
