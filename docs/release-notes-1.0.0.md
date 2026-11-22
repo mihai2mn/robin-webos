@@ -98,18 +98,23 @@ runs. The size is two engines in one package ([building.md](building.md#size)).
 ## Keeping your Wren data
 
 Robin starts with an empty profile, because a profile lives in a folder named after the app id. If you used Wren on the
-same TV and want its bookmarks, history, zoom levels and ad blocker settings, copy its folder once. Close both apps
-first. Run this on a PC (`<tv>` is your TV's ssh host; the folder is normally in `/media/developer`):
+same TV and want its bookmarks, history, zoom levels, cookies and ad blocker settings, copy its folder once.
+
+Start Robin once and close it, so that its own folder exists. Close Wren too. Then run this on a PC (`<tv>` is your
+TV's ssh host):
 
 ```sh
-ssh root@<tv> 'find / -maxdepth 3 -name "org.sostk.wpebrowser.data" -not -path "/proc/*" 2>/dev/null'   # shows where it is
-ssh root@<tv> 'cd /media/developer && cp -a org.sostk.wpebrowser.data io.github.mihai2mn.robin.data'
+ssh root@<tv> 'cd /media/developer &&
+  owner=$(stat -c %u:%g io.github.mihai2mn.robin.data) &&
+  mv io.github.mihai2mn.robin.data io.github.mihai2mn.robin.data.empty &&
+  cp -a org.sostk.wpebrowser.data io.github.mihai2mn.robin.data &&
+  chown -R "$owner" io.github.mihai2mn.robin.data && chmod 700 io.github.mihai2mn.robin.data'
 ```
 
-If the first command prints another folder, use that one in the second. Do this before the first start of Robin, or
-delete Robin's own folder first (`rm -rf io.github.mihai2mn.robin.data` in the same place). Use
-`org.sostk.wpebrowser.dev.data` and `io.github.mihai2mn.robin.dev.data` for the test copy. The copy leaves Wren's folder
-untouched. This was written down, not run on a TV.
+The `chown` matters. webOS runs each app under its own user, and Robin ignores a profile folder it does not own and
+starts empty instead. The copy leaves Wren's folder untouched. When Robin shows your bookmarks, you can delete
+`io.github.mihai2mn.robin.data.empty`. This was run on the tested CX: 5 bookmarks, 93 history entries and 5 open tabs
+came across.
 
 ## Going back to Wren
 
