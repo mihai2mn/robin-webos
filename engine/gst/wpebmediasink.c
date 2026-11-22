@@ -741,8 +741,14 @@ static gboolean wpeb_video_sink_stop(GstBaseSink *sink)
     return TRUE;
 }
 
+/* The videos of this process decide one after the other whether to take the page's window (set_caps) and open it: two videos
+ * of a page preroll within milliseconds of each other, and each asked "is the window taken?" before the other's existed, so
+ * both opened, the second open closed the first one's window and the loser's LOAD (without a window) still took LG's decoder
+ * (TV, 2026-11-22). Held across the question and the open (and the LOAD); taken before any other lock of a sink. */
+static GMutex g_open_lock;
+
 /* Opens the page's video window (or keeps the one this sink has), places it and sends the LOAD. Streaming thread: set_caps, or
- * render() for a load that waited (see set_caps). */
+ * render() for a load that waited (see set_caps). g_open_lock held. */
 static gboolean load_video(WpebVideoSink *self, WpebMediaLoad load, int width, int height)
 {
     /* have_window and vid are written by this thread and stop(), and read by area_painted on WebKit's main thread: the id is
@@ -860,6 +866,7 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
         GST_INFO_OBJECT(self, "HDR (transfer %u)%s%s", load.hdr.transfer, load.hdr.has_mastering ? ", mastering display" : "",
                         load.hdr.has_light_level ? ", light level" : "");
     video_window_init();
+    g_mutex_lock(&g_open_lock);
     /* Two hardware videos on one page: a video that is not playing does not take the page's window and LG's decoder from the
      * one that has them (the UI gives the decoder to the newest LOAD, and an open closes the page's window): its LOAD waits
      * for its first played unit (render), when the newest playing video takes over. A lone video, or one in another tab (not
@@ -871,10 +878,13 @@ static gboolean wpeb_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
         self->deferred = TRUE;
         self->deferred_width = width;
         self->deferred_height = height;
+        g_mutex_unlock(&g_open_lock);
         return TRUE;
     }
     self->deferred = FALSE;
-    return load_video(self, load, width, height);
+    const gboolean ok = load_video(self, load, width, height);
+    g_mutex_unlock(&g_open_lock);
+    return ok;
 }
 
 /* Whether the stream collection (decodebin3 forwards it downstream) has an audio stream: -1 unknown. */
@@ -921,7 +931,10 @@ static GstFlowReturn wpeb_video_sink_render(GstBaseSink *sink, GstBuffer *buffer
          * takes the page's window and LG's decoder (see set_caps). */
         self->deferred = FALSE;
         GST_INFO_OBJECT(self, "playing: taking the page's video window and LG's decoder");
-        if (!load_video(self, self->load, self->deferred_width, self->deferred_height)) {
+        g_mutex_lock(&g_open_lock);
+        const gboolean loaded = load_video(self, self->load, self->deferred_width, self->deferred_height);
+        g_mutex_unlock(&g_open_lock);
+        if (!loaded) {
             GST_ELEMENT_ERROR(self, RESOURCE, WRITE, ("Hardware video service lost"), (NULL));
             return GST_FLOW_ERROR;
         }
