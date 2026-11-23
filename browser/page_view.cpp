@@ -277,19 +277,81 @@ bool PageView::to_page(wnk::Point l, int32_t &x, int32_t &y) const {
 void PageView::ime(wnk::ui::Ui &ui, bool focused) {
     if (focused && !editing_) {
         editing_ = true;
+        ime_run_.clear();
         ui.begin_text_input(this);
     } else if (!focused && editing_) {
         editing_ = false;
+        ime_run_.clear();
         ui.end_text_input(this);
     }
 }
 
-bool PageView::on_text(wnk::ui::Ui &, const std::string &utf8) {
+// How long after a click/OK a field's focus counts as the viewer's doing.
+static constexpr double kUserFocusWindowMs = 1500;
+// After a click/OK on the page with a field already focused: wait this long for the focus to move elsewhere.
+static constexpr double kOpenDelayMs = 300;
+
+void PageView::field_focus(wnk::ui::Ui &ui, bool focused, double now_ms) {
+    field_focused_ = focused;
+    if (!focused) {
+        open_at_ms_ = 0;
+        ime(ui, false);
+        return;
+    }
+    if (now_ms - last_user_ms_ <= kUserFocusWindowMs) {
+        open_at_ms_ = 0;
+        ime(ui, true);
+    }
+}
+
+void PageView::user_activated(double now_ms) {
+    last_user_ms_ = now_ms;
+    if (field_focused_ && !editing_) open_at_ms_ = now_ms + kOpenDelayMs;
+}
+
+void PageView::tick(wnk::ui::Ui &ui, double now_ms) {
+    if (open_at_ms_ <= 0 || now_ms < open_at_ms_) return;
+    open_at_ms_ = 0;
+    if (field_focused_ && !editing_) ime(ui, true);
+}
+
+static size_t utf8_code_points(const std::string &s) {
+    size_t n = 0;
+    for (unsigned char c : s)
+        if ((c & 0xC0) != 0x80) ++n;
+    return n;
+}
+
+bool PageView::on_text(wnk::ui::Ui &ui, const std::string &utf8) {
+    // LG's remote keyboards (the phone app) type through the TV's input method in replace mode: every update carries
+    // the whole text typed so far ("a", "ab", "abc") and replaces the previous update. SDL hands it over as plain text,
+    // so the page got "aababc" (TV, 2026-11-23: com.webos.service.ime insertText with replace:true; reported on a C9).
+    // An update that extends the last one, or is a shorter start of it, is turned back into the difference. Ordinary
+    // typing sends one character at a time and never matches.
+    const double now = ui.now_ms();
+    if (!ime_run_.empty() && now - ime_run_ms_ < 15000 && utf8 != ime_run_) {
+        if (utf8.size() > ime_run_.size() && utf8.compare(0, ime_run_.size(), ime_run_) == 0) {
+            engine_.commit_text(utf8.substr(ime_run_.size()));
+            ime_run_ = utf8, ime_run_ms_ = now;
+            return true;
+        }
+        if (!utf8.empty() && utf8.size() < ime_run_.size() && ime_run_.compare(0, utf8.size(), utf8) == 0 &&
+            utf8_code_points(ime_run_) > 1) {
+            for (size_t i = utf8_code_points(ime_run_.substr(utf8.size())); i > 0; --i) {
+                engine_.key(true, 0xff08, 14 + 8, 0);  // Backspace
+                engine_.key(false, 0xff08, 14 + 8, 0);
+            }
+            ime_run_ = utf8, ime_run_ms_ = now;
+            return true;
+        }
+    }
     engine_.commit_text(utf8);
+    ime_run_ = utf8, ime_run_ms_ = now;
     return true;
 }
 
 bool PageView::on_edit_key(wnk::ui::Ui &, wnk::input::EditKey key) {
+    ime_run_.clear();  // the field was edited another way: a later remote update is new text again
     using K = wnk::input::EditKey;
     uint32_t keysym = 0, evdev = 0;
     switch (key) {
@@ -308,8 +370,9 @@ bool PageView::on_edit_key(wnk::ui::Ui &, wnk::input::EditKey key) {
 }
 
 void PageView::on_text_input_closed(wnk::ui::Ui &) {
-    // The viewer closed the TV keyboard; the page field keeps focus until the user moves on.
+    // The viewer closed the TV keyboard; the page field keeps focus until the user moves on (OK or a click opens it again).
     editing_ = false;
+    ime_run_.clear();
 }
 
 }  // namespace browser

@@ -319,7 +319,7 @@ class App : public wnk::app::Delegate {
         if (t->live) engine_.tab_activate(id);
         if (t->live && t->crashed) reload_crashed(*t);
         screen_->page_->show_tab(t->live ? id : 0);
-        screen_->page_->ime(ctx_->ui(), false);
+        screen_->page_->field_focus(ctx_->ui(), false, ctx_->ui().now_ms());
         if (changed && t->url.empty()) screen_->home_->search().field().set_text("");  // a fresh Home page
         refresh_chrome();
         if (changed) focus_content();
@@ -770,6 +770,7 @@ class App : public wnk::app::Delegate {
         // view has text input, Back skips the overlays' handling and the kit treats keys as typing for that view, so
         // Back never closed the menu or Settings after a page had focused a field (Google's search box; 2026-11-15).
         if (screen_->page_->editing() && ctx.ui().focused() != screen_->page_) screen_->page_->ime(ctx.ui(), false);
+        else if (ctx.ui().focused() == screen_->page_) screen_->page_->tick(ctx.ui(), ctx.ui().now_ms());
         if (ok_down_ && !ok_long_ && ctx.ui().now_ms() - ok_down_ms_ >= kHoldOkMs) {
             ok_long_ = true;
             show_quick_actions();
@@ -926,6 +927,7 @@ class App : public wnk::app::Delegate {
     void deliver_ok(wnk::ui::Ui &ui, const wnk::input::KeyEvent &release) {
         const Tab *t = tab(active_);
         if (ui.focused() == screen_->page_ && t != nullptr && t->live && engine_.running()) {
+            screen_->page_->user_activated(ui.now_ms());
             const browser::WebKey k = browser::web_key_from_sdl(ok_key_.keycode);
             if (k.keyval != 0) {
                 engine_.key(true, k.keyval, k.keycode, 0);
@@ -1012,6 +1014,7 @@ class App : public wnk::app::Delegate {
         case T::Move: engine_.pointer(WPE_POINTER_MOVE, 0, x, y, p.time_ms); break;
         case T::Press:
             ctx.ui().focus(screen_->page_);
+            screen_->page_->user_activated(ctx.ui().now_ms());
             engine_.pointer(WPE_POINTER_DOWN, static_cast<uint32_t>(p.button), x, y, p.time_ms);
             break;
         case T::Release: engine_.pointer(WPE_POINTER_UP, static_cast<uint32_t>(p.button), x, y, p.time_ms); break;
@@ -1415,7 +1418,7 @@ class App : public wnk::app::Delegate {
             }
         };
         cb.ime = [this](TabId id, const WpeIme &m) {
-            if (id == active_) screen_->page_->ime(ctx_->ui(), m.focused != 0);
+            if (id == active_) screen_->page_->field_focus(ctx_->ui(), m.focused != 0, ctx_->ui().now_ms());
         };
         cb.error = [this](TabId id, WpeErrorKind kind, uint32_t code, const std::string &msg) {
             WNK_LOGW(kCat, "engine error tab %u %d/%u: %s", id, static_cast<int>(kind), code, msg.c_str());
@@ -1471,7 +1474,7 @@ class App : public wnk::app::Delegate {
         };
         cb.exited = [this](const std::string &why) {
             applied_zoom_ = 0;
-            screen_->page_->ime(ctx_->ui(), false);
+            screen_->page_->field_focus(ctx_->ui(), false, ctx_->ui().now_ms());
             for (Tab &t : tabs_) t.live = false, t.loading = false;
             renumber_engine_tabs();
             screen_->page_->show_tab(0);

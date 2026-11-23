@@ -40,9 +40,18 @@ class PageView : public wnk::ui::GlView {
     // Maps a point in logical UI units to page CSS px; false if outside the view.
     bool to_page(wnk::Point logical, int32_t &x, int32_t &y) const;
 
-    // An editable in the page gained/lost focus: open/close the TV keyboard.
+    // Opens/closes the TV keyboard for the page (false: also when focus leaves the page for the browser's own UI).
     void ime(wnk::ui::Ui &ui, bool focused);
     bool editing() const { return editing_; }
+    // An editable in the page gained/lost focus (the engine says so). The TV keyboard opens only when the viewer caused
+    // it: a click or OK on the page just before. A field the page focuses by itself (a search page's autofocus, a test
+    // page focusing inputs) stays focused without the keyboard until the viewer clicks it or presses OK.
+    void field_focus(wnk::ui::Ui &ui, bool focused, double now_ms);
+    // The viewer clicked the page or pressed OK on it.
+    void user_activated(double now_ms);
+    // Per frame: opens the keyboard shortly after a click/OK on the page while one of its fields has focus (a click on
+    // the field that already has focus brings no new focus event; one elsewhere moves focus away first).
+    void tick(wnk::ui::Ui &ui, double now_ms);
     bool has_frame() const { return tex_w_ > 0; }
     // Frames from other tabs are dropped; switching shows a blank page until the new tab's first frame.
     void show_tab(TabId tab) {
@@ -90,6 +99,12 @@ class PageView : public wnk::ui::GlView {
     float hole_x_ = 0, hole_y_ = 0, hole_w_ = 0, hole_h_ = 0;
     uint32_t tex_w_ = 0, tex_h_ = 0;
     bool editing_ = false;
+    bool field_focused_ = false;    // a page editable has focus (engine), keyboard open or not
+    double last_user_ms_ = -1e9;    // last click/OK on the page
+    double open_at_ms_ = 0;         // open the keyboard at this time if a field still has focus (0: nothing pending)
+    // Text a remote keyboard typed in replace mode (see on_text) and when.
+    std::string ime_run_;
+    double ime_run_ms_ = 0;
     TabId tab_ = 0;
     bool direct_ = false;
     TabId direct_tab_ = 0;

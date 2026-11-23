@@ -177,6 +177,12 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
     // the TV on 2026-11-11; open upstream: webkit.org/b/295780, b/275099). The only reported mitigation is the
     // iterative JSON parser (b/275099 comment 3); it costs nothing measurable.
     set_env(env, "JSC_useRecursiveJSONParse", "false");
+    // WebKit 2.54 forces every inline cache to fail on 32-bit builds (OptionsList.h: forceICFailure = is32Bit()): no call
+    // was ever linked, each call went through the C++ link path (~400 ns), and the DFG saw no callee, so it inlined nothing
+    // and never turned Math.* into instructions. With the caches on (TV, 2026-11-23): Math.sqrt/abs/floor and method calls
+    // 8-20x faster, the JS micro bench 884 -> 446 ms, Speedometer 0.593 -> 0.604; JIT correctness pages unchanged.
+    // {"wpebEnv": {"JSC_forceICFailure": "true"}} restores WebKit's default.
+    set_env(env, "JSC_forceICFailure", "false");
     // Video goes to LG's decoder on the video plane under our window, from the media server in this process
     // (engine/gst/wpebmediasink.c). WebKit's generic "rialto" quirks find our sinks by name and punch a hole
     // in the page where the video is. This is independent of the presentation mode: an SHM child needs the
