@@ -1,0 +1,35 @@
+{
+  "paging": {
+    "page": 1,
+    "count": 1,
+    "maxPage": 1,
+    "itemsTotal": 1,
+    "prevUrl": null,
+    "nextUrl": null
+  },
+  "packages": [
+    {
+      "id": "io.github.mihai2mn.robin",
+      "title": "Robin",
+      "iconUri": "https://raw.githubusercontent.com/mihai2mn/robin-webos/main/docs/screenshots/robin-icon.png",
+      "manifestUrl": "https://github.com/mihai2mn/robin-webos/releases/latest/download/io.github.mihai2mn.robin.manifest.json",
+      "manifest": {
+        "id": "io.github.mihai2mn.robin",
+        "version": "1.0.0",
+        "type": "native",
+        "title": "Robin",
+        "appDescription": "A web browser for rooted LG webOS TVs, driven with the remote.",
+        "iconUri": "https://raw.githubusercontent.com/mihai2mn/robin-webos/main/docs/screenshots/robin-icon.png",
+        "sourceUrl": "https://github.com/mihai2mn/robin-webos",
+        "rootRequired": true,
+        "ipkUrl": "https://github.com/mihai2mn/robin-webos/releases/download/v1.0.0/io.github.mihai2mn.robin_1.0.0_arm.ipk",
+        "ipkHash": {
+          "sha256": "e53f2842566525506d7b43062856912773b69b41c771f45bd1640d9a893d8ed0"
+        },
+        "ipkSize": 105129376
+      },
+      "pool": "main",
+      "shortDescription": "A web browser for the TV, driven with the remote."
+    }
+  ]
+}

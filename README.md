@@ -101,6 +101,30 @@ and filters across, see [Keeping your Wren data](docs/release-notes-1.0.0.md#kee
 The release also has `io.github.mihai2mn.robin.dev_1.0.0_arm.ipk`, a second copy that shows as "Robin Test" and keeps
 its own data. Most people do not need it.
 
+### Install from the Homebrew Channel by adding this repository
+
+Until Robin is listed in the Homebrew Channel's default catalog, you can add this project as an extra repository:
+
+1. Open the Homebrew Channel on the TV and go to **Settings**.
+2. Choose **Add repository** (at the bottom of the Repositories list).
+3. Enter this address and confirm:
+
+   ```
+   https://raw.githubusercontent.com/mihai2mn/robin-webos/main/webos-repo/apps.json
+   ```
+
+4. Go back to the app list. Robin appears there. Open it and choose **Install**.
+
+From a PC you can open the same dialog with the address already filled in:
+
+```sh
+ares-launch org.webosbrew.hbchannel -d <your-device> -p '{"launchMode":"addRepository","url":"https://raw.githubusercontent.com/mihai2mn/robin-webos/main/webos-repo/apps.json"}'
+```
+
+The repository file is [`webos-repo/apps.json`](webos-repo/apps.json). It points at the ipk on the latest release, with its
+SHA-256, so the Homebrew Channel checks the download. The file is updated with each release. To remove the repository, tap
+its entry in the same Settings list.
+
 ## Limits
 
 - **One TV model tested.** Other models and webOS versions may work or may not. Reports are welcome.
