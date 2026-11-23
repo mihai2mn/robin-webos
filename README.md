@@ -5,7 +5,7 @@
 <h1 align="center">Robin</h1>
 
 <p align="center">
-  A web browser for LG webOS TVs, built to be driven with the remote.<br>
+  A web browser for LG webOS TVs that handles video-heavy sites the way a computer would, driven with the remote.<br>
   Based on <a href="https://github.com/sostk/webos-wpe-browser">Wren</a> by sostk.
 </p>
 
@@ -19,22 +19,24 @@
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#what-it-does">What it does</a> ·
+  <a href="#performance">Performance</a> ·
+  <a href="#how-it-was-tested">Testing</a> ·
   <a href="#limits">Limits</a> ·
-  <a href="#based-on-wren">Credits</a> ·
-  <a href="docs/README.md">Documentation</a>
+  <a href="#based-on-wren">Credits</a>
 </p>
 
 ![Robin's home page: a search box, site shortcuts and a row of remote hints](docs/screenshots/home.jpg)
 
-## Why this exists
+## Why I made this
 
-The browser that ships on an LG CX is old, and most modern sites either break in it or crawl. Wren put a current
-WebKit on the TV. Robin continues from Wren 0.3.3 with a newer engine, an ad blocker, a reworked video path and a
-memory budget that fits the TV. On the CX it was built on, that is the difference between a browser you avoid and
-one you use: pages load, video plays through to the end, and the remote is enough to get around.
+My LG CX lives in a campervan, and that is where it gets most of its use. Power there comes from a battery, so every
+watt counts. The TV alone is fine. Putting a laptop or a mini PC next to it, only to browse the sites I actually watch,
+would take two to three times the power of the TV on its own.
 
-Robin 1.1.0 is the second release: it opens in under two seconds and runs JavaScript about twice as fast as 1.0.0.
-It was tested on one TV, an LG CX on webOS 5.3. Read the [limits](#limits) before you install.
+The TV's built-in browser cannot do the job. It is years behind, most modern sites break or crawl in it, and video
+sites are the worst case. [Wren](https://github.com/sostk/webos-wpe-browser) showed that a current WebKit can run on
+the TV. Robin takes that further, with one goal: the sites you would otherwise open on a computer, the ones built
+around video, thumbnails and long feeds, should just work on the TV, with the remote, and keep working for hours.
 
 ## What it does
 
@@ -57,40 +59,75 @@ It was tested on one TV, an LG CX on webOS 5.3. Read the [limits](#limits) befor
   </tr>
 </table>
 
-- **YouTube works properly.** Videos play on the hardware decoder at full quality, with full screen, seeking and
-  the remote's media keys. On the TV's built-in browser it does not.
-- **A current engine.** WPE WebKit 2.54.3. WebKit 2.54 switched the JavaScript JIT and its inline caches off on all
-  32-bit builds; Robin brings back the ARMv7 Baseline JIT, the DFG, the RegExp JIT and the inline caches, and compiles
-  CSS selectors to machine code ([how](docs/jit-armv7.md)).
-- **An ad blocker** built on Brave's adblock-rust: network rules, redirects, scriptlets, cosmetic and procedural
-  filters, pop-up rules ([details](docs/ad-blocking.md)).
-- **Hardware video** for H.264 and VP9 with AAC or PCM audio, seeking, page volume and mute, and play, pause, stop,
-  rewind and fast-forward from the remote ([details](docs/video.md)).
-- **Memory limits that hold.** The web process is capped, the back/forward page cache is off, and at most two small
-  videos are decoded in software at once.
-- **Zoom remembered per site**, bookmarks, history and tabs that come back after a restart ([usage](docs/usage.md)).
+What makes video-heavy sites usable:
 
-### Measured on the CX
+- **The TV's hardware decoder plays the main video.** H.264 and VP9 with AAC or PCM audio, full screen, seeking,
+  quality changes, and play, pause, rewind and fast-forward from the remote. YouTube plays at full quality
+  ([details](docs/video.md)).
+- **Thumbnail walls with hover previews work.** Small muted previews are decoded in the page, so they never take the
+  decoder away from the video you are watching. At most two play at once, which keeps a page full of them inside the
+  memory limit.
+- **Seeking and quality switches do not leave a black picture.** Frames are held back until the decoder has a
+  keyframe.
+- **Long feeds stay responsive.** Loading spinners and other endless animations pause while they are off screen, and
+  blur effects are drawn by the graphics chip, so one busy page does not freeze every tab.
+- **Memory limits that hold.** The web process is capped and watched. A page that grows too large is reloaded before
+  the TV runs out of memory.
+- **An ad blocker** built on Brave's adblock-rust with uBlock Origin's lists: network rules, redirects, scriptlets,
+  cosmetic and procedural filters, pop-up rules ([details](docs/ad-blocking.md)).
+- **Remote first.** Zoom is remembered per site; bookmarks, history and tabs come back after a restart. The TV keyboard
+  opens when you click a text field, and typing from LG's phone app works ([usage](docs/usage.md)).
 
-All figures are from one LG CX on webOS 5.3, November 2026.
+## Performance
 
-| Test | Result |
-|---|---|
-| Launch to window | 1.6 s (8.4 s in 1.0.0) |
-| Speedometer 3.1 | 0.61 (0.505 in 1.0.0) |
-| JavaScript micro benchmark (lower is better) | 415 ms (858 ms in 1.0.0; LG's own browser 358 ms) |
-| Scrolling a long Wikipedia article | 14 frames per second (6 in 1.0.0) |
-| A 10-minute streaming video on a real site, default settings | Played to the end. Web process peak 511 MB, limit 832 MB |
-| Video starts on a static page | 0 black pictures in 40 starts (9 in 62 before the fix) |
-| A news page with four autoplaying background videos | About 360 MB with the software-video limit, about 700 MB without |
-| Ad blocker cost on four news and reference sites | Load time between +1.6 s and −0.4 s, about +40 MB of memory |
+The engine is WPE WebKit 2.54.3. WebKit 2.54 switches the JavaScript JIT and its inline caches off on 32-bit builds,
+which is what the TV runs. Robin turns them back on, along with the RegExp JIT, and compiles CSS selectors to machine
+code ([how](docs/jit-armv7.md)).
+
+Measured on one LG CX (webOS 5.3), same test pages, November 2026:
+
+| | Robin 1.0.0 | Robin 1.1.0 | LG's own browser |
+|---|---|---|---|
+| Launch to window | 8.4 s | 1.6 s | about 2 s |
+| Speedometer 3.1 | 0.505 | 0.61 | cannot run it |
+| JavaScript micro benchmark (lower is better) | 858 ms | 415 ms | 358 ms |
+| Scrolling a long Wikipedia article | 6 fps | 14 fps | 58 fps |
+| Loading that article | 10.7 s | 9.7 s | 4.0 s |
+
+JavaScript now runs close to LG's own browser. Page loads and scrolling are still slower: LG's browser is an older
+Chromium that scrolls on the graphics chip, and on the TV's processor WebKit's layout and style work is the main cost.
+That is what the next releases go after.
+
+## How it was tested
+
+Everything below ran on the CX itself, on the 1.1.0 build, except three figures carried over from the testing of
+1.0.0: the long playback, the video starts and the news page with four videos.
+
+- **Benchmarks.** The test pages are served by the TV's own web server, so the network does not count. Every run is a
+  fresh launch, and Robin, LG's browser and a Chromium port were measured the same way (harness from
+  [webos-browser-lab](https://github.com/ViieeS/webos-browser-lab)).
+- **JIT correctness.** Checksummed JavaScript kernels, 71 math folding cases, 64 regular expressions each run 300 times,
+  and 41 CSS selectors over 366 elements with the selector JIT on and off. The results are identical.
+- **Real sites.** 17 sites (news, documentation, shopping, code hosting, forums) for 40 s each with scripted scrolling.
+  No page process died. A documentation site that used to crash with the RegExp JIT loaded 8 times out of 8.
+- **Long playback.** A 10-minute stream on a real site played to the end, with the web process peaking at 511 MB
+  against an 832 MB limit.
+- **Video regressions.** Muted test clips on short and long pages, full screen with the side panel open, a seek, and
+  leaving full screen. Video starts on a static page: 0 black pictures in 40 starts.
+- **Memory.** A news page with four autoplaying background videos uses about 360 MB, against about 700 MB without the
+  preview limit. A very large reference page peaks at 351 MB.
+- **Review.** Every new engine patch in 1.1.0 had an independent code review; the three problems it found were fixed
+  before release.
+
+The release notes have the details for each version: [1.1.0](docs/release-notes-1.1.0.md),
+[1.0.0](docs/release-notes-1.0.0.md).
 
 ## Install
 
 You need the [Homebrew Channel](https://www.webosbrew.org/), on a rooted TV or on one in Developer Mode. Robin was
-tested on a rooted CX; a user reports it running on a non-rooted CX in Developer Mode. Developer Mode has to be renewed
-from time to time in LG's Developer Mode app (apps installed through it stop when it expires); a rooted TV does not
-need that.
+tested on a rooted CX; a user reports it running on a non-rooted CX in Developer Mode. Developer Mode has to be
+renewed from time to time in LG's Developer Mode app, and apps installed through it stop when it expires. A rooted TV
+does not need that.
 
 1. Download `io.github.mihai2mn.robin_1.1.0_arm.ipk` from the
    [latest release](https://github.com/mihai2mn/robin-webos/releases/latest) and check it against `MD5SUMS`.
@@ -111,7 +148,7 @@ its own data. Most people do not need it.
 
 ### Install from the Homebrew Channel by adding this repository
 
-Until Robin is listed in the Homebrew Channel's default catalog, you can add this project as an extra repository:
+Until Robin is in the Homebrew Channel's default catalog, add this project as an extra repository:
 
 1. Open the Homebrew Channel on the TV and go to **Settings**.
 2. Choose **Add repository** (at the bottom of the Repositories list).
@@ -129,9 +166,9 @@ From a PC you can open the same dialog with the address already filled in:
 ares-launch org.webosbrew.hbchannel -d <your-device> -p '{"launchMode":"addRepository","url":"https://raw.githubusercontent.com/mihai2mn/robin-webos/main/webos-repo/apps.json"}'
 ```
 
-The repository file is [`webos-repo/apps.json`](webos-repo/apps.json). It points at the ipk on the latest release, with its
-SHA-256, so the Homebrew Channel checks the download. The file is updated with each release. To remove the repository, tap
-its entry in the same Settings list.
+The repository file is [`webos-repo/apps.json`](webos-repo/apps.json). It points at the ipk on the latest release,
+with its SHA-256, so the Homebrew Channel checks the download. To remove the repository, select its entry in the same
+Settings list.
 
 ## Limits
 
@@ -142,6 +179,7 @@ its entry in the same Settings list.
   or refuse. Robin, like Wren, uses the CDM already on the TV, outside the terms it ships under. Use at your own risk.
 - **Small muted videos above 720p are not played** until you start them yourself. This keeps pages with many
   background videos inside the memory limit.
+- **Very heavy pages**, such as large infinite feeds, can keep one CPU core busy.
 - **Cloudflare checks take about a minute** on the TV's processor. Wait for them.
 
 <details>
@@ -185,6 +223,7 @@ Robin also stands on:
 | Project | Used for | Licence |
 |---|---|---|
 | [WPE WebKit](https://wpewebkit.org/) | The browser engine | LGPL-2.1 and BSD |
+| [webos-browser-lab](https://github.com/ViieeS/webos-browser-lab) | The RegExp JIT fixes, the CSS selector JIT and sticky scrolling patches, the benchmark harness | MIT |
 | [webOS native app kit](https://github.com/Native-Webos/webos-native-app-kit) | The app shell and packaging | see the kit |
 | [adblock-rust](https://github.com/brave/adblock-rust) by Brave | The ad blocker's matching engine | MPL-2.0 |
 | [uBlock Origin](https://github.com/gorhill/uBlock) | Filter lists, redirects and scriptlets | GPL-3.0 |
@@ -199,14 +238,14 @@ with an AI image tool at the maintainer's request and traced to vector; it uses 
 - [Using Robin](docs/usage.md): the remote, launch parameters, logs
 - [How it works](docs/architecture.md) and [video](docs/video.md)
 - [Building](docs/building.md) and the [patch series](docs/patches.md)
-- Release notes: [1.1.0](docs/release-notes-1.1.0.md), [1.0.0](docs/release-notes-1.0.0.md)
-- [Changelog](CHANGELOG.md): what changed since the last release
+- [Changelog](CHANGELOG.md) and release notes: [1.1.0](docs/release-notes-1.1.0.md), [1.0.0](docs/release-notes-1.0.0.md)
 - [Everything else](docs/README.md)
 
 ## Contributing
 
-Reports from other TV models help most: use the **Works on my TV** form in the [issue tracker](https://github.com/mihai2mn/robin-webos/issues/new/choose).
-For code, see [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: [SECURITY.md](SECURITY.md).
+Reports from other TV models help most: use the **Works on my TV** form in the
+[issue tracker](https://github.com/mihai2mn/robin-webos/issues/new/choose). For code, see
+[CONTRIBUTING.md](CONTRIBUTING.md). Security problems: [SECURITY.md](SECURITY.md).
 
 ## Licence
 
