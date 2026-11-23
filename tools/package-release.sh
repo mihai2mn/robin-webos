@@ -271,6 +271,16 @@ do_stage() {
         install -m755 "$src/build/webos-backend/libWPEBackend-webos.so" "$src/build/webos-backend/libwpeb-owner.so" "$s/lib/"
         install -m755 "$WORK/engine-build/wpe-engine" "$s/wpe-engine32"
         install -m755 "$WORK/launcher-$id/wpe-engine" "$s/wpe-engine"
+        # mimalloc (tools/build-mimalloc.sh, MIT): only preloaded with the launch parameter WPE_BROWSER_DEBUG_MALLOC=mimalloc
+        # (browser/engine_client.cpp). Packed when it was built; the package works the same without it.
+        local mi=${MIMALLOC_DIR:-$BR/mimalloc-out}
+        if [ -f "$mi/libmimalloc.so.2" ] && [ -f "$mi/LICENSE" ]; then
+            install -m755 "$mi/libmimalloc.so.2" "$s/lib/libmimalloc.so.2"
+            mkdir -p "$s/licenses/mimalloc-$(cat "$mi/VERSION")"; cp "$mi/LICENSE" "$s/licenses/mimalloc-$(cat "$mi/VERSION")/LICENSE"
+            echo "   mimalloc $(cat "$mi/VERSION") packed (preloaded only with WPE_BROWSER_DEBUG_MALLOC=mimalloc)"
+        else
+            echo "   no mimalloc in $mi (tools/build-mimalloc.sh): not packed"
+        fi
         for f in "$s/lib/libWPEWebKit-2.0.so.1" "$s"/libexec/WPE*Process "$s/lib/injected-bundle/libWPEInjectedBundle.so" \
                  "$s/lib/gstreamer-1.0/libgstwpebmedia.so" "$s/lib/gstreamer-1.0/libgstinterleave.so" "$s/wpe-engine32" "$s/lib/libWPEBackend-webos.so" "$s/lib/libwpeb-owner.so"; do "$STRIP32" "$f"; done
         # PT_INTERP of everything that is exec'd: the app's own loader link

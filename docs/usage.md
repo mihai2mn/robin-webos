@@ -58,6 +58,16 @@ The zooms are stored in `zooms.json` in the profile folder (up to 500 sites). Be
 | `{"wpebVideoBackend": "starfish" \| "ndl"}` | select the hardware video backend (default: `starfish`, with `ndl` fallback) |
 | `{"wpebEnv": {"NAME": "value"}}` | allowlisted engine environment prefixes: `WEBKIT_*` (excluding `WEBKIT_EXEC_PATH` and `WEBKIT_INJECTED_BUNDLE_PATH`), `JSC_*`, `WPE_BROWSER_DEBUG*` (e.g. `WPE_BROWSER_DEBUG_CONSOLE=1`, `WPE_BROWSER_DEBUG_ENGINE=64`), `GST_DEBUG*`, `G_TLS_*`, `MSE_*`. An app id ending in `.dev` passes all of them. A release app id passes only the harmless ones (`JSC_*`, `MSE_*`, `WPE_BROWSER_DEBUG_CONSOLE`, `_AUTOPLAY`, `_ENGINE`, `_MESSAGES`, `_REQUESTS`, `_FRAMES`, `_UBO_LOG`, `_MEDIA_AREA`; see `browser/engine_env.hpp`) unless the file `<data folder>/dev-switches` exists (create it with a shell on the TV; a launch parameter cannot). Names it refuses are logged. |
 
+Engine switches for testing (through `wpebEnv`, app ids ending in `.dev`):
+
+| Name | Effect |
+|---|---|
+| `WPE_BROWSER_DEBUG_MALLOC=system` / `=mimalloc` | WebKit's allocations go to the C library (`Malloc=1`); `mimalloc` also preloads the bundled mimalloc 2.1.7 (packed when `tools/build-mimalloc.sh` was run). Default: WebKit's own allocator |
+| `WPE_BROWSER_DEBUG_MEM_RELIEF_S=<s>` | how often WebKit repeats its memory relief while memory stays high (default 30; 0 = every 2 s poll, as in 1.0.0) |
+| `WEBKIT_DISABLE_CSS_JIT=1` | match CSS selectors in C++ instead of the 32-bit selector JIT |
+| `JSC_useRegExpJIT=0` | regular expressions in the interpreter instead of the RegExp JIT |
+| `WREN_UBO=0` | the ad blocker and the site compatibility script off |
+
 ## Logs
 
 On the TV, in `/tmp/io.github.mihai2mn.robin/` (cleared when the TV restarts):

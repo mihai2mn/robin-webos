@@ -212,6 +212,23 @@ bool EngineClient::start(const EngineLaunch &l, std::string &error) {
             WNK_LOGI(kCat, "engine env %s=%s (launch parameter)", name.c_str(), value.c_str());
         }
     }
+    // WPE_BROWSER_DEBUG_MALLOC (launch parameter): "system" hands WebKit's allocations to the C library (Malloc=1: bmalloc and
+    // libpas step aside; patch 0032 keeps those blocks 16-byte aligned), "mimalloc" also preloads the bundled mimalloc into the
+    // engine and its web, network and GPU processes. webos-browser-lab measured mimalloc at Speedometer +11%, page loads 4-9%
+    // faster, memory +5-12% (LG C1). Unset: WebKit's own allocator, until this is measured on the TV.
+    {
+        std::string malloc_mode;
+        for (const auto &[name, value] : l.extra_env)
+            if (name == "WPE_BROWSER_DEBUG_MALLOC") malloc_mode = value;
+        if (malloc_mode == "system" || malloc_mode == "mimalloc") set_env(env, "Malloc", "1");
+        if (malloc_mode == "mimalloc") {
+            const std::string mi = d + "/lib/libmimalloc.so.2";
+            if (::access(mi.c_str(), R_OK) == 0)
+                set_env(env, "LD_PRELOAD", mi);
+            else
+                WNK_LOGW(kCat, "WPE_BROWSER_DEBUG_MALLOC=mimalloc: %s is missing; the C library's allocator is used", mi.c_str());
+        }
+    }
     set_env(env, "WPE_BROWSER_DATA_DIR", l.data_dir);
     set_env(env, "WPE_BROWSER_CACHE_DIR", l.cache_dir);
     std::vector<char *> envp;
