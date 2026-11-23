@@ -28,8 +28,10 @@ All are patches in `buildroot-external/patches/wpewebkit/2.54.3/` ([patches.md](
   crashed.
 - **0021** initialises value profiles to the empty value on 32-bit. Zeroed profiles decoded as the double 0.0, and a
   DFG-compiled `Map.prototype.forEach` looped forever.
-- **0023** keeps the **RegExp JIT off**. With it on, one framework documentation site crashed its web process about
-  2 s after load, 6 times out of 6. With the RegExp JIT off, 0 out of 6.
+- **0023** fixes the **RegExp JIT** on 32-bit ARM, which 1.0.0 kept off because one framework documentation site
+  crashed its web process about 2 s after load, 6 times out of 6. Two bugs in its entry code, found by
+  [webos-browser-lab](https://github.com/ViieeS/webos-browser-lab) (MIT): it overwrote the caller's r4 register
+  before saving it, and it read its 5th argument from the wrong stack slot. With both fixed the RegExp JIT is on.
 
 The safe fallback if the DFG is suspect is `useDFGJIT = false` with patches 0015 to 0018.
 

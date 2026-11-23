@@ -21,8 +21,10 @@ Rebased from the 2.50.5 set and regenerated exactly against 2.54.3 (no fuzz). Dr
 - 0021 initialises the metadata-table value profiles to the empty JSValue on 32-bit (zeroed buckets decoded as the
   double 0.0, so the DFG mispredicted every unsampled site; this made Map.prototype.forEach loop forever once
   DFG-compiled at low thresholds).
-- 0023 keeps the RegExp (YARR) JIT off on ARMv7 (useRegExpJIT default back to 64-bit only): with it on, a framework docs
-  site's web process exited ~2 s after load (6/6); Baseline JIT and DFG stay on.
+- 0023 fixes the RegExp (YARR) JIT's ARMv7 entry code (webos-browser-lab 0010 + 0012, MIT): it overwrote the caller's
+  r4 before saving it, and read the 5th (stacked) argument at fp + 0 instead of fp + 8. With these the RegExp JIT is on
+  (0016's default); before, it was kept off because a framework docs site's web process exited ~2 s after load (6/6).
+  Lab 0011 (cellLock re-entry on the compiler thread's bytecode fallback) is already in 2.54.3.
 - 0025 carries the `webkitglib/2.54` queue after 2.54.3 (`c01fbd906..9715f4680`, 21 commits, 58 tarball `Source/` files)
   until upstream cuts `wpewebkit-2.54.4.tar.xz`. (The five `main` fixes noted in `agy-2026-11-21/lane4/REPORT.md` —
   bugs 328009, 315153, 319380+327551, 329007, 328163 — were already cherry-picked upstream before 2.54.3 was tagged.)

@@ -29,7 +29,7 @@ own README with more detail.
 | 0020 jsc-32bit-dfg-data-ic-property-caches | the 32-bit DFG ported to 2.54's data-IC property caches |
 | 0021 jsc-32bit-empty-value-profiles | zeroed value profiles decoded as the double 0.0 on 32-bit, so the DFG mispredicted |
 | 0022 gstreamer-no-segment-loop-seek-with-hardware-video | a looping video with the hardware sink stalled a tab switch for 6 to 10 s and rewound early |
-| 0023 jsc-armv7-regexp-jit-off | the RegExp JIT crashed one site's web process on the TV: it stays off (64-bit only) |
+| 0023 jsc-armv7-yarr-jit-callee-save-and-stack-argument | the RegExp JIT's 32-bit ARM entry code overwrote the caller's r4 and read its 5th argument from the wrong stack slot (fixes from webos-browser-lab); the RegExp JIT is on again |
 | 0024 webcore-gstreamer-webcodecs-int-varargs-32bit | a 64-bit value was passed as an int vararg: crash in WebCodecs decoder set-up on 32-bit |
 | 0025 upstream-2.54.3-to-2.54-head | `webkitglib/2.54` queue after 2.54.3 (`c01fbd906..9715f4680`, 21 commits, 58 tarball `Source/` files) carried as one patch until upstream cuts `wpewebkit-2.54.4.tar.xz` |
 | 0026 webcore-mse-back-buffer-limit | plain MediaSource kept every played second: keep at most `MSE_MAX_BACK_BUFFER_SECONDS` (default 30, 0 = off) behind the playhead; after a seek back also drops data more than that far ahead of the new position |

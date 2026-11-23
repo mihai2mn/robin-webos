@@ -1,0 +1,45 @@
+From: Robin <robin@localhost>
+Subject: [PATCH] JSC YARR JIT on ARMv7: keep the caller's r4, read the 5th argument from the right slot
+
+Two bugs in the RegExp JIT's 32-bit ARM entry code, found and fixed by webos-browser-lab (ViieeS/webos-browser-lab,
+patches 0010 and 0012, MIT) on 2.52.6 and still present in 2.54.3:
+
+- generateEnter() computed the new stack pointer in regT0, which is r4 on ARMv7, before saving the callee-saved
+  registers. r4 is one of them, so every compiled RegExp returned to its caller with r4 = sp - 24. GCC keeps live
+  values in r4; the web process crashed or misbehaved after the first JIT-compiled match (here: a framework docs
+  site exited its web process about 2 s after load, 6 of 6 runs).
+- When the pattern needs a stack frame, the MatchingContextHolder* (the 5th argument, passed on the stack) was read
+  at fp + 0, which holds the caller's saved fp after the prologue. It is at fp + 8.
+
+The third lab fix (0011, no cellLock re-entry when the compiler thread falls back to bytecode) is already in 2.54.3.
+
+This replaces the former 0023, which kept useRegExpJIT off on ARMv7: with these fixes the default from 0016 applies
+(RegExp JIT on for ARMv7 Linux). JSC_useRegExpJIT=0 still turns it off.
+---
+diff --git a/Source/JavaScriptCore/yarr/YarrJIT.cpp b/Source/JavaScriptCore/yarr/YarrJIT.cpp
+--- a/Source/JavaScriptCore/yarr/YarrJIT.cpp
++++ b/Source/JavaScriptCore/yarr/YarrJIT.cpp
+@@ -6728,8 +6728,10 @@
+ #if CPU(X86_64) || CPU(ARM64)
+             m_jit.subPtr(GPRInfo::callFrameRegister, CCallHelpers::TrustedImm32(stackSizeForCalleeSaves), MacroAssembler::stackPointerRegister);
+ #else
+-            m_jit.subPtr(GPRInfo::callFrameRegister, CCallHelpers::TrustedImm32(stackSizeForCalleeSaves), m_regs.regT0);
+-            m_jit.move(m_regs.regT0, MacroAssembler::stackPointerRegister);
++            // regT0 is r4 on ARMv7, and r4 is one of the callee saves: computing the new sp in it overwrote the
++            // caller's r4 before emitSaveCalleeSavesFor stored it, so the caller got sp - 24 back in r4 on return.
++            // sp == fp right after emitFunctionPrologue, so subtract from sp itself.
++            m_jit.subPtr(CCallHelpers::TrustedImm32(stackSizeForCalleeSaves), MacroAssembler::stackPointerRegister);
+ #endif
+             m_jit.emitSaveCalleeSavesFor(&m_calleeSaves);
+         }
+@@ -6990,7 +6992,9 @@
+ #if CPU(ARM_THUMB2)
+             // Not enough argument registers: try to load the 5th argument from the stack
+             MacroAssembler::RegisterID matchingContext = m_regs.regT1;
+-            unsigned offset = POKE_ARGUMENT_OFFSET;
++            // emitFunctionPrologue pushed fp and lr and set fp = sp, so the caller's stacked arguments start two
++            // words above fp; fp + 0 is the caller's saved fp, not the MatchingContextHolder*.
++            unsigned offset = POKE_ARGUMENT_OFFSET + 2;
+             m_jit.loadPtr(MacroAssembler::Address(GPRInfo::callFrameRegister, offset * sizeof(void*)), matchingContext);
+ #else
+             // The MatchingContextHolder* arrives in the 5th argument register.
