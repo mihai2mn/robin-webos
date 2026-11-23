@@ -46,3 +46,6 @@ Rebased from the 2.50.5 set and regenerated exactly against 2.54.3 (no fuzz). Dr
   repositioned against the new viewport origin) and 0015 (CSS selector JIT on ARMv7, ported by hand to 2.54.3;
   `WEBKIT_DISABLE_CSS_JIT=1` turns it off), MIT. The lab's 0013 (16-byte bmalloc SystemHeap alignment) is not carried:
   this build uses WebKit's bundled mimalloc for fastMalloc (`USE_MIMALLOC=ON`), so that code path is never reached.
+- 0032 lets a stream-collection message update the tracks on the main thread without the streaming thread waiting for
+  it. The wait deadlocked against the main thread suspending a muted video that had left the viewport (a Reddit feed
+  froze after about 30 s of scrolling).

@@ -1,0 +1,29 @@
+From: Robin <robin@localhost>
+Subject: [PATCH] GStreamer: do not wait for the main thread on a stream-collection message
+
+handleStreamCollectionMessage() runs on a streaming thread that holds its pad's stream lock and used
+callOnMainThreadAndWait() to update the tracks. When the main thread was at the same time in
+gst_element_set_state() on that pipeline (managePlayerSuspend(): a muted video scrolled out of the
+viewport), the state change waited for the stream lock and the streaming thread waited for the main
+thread. The page froze with an idle web process (LG CX, a Reddit feed of muted autoplay videos, about 30 s
+of scrolling; stacks: main thread in managePlayerSuspend -> gst_element_set_state, a multiqueue thread
+in handleStreamCollectionMessage -> callOnMainThreadAndWait). The track update now runs on the main
+thread without the streaming thread waiting for it.
+---
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -1969,9 +1969,11 @@
+             player->updateTracks(owner);
+     };
+ 
+-    GST_DEBUG_OBJECT(pipeline(), "Updating tracks");
+-    callOnMainThreadAndWait(WTF::move(callback));
+-    GST_DEBUG_OBJECT(pipeline(), "Updating tracks DONE");
++    // Not callOnMainThreadAndWait: this runs on a streaming thread that holds its pad's stream lock, and the main thread
++    // may be in gst_element_set_state() on the same pipeline (managePlayerSuspend() for a muted video that left the
++    // viewport), which waits for that lock. Waiting here deadlocked the page (a feed of muted autoplay videos, LG TV).
++    GST_DEBUG_OBJECT(pipeline(), "Updating tracks (on the main thread, not waited for)");
++    callOnMainThread(WTF::move(callback));
+ }
+ 
+ bool MediaPlayerPrivateGStreamer::handleNeedContextMessage(GstMessage* message)

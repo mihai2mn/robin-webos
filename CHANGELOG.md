@@ -7,6 +7,10 @@
   second video to start left one thread doing only that, the page stopped responding, and reloading did nothing.
   Settings that do not change anything are now ignored (same feed on the TV: frozen on the second scroll before, ten
   scrolls and every video playing after).
+- **Scrolling a feed of muted videos no longer freezes the page.** When a muted video scrolled out of view, WebKit
+  paused it from the page's main thread while that video's loader thread waited for the main thread to take its list
+  of tracks, and each waited for the other. The loader no longer waits (WebKit patch 0032; 30 rounds of scrolling a
+  Reddit feed up and down on the TV without a freeze).
 - **After a skip, Play waits for the new position.** When a page resumed playback before the first data from the new
   position arrived, LG's player got Play before Seek. It now gets Seek first.
 
