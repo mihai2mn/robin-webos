@@ -126,12 +126,12 @@ tested on a rooted CX; a user reports it running on a non-rooted CX in Developer
 renewed from time to time in LG's Developer Mode app, and apps installed through it stop when it expires. A rooted TV
 does not need that.
 
-1. Download `io.github.mihai2mn.robin_1.1.0_arm.ipk` from the
+1. Download `io.github.mihai2mn.robin_1.1.1_arm.ipk` from the
    [latest release](https://github.com/mihai2mn/robin-webos/releases/latest) and check it against `MD5SUMS`.
 2. Install it from the Homebrew Channel, or from a PC:
 
 ```sh
-ares-install -d <your-device> io.github.mihai2mn.robin_1.1.0_arm.ipk
+ares-install -d <your-device> io.github.mihai2mn.robin_1.1.1_arm.ipk
 ```
 
 The package is about 105 MB to download and 230 MB installed. Have about 400 MB free on the TV's app storage before
@@ -140,7 +140,7 @@ you start: an install that runs out of space leaves an app that will not open.
 Robin has its own app id, so it installs beside Wren and does not replace it. To bring your Wren bookmarks, history
 and filters across, see [Keeping your Wren data](docs/release-notes-1.0.0.md#keeping-your-wren-data).
 
-The release also has `io.github.mihai2mn.robin.dev_1.1.0_arm.ipk`, a second copy that shows as "Robin Test" and keeps
+The release also has `io.github.mihai2mn.robin.dev_1.1.1_arm.ipk`, a second copy that shows as "Robin Test" and keeps
 its own data. Most people do not need it.
 
 ### Install from the Homebrew Channel by adding this repository

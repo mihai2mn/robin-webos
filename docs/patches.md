@@ -35,6 +35,10 @@ own README with more detail.
 | 0026 webcore-mse-back-buffer-limit | plain MediaSource kept every played second: keep at most `MSE_MAX_BACK_BUFFER_SECONDS` (default 30, 0 = off) behind the playhead; after a seek back also drops data more than that far ahead of the new position |
 | 0027 wtf-memory-kill-after-consecutive-polls | a brief footprint spike above the kill threshold (a large media append) killed the web process: now only after `MEMORY_KILL_CONSECUTIVE_POLLS` (default 3) measurements in a row, or at once 12.5% above |
 | 0028 wtf-memory-relief-not-on-every-poll | the memory relief (JIT code, style data, decoded images, a GC) ran on every 2 s poll for any page above 182 MB: now when the pressure gets worse, else at most every `MEMORY_RELIEF_REPEAT_S` (default 30) seconds |
+| 0029 webcore-composite-pixel-moving-filters | WPE left blur and drop-shadow filters out of compositing, so such an element was redrawn on the main thread at every repaint |
+| 0030 webcore-sticky-no-relayout-on-scroll | each scroll laid the page out again for every sticky element (from webos-browser-lab 0014) |
+| 0031 webcore-css-selector-jit-armv7 | CSS selectors were matched in C++ on 32-bit ARM: now compiled to machine code (from webos-browser-lab 0015); `WEBKIT_DISABLE_CSS_JIT=1` turns it off |
+| 0032 gstreamer-stream-collection-no-main-thread-wait | a streaming thread waited for the main thread while holding its stream lock, and the main thread was suspending a muted video that left the viewport: the page froze |
 
 Details of 0015 to 0021 and how they were checked: [jit-armv7.md](jit-armv7.md).
 

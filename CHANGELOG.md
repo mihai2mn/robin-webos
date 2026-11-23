@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.1 (not released yet)
+## 1.1.1
 
 - **A feed with several videos no longer freezes its page.** Each video's audio output answered volume and mute
   notifications by setting the same values again, which sent the notifications round again. On a Reddit feed the
@@ -13,6 +13,8 @@
   Reddit feed up and down on the TV without a freeze).
 - **After a skip, Play waits for the new position.** When a page resumed playback before the first data from the new
   position arrived, LG's player got Play before Seek. It now gets Seek first.
+- Still open: on one video site a skip can leave the picture black until the quality is changed (1.1.0 listed this as
+  fixed; it is not). See [docs/release-notes-1.1.1.md](docs/release-notes-1.1.1.md).
 
 ## 1.1.0
 
