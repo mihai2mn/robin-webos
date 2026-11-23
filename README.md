@@ -134,7 +134,8 @@ its entry in the same Settings list.
   or refuse. Robin, like Wren, uses the CDM already on the TV, outside the terms it ships under. Use at your own risk.
 - **Small muted videos above 720p are not played** until you start them yourself. This keeps pages with many
   background videos inside the memory limit.
-- **The RegExp JIT is off** on the 32-bit engine. It crashed one tested site.
+- **Calls to built-in functions in tight loops are slow** (Math.sin and the like): several times slower than LG's own
+  browser. Plain JavaScript and the rest of the engine are not affected.
 - **Cloudflare checks take about a minute** on the TV's processor. Wait for them.
 
 <details>
