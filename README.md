@@ -5,7 +5,7 @@
 <h1 align="center">Robin</h1>
 
 <p align="center">
-  A web browser for rooted LG webOS TVs, built to be driven with the remote.<br>
+  A web browser for LG webOS TVs, built to be driven with the remote.<br>
   Based on <a href="https://github.com/sostk/webos-wpe-browser">Wren</a> by sostk.
 </p>
 
@@ -33,8 +33,8 @@ WebKit on the TV. Robin continues from Wren 0.3.3 with a newer engine, an ad blo
 memory budget that fits the TV. On the CX it was built on, that is the difference between a browser you avoid and
 one you use: pages load, video plays through to the end, and the remote is enough to get around.
 
-Robin 1.0.0 is the first release. It was tested on one TV, an LG CX on webOS 5.3. Read the [limits](#limits) before
-you install.
+Robin 1.1.0 is the second release: it opens in under two seconds and runs JavaScript about twice as fast as 1.0.0.
+It was tested on one TV, an LG CX on webOS 5.3. Read the [limits](#limits) before you install.
 
 ## What it does
 
@@ -59,8 +59,9 @@ you install.
 
 - **YouTube works properly.** Videos play on the hardware decoder at full quality, with full screen, seeking and
   the remote's media keys. On the TV's built-in browser it does not.
-- **A current engine.** WPE WebKit 2.54.3. WebKit 2.54 switched the JavaScript JIT off on all 32-bit builds; Robin's
-  patches bring the ARMv7 Baseline JIT and DFG back ([how](docs/jit-armv7.md)).
+- **A current engine.** WPE WebKit 2.54.3. WebKit 2.54 switched the JavaScript JIT and its inline caches off on all
+  32-bit builds; Robin brings back the ARMv7 Baseline JIT, the DFG, the RegExp JIT and the inline caches, and compiles
+  CSS selectors to machine code ([how](docs/jit-armv7.md)).
 - **An ad blocker** built on Brave's adblock-rust: network rules, redirects, scriptlets, cosmetic and procedural
   filters, pop-up rules ([details](docs/ad-blocking.md)).
 - **Hardware video** for H.264 and VP9 with AAC or PCM audio, seeking, page volume and mute, and play, pause, stop,
@@ -75,6 +76,10 @@ All figures are from one LG CX on webOS 5.3, November 2026.
 
 | Test | Result |
 |---|---|
+| Launch to window | 1.6 s (8.4 s in 1.0.0) |
+| Speedometer 3.1 | 0.61 (0.505 in 1.0.0) |
+| JavaScript micro benchmark (lower is better) | 415 ms (858 ms in 1.0.0; LG's own browser 358 ms) |
+| Scrolling a long Wikipedia article | 14 frames per second (6 in 1.0.0) |
 | A 10-minute streaming video on a real site, default settings | Played to the end. Web process peak 511 MB, limit 832 MB |
 | Video starts on a static page | 0 black pictures in 40 starts (9 in 62 before the fix) |
 | A news page with four autoplaying background videos | About 360 MB with the software-video limit, about 700 MB without |
@@ -82,14 +87,17 @@ All figures are from one LG CX on webOS 5.3, November 2026.
 
 ## Install
 
-You need a TV with root access and the [Homebrew Channel](https://www.webosbrew.org/).
+You need the [Homebrew Channel](https://www.webosbrew.org/), on a rooted TV or on one in Developer Mode. Robin was
+tested on a rooted CX; a user reports it running on a non-rooted CX in Developer Mode. Developer Mode has to be renewed
+from time to time in LG's Developer Mode app (apps installed through it stop when it expires); a rooted TV does not
+need that.
 
-1. Download `io.github.mihai2mn.robin_1.0.0_arm.ipk` from the
+1. Download `io.github.mihai2mn.robin_1.1.0_arm.ipk` from the
    [latest release](https://github.com/mihai2mn/robin-webos/releases/latest) and check it against `MD5SUMS`.
 2. Install it from the Homebrew Channel, or from a PC:
 
 ```sh
-ares-install -d <your-device> io.github.mihai2mn.robin_1.0.0_arm.ipk
+ares-install -d <your-device> io.github.mihai2mn.robin_1.1.0_arm.ipk
 ```
 
 The package is about 105 MB to download and 230 MB installed. Have about 400 MB free on the TV's app storage before
@@ -98,7 +106,7 @@ you start: an install that runs out of space leaves an app that will not open.
 Robin has its own app id, so it installs beside Wren and does not replace it. To bring your Wren bookmarks, history
 and filters across, see [Keeping your Wren data](docs/release-notes-1.0.0.md#keeping-your-wren-data).
 
-The release also has `io.github.mihai2mn.robin.dev_1.0.0_arm.ipk`, a second copy that shows as "Robin Test" and keeps
+The release also has `io.github.mihai2mn.robin.dev_1.1.0_arm.ipk`, a second copy that shows as "Robin Test" and keeps
 its own data. Most people do not need it.
 
 ### Install from the Homebrew Channel by adding this repository
@@ -134,8 +142,6 @@ its entry in the same Settings list.
   or refuse. Robin, like Wren, uses the CDM already on the TV, outside the terms it ships under. Use at your own risk.
 - **Small muted videos above 720p are not played** until you start them yourself. This keeps pages with many
   background videos inside the memory limit.
-- **Calls to built-in functions in tight loops are slow** (Math.sin and the like): several times slower than LG's own
-  browser. Plain JavaScript and the rest of the engine are not affected.
 - **Cloudflare checks take about a minute** on the TV's processor. Wait for them.
 
 <details>
@@ -193,7 +199,7 @@ with an AI image tool at the maintainer's request and traced to vector; it uses 
 - [Using Robin](docs/usage.md): the remote, launch parameters, logs
 - [How it works](docs/architecture.md) and [video](docs/video.md)
 - [Building](docs/building.md) and the [patch series](docs/patches.md)
-- [Release notes for 1.0.0](docs/release-notes-1.0.0.md)
+- Release notes: [1.1.0](docs/release-notes-1.1.0.md), [1.0.0](docs/release-notes-1.0.0.md)
 - [Changelog](CHANGELOG.md): what changed since the last release
 - [Everything else](docs/README.md)
 

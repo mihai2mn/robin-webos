@@ -66,6 +66,7 @@ Engine switches for testing (through `wpebEnv`, app ids ending in `.dev`):
 | `WPE_BROWSER_DEBUG_MEM_RELIEF_S=<s>` | how often WebKit repeats its memory relief while memory stays high (default 30; 0 = every 2 s poll, as in 1.0.0) |
 | `WEBKIT_DISABLE_CSS_JIT=1` | match CSS selectors in C++ instead of the 32-bit selector JIT |
 | `JSC_useRegExpJIT=0` | regular expressions in the interpreter instead of the RegExp JIT |
+| `JSC_forceICFailure=true` | WebKit's 32-bit default: every inline cache gives up (Robin turns them on; see [jit-armv7.md](jit-armv7.md)) |
 | `WREN_UBO=0` | the ad blocker and the site compatibility script off |
 
 ## Logs

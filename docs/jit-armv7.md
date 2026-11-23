@@ -35,6 +35,17 @@ All are patches in `buildroot-external/patches/wpewebkit/2.54.3/` ([patches.md](
 
 The safe fallback if the DFG is suspect is `useDFGJIT = false` with patches 0015 to 0018.
 
+## Inline caches (1.1.0)
+
+WebKit 2.54 also sets `forceICFailure` on 32-bit builds (`OptionsList.h`: `forceICFailure = is32Bit()`). Every inline
+cache then gives up: no call site is ever linked, so each call goes through the C++ linker (about 400 ns on the TV),
+and the DFG's call profile for every call site is empty ("Not Set"). The DFG therefore inlined nothing and compiled
+Math.sqrt, Math.floor and the like as full native calls. Robin's interface starts the engine with
+`JSC_forceICFailure=false` (`browser/engine_client.cpp`). Measured on the TV: Math.sqrt/abs/floor and method calls in a
+loop 8 to 20 times faster, the micro benchmark 884 -> 446 ms, Speedometer 3.1 0.593 -> 0.604. The JIT correctness
+pages (math folds, regular expressions, CSS selectors) give the same results with the caches on and off.
+`{"wpebEnv":{"JSC_forceICFailure":"true"}}` restores WebKit's default for a run.
+
 ## How it was verified
 
 All of it on the TV, with the `jsc` shell and with the full engine. The log is `build/jit254/REPORT.md` (not part
