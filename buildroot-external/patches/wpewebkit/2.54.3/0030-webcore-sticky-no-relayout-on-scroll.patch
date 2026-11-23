@@ -8,7 +8,7 @@ Wikipedia scrolling at 10 -> 30 fps on an LG C1.
 diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
 --- a/Source/WebCore/page/LocalFrameView.cpp
 +++ b/Source/WebCore/page/LocalFrameView.cpp
-@@ -1936,8 +1936,25 @@
+@@ -1936,8 +1936,28 @@
          return;
  
      m_layoutViewportOrigin = origin;
@@ -27,8 +27,11 @@ diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalF
 +            if (renderer.hasLayer())
 +                downcast<RenderBoxModelObject>(renderer).layer()->setNeedsCompositingGeometryUpdate();
 +        }
-+        // Without a layout nothing else schedules the compositing update that moves the sticky layers.
++        // Without a layout nothing else moves the sticky layers: update their positions against the new layout
++        // viewport origin (set above; a scroll made by the page reaches here before the layers were updated), then
++        // schedule the compositing update.
 +        if (stickyMoved) {
++            updateLayerPositionsAfterScrolling();
 +            if (auto* view = renderView())
 +                view->compositor().scheduleCompositingLayerUpdate();
 +        }

@@ -42,5 +42,7 @@ Rebased from the 2.50.5 set and regenerated exactly against 2.54.3 (no fuzz). Dr
   The engine sets it from `WPE_BROWSER_DEBUG_MEM_RELIEF_S`.
 - 0029 gives an element with a blur or drop-shadow filter its own compositing layer (coordinated graphics): WPE leaves
   FilterTrigger out, so such a filter was redrawn on the main thread at every repaint.
-- 0030-0032 are webos-browser-lab's 0014 (sticky boxes move without a relayout on scroll), 0015 (CSS selector JIT on ARMv7,
-  ported by hand to 2.54.3; `WEBKIT_DISABLE_CSS_JIT=1` turns it off) and 0013 (16-byte system-heap alignment), MIT.
+- 0030-0031 are webos-browser-lab's 0014 (sticky boxes move without a relayout on scroll; here the sticky layers are also
+  repositioned against the new viewport origin) and 0015 (CSS selector JIT on ARMv7, ported by hand to 2.54.3;
+  `WEBKIT_DISABLE_CSS_JIT=1` turns it off), MIT. The lab's 0013 (16-byte bmalloc SystemHeap alignment) is not carried:
+  this build uses WebKit's bundled mimalloc for fastMalloc (`USE_MIMALLOC=ON`), so that code path is never reached.

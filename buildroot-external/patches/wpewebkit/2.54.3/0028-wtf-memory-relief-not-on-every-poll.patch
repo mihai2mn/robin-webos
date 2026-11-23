@@ -7,9 +7,11 @@ runs out of memory) with thresholds of 182 MB / 286 MB, which most real pages ex
 2 s: the engine log showed a "Memory pressure relief" line every 2 s through Speedometer and on Wikipedia, and each
 strict relief throws away all JIT code, every document's style data and the decoded images, and starts a GC.
 
-The relief now runs when the policy becomes stricter (Unrestricted -> Conservative -> Strict) and is repeated only after
-MEMORY_RELIEF_REPEAT_S seconds (default 30, 0 = on every poll as before). The kill check (with 0027's consecutive-poll
-rule) still runs on every poll.
+A relief now runs when the policy is stricter than at the last relief (Unrestricted < Conservative < Strict), and is
+repeated only after MEMORY_RELIEF_REPEAT_S seconds (default 30, 0 = on every poll as before). A footprint that dips
+below a threshold and comes back does not restart the count; the synchronous relief before a kill counts as a Strict
+relief. The kill check (with 0027's consecutive-poll rule) still runs on every poll. Speedometer 3.1 on the TV:
+0.505 -> 0.568.
 ---
 diff --git a/Source/WTF/wtf/MemoryPressureHandler.cpp b/Source/WTF/wtf/MemoryPressureHandler.cpp
 --- a/Source/WTF/wtf/MemoryPressureHandler.cpp
@@ -22,16 +24,20 @@ diff --git a/Source/WTF/wtf/MemoryPressureHandler.cpp b/Source/WTF/wtf/MemoryPre
  #include <wtf/NeverDestroyed.h>
  #include <wtf/RAMSize.h>
  
-@@ -245,6 +246,26 @@
+@@ -196,10 +197,36 @@
+     return polls;
  }
- 
  
 +// The relief that runs while the footprint stays above a threshold is expensive: Strict throws away all JIT code, every
 +// document's style data and the decoded images, and starts a GC; Conservative clears the selector, font and layout caches.
 +// WebKit repeats it on every poll. With a short poll interval (a TV browser polls every 2 s so the kill threshold is seen
-+// in time) that is a purge every 2 s for any page above the conservative threshold. Now the relief runs when the policy
-+// becomes stricter, and is repeated only after MEMORY_RELIEF_REPEAT_S seconds (default 30, WebKit's own poll interval;
-+// 0 = every poll, the old behaviour). The kill check still runs on every poll.
++// in time) that is a purge every 2 s for any page above the conservative threshold. Now a relief runs when the policy is
++// stricter than at the last relief, and is repeated only after MEMORY_RELIEF_REPEAT_S seconds (default 30, WebKit's own
++// poll interval; 0 = every poll, the old behaviour). The kill check still runs on every poll. One handler per process,
++// on the main run loop.
++static MonotonicTime s_lastRelief;
++static MemoryUsagePolicy s_lastReliefPolicy { MemoryUsagePolicy::Unrestricted };
++
 +static Seconds memoryReliefRepeatInterval()
 +{
 +    static const Seconds interval = [] {
@@ -46,24 +52,27 @@ diff --git a/Source/WTF/wtf/MemoryPressureHandler.cpp b/Source/WTF/wtf/MemoryPre
 +    return interval;
 +}
 +
- void MemoryPressureHandler::measurementTimerFired()
+ void MemoryPressureHandler::shrinkOrDie(size_t killThreshold)
  {
-     size_t footprint = memoryFootprint();
-@@ -264,8 +285,19 @@
-     }
+     RELEASE_LOG(MemoryPressure, "Process is above the memory kill threshold. Trying to shrink down.");
+     releaseMemory(Critical::Yes, Synchronous::Yes);
++    s_lastRelief = MonotonicTime::now();
++    s_lastReliefPolicy = MemoryUsagePolicy::Strict;
  
+     size_t footprint = memoryFootprint();
+     RELEASE_LOG(MemoryPressure, "New memory footprint: %zu MB", footprint / MB);
+@@ -266,6 +293,16 @@
      m_consecutivePollsAboveKillThreshold = 0;
-+    auto previousPolicy = m_memoryUsagePolicy;
      setMemoryUsagePolicyBasedOnFootprint(footprint);
  
-+    static MonotonicTime lastRelief;
-+    if (m_memoryUsagePolicy == MemoryUsagePolicy::Unrestricted)
-+        lastRelief = { };
-+    else {
++    if (m_memoryUsagePolicy != MemoryUsagePolicy::Unrestricted) {
 +        auto now = MonotonicTime::now();
-+        if (m_memoryUsagePolicy <= previousPolicy && lastRelief && now - lastRelief < memoryReliefRepeatInterval())
++        // Not stricter than the last relief, and that one is recent: a page hovering around a threshold must not get
++        // a relief every few polls by dipping below it and coming back.
++        if (s_lastRelief && m_memoryUsagePolicy <= s_lastReliefPolicy && now - s_lastRelief < memoryReliefRepeatInterval())
 +            return;
-+        lastRelief = now;
++        s_lastRelief = now;
++        s_lastReliefPolicy = m_memoryUsagePolicy;
 +    }
 +
      switch (m_memoryUsagePolicy) {

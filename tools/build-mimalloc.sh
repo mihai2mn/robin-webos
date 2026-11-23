@@ -3,7 +3,8 @@
 # mimalloc 2.1.7 (MIT, Microsoft) as a shared library for the 32-bit engine: built with the same cross toolchain and CPU flags as
 # WebKit, from a pinned release tarball. Output: $OUT/libmimalloc.so.2 (stripped) and $OUT/LICENSE. tools/package-release.sh puts
 # both into the engine (engine/lib, engine/licenses/mimalloc-2.1.7) when they exist; the launch parameter
-# {"wpebEnv":{"WPE_BROWSER_DEBUG_MALLOC":"mimalloc"}} preloads it (browser/engine_client.cpp).
+# {"wpebEnv":{"WPE_BROWSER_DEBUG_MALLOC":"mimalloc"}} preloads it (browser/engine_client.cpp) for the libraries that use glibc's
+# malloc; WebKit itself already allocates through its built-in mimalloc (USE_MIMALLOC=ON).
 # After webos-browser-lab's mimalloc/build_mimalloc.sh (MIT), which measured it on an LG C1.
 #   BUILD_ROOT=~/webos-browser-build bash tools/build-mimalloc.sh
 set -euo pipefail
