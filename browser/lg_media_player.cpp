@@ -474,6 +474,14 @@ void LgMediaPlayer::pause(bool paused) {
 #if defined(WNK_SDL_WEBOS)
     if (api_ == nullptr || paused == paused_) return;
     paused_ = paused;
+    if (!paused && seek_pending_ && (fed_ > 0 || audio_fed_ > 0)) {
+        // Resumed after a flush, before the first unit from the new position: Play now would reach LG's pipeline ahead of
+        // its Seek. A 2160p stream played on after that with a black picture until it was loaded again (TV, 2026-11-23:
+        // pause, skip ahead, Play then Seek 16 ms later). feed() sends Seek and then Play, the order that worked.
+        playing_ = false;
+        WNK_LOGI(kCat, "Play held until the seek");
+        return;
+    }
     const bool ok = paused ? api_->Pause() : api_->Play();
     if (!paused) playing_ = true;
     WNK_LOGI(kCat, "%s -> %d", paused ? "Pause" : "Play", ok ? 1 : 0);

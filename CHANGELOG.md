@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1 (not released yet)
+
+- **A feed with several videos no longer freezes its page.** Each video's audio output answered volume and mute
+  notifications by setting the same values again, which sent the notifications round again. On a Reddit feed the
+  second video to start left one thread doing only that, the page stopped responding, and reloading did nothing.
+  Settings that do not change anything are now ignored (same feed on the TV: frozen on the second scroll before, ten
+  scrolls and every video playing after).
+- **After a skip, Play waits for the new position.** When a page resumed playback before the first data from the new
+  position arrived, LG's player got Play before Seek. It now gets Seek first.
+
 ## 1.1.0
 
 Faster start, JavaScript about twice as fast, smoother scrolling, and fixes from use on the TV. Measured on an LG CX

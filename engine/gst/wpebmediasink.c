@@ -1552,7 +1552,22 @@ struct _WpebAudioSink {
     gboolean built;
     double volume;
     gboolean mute;
+    /* What send_volume last applied (sent_valid: anything yet). Volume and mute only go out when they change: setting the
+     * software chain's pulsesink made it notify, playsink reported that as its own volume change, and stream_volume_changed
+     * set the pulsesink again, for ever (TV, 2026-11-23: a feed's second in-page video, a streaming thread at 100% in
+     * playsink's volume/mute deep-notify, the page's main thread blocked in gst_play_sink_get_volume: the page froze). */
+    gboolean sent_valid;
+    double sent_volume;
+    gboolean sent_mute;
 };
+
+/* Volume steps smaller than this are the same volume (pulsesink and playsink round it). */
+#define WPEB_VOLUME_EPSILON 0.001
+
+static gboolean volume_same(double a, double b)
+{
+    return a - b < WPEB_VOLUME_EPSILON && b - a < WPEB_VOLUME_EPSILON;
+}
 
 static void wpeb_audio_sink_stream_volume_init(GstStreamVolumeInterface *iface) { (void)iface; }
 
@@ -1659,6 +1674,9 @@ static GstElement *make_software_chain(WpebAudioSink *self, gboolean decode)
     /* The pipeline's clock must not be the sound server's: a PulseAudio stream that has not started (or is held)
      * does not advance it, and the video, fed to LG's pipeline against that clock, froze with it (TV, 2026-11-11). */
     g_object_set(self->pulse, "provide-clock", FALSE, "volume", self->volume, "mute", self->mute, NULL);
+    self->sent_valid = TRUE;
+    self->sent_volume = self->volume;
+    self->sent_mute = self->mute;
     /* Added to a running pipeline: no preroll of its own (see wpeb_audio_hw_init). */
     g_object_set(self->pulse, "async", FALSE, NULL);
     return first;
@@ -1698,7 +1716,10 @@ static void stream_volume_changed(GObject *volume_owner, GParamSpec *pspec, gpoi
     WpebAudioSink *self = WPEB_AUDIO_SINK(data);
     gboolean mute = FALSE;
     g_object_get(volume_owner, "mute", &mute, NULL);
-    self->volume = gst_stream_volume_get_volume(GST_STREAM_VOLUME(volume_owner), GST_STREAM_VOLUME_FORMAT_LINEAR);
+    const double volume = gst_stream_volume_get_volume(GST_STREAM_VOLUME(volume_owner), GST_STREAM_VOLUME_FORMAT_LINEAR);
+    if (volume_same(volume, self->volume) && !mute == !self->mute)
+        return; /* a notification without a change (often our own setting coming back): nothing to send */
+    self->volume = volume;
     self->mute = mute;
     GST_INFO_OBJECT(self, "%s of the page's element: volume %.2f%s (%s)", pspec->name, self->volume, mute ? ", muted" : "",
         self->hw ? "hardware audio" : "software audio");
@@ -1840,6 +1861,11 @@ static gboolean wpeb_audio_sink_pad_query(GstPad *pad, GstObject *parent, GstQue
 
 static void send_volume(WpebAudioSink *self)
 {
+    if (self->sent_valid && volume_same(self->sent_volume, self->volume) && !self->sent_mute == !self->mute)
+        return;
+    self->sent_valid = self->pulse != NULL || self->hw != NULL; /* before the chain exists nothing was applied */
+    self->sent_volume = self->volume;
+    self->sent_mute = self->mute;
     if (self->pulse)
         g_object_set(self->pulse, "volume", self->volume, "mute", self->mute, NULL);
     if (self->hw && WPEB_AUDIO_HW(self->hw)->video) {
@@ -1852,8 +1878,16 @@ static void wpeb_audio_sink_set_property(GObject *object, guint id, const GValue
 {
     WpebAudioSink *self = WPEB_AUDIO_SINK(object);
     switch (id) {
-    case AUDIO_PROP_VOLUME: self->volume = g_value_get_double(value); break;
-    case AUDIO_PROP_MUTE: self->mute = g_value_get_boolean(value); break;
+    case AUDIO_PROP_VOLUME:
+        if (volume_same(self->volume, g_value_get_double(value)))
+            return;
+        self->volume = g_value_get_double(value);
+        break;
+    case AUDIO_PROP_MUTE:
+        if (!self->mute == !g_value_get_boolean(value))
+            return;
+        self->mute = g_value_get_boolean(value);
+        break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec); return;
     }
     GST_INFO_OBJECT(self, "%s set: volume %.2f%s (%s)", pspec->name, self->volume, self->mute ? ", muted" : "",
