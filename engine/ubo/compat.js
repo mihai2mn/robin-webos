@@ -161,8 +161,13 @@
         ((v.parentElement || v).getBoundingClientRect().width || 1) < innerWidth * 0.6;
     // What a video is before it starts: a preview is marked (this is the floor; see the policy's previewMark), and
     // everything is then given the video policy's decision (below).
+    // The two observers below look through every node the page adds or removes for videos. A page without a video (most
+    // of them) skips that: on the TV it cost about half a second of a large article's load. hadVideo: a video was marked
+    // or seen in this document, so removed nodes may hold one.
+    let hadVideo = false;
     const mark = v => {
         if (!(v instanceof HTMLVideoElement)) return;
+        hadVideo = true;
         // The floor marks previews so a video the policy never gets to decide (a shadow-root video, a decide() that
         // threw) still keeps the hardware decoder off the page's main video (DESIGN.md §2). It runs BEFORE the decision
         // and must not write once a decision owns this element (it runs again on every load(), e.g. the reload a
@@ -184,6 +189,8 @@
     const load = HTMLMediaElement.prototype.load;
     HTMLMediaElement.prototype.load = function () { mark(this); if (held(this)) return; return load.apply(this, arguments); };
     new MutationObserver(records => {
+        if (!document.getElementsByTagName('video').length) return;
+        hadVideo = true;
         for (const r of records) for (const n of r.addedNodes) {
             if (n.nodeType !== 1) continue;
             (n.tagName === 'VIDEO' ? [n] : n.querySelectorAll ? [...n.querySelectorAll('video')] : []).forEach(mark);
@@ -250,6 +257,7 @@
         setTimeout(() => { if (v.paused && !visible(v)) release(v); }, 1500);
     }, true);
     new MutationObserver(records => {
+        if (!hadVideo) return;
         for (const r of records) for (const n of r.removedNodes) {
             if (n.nodeType !== 1) continue;
             const vids = n.tagName === 'VIDEO' ? [n] : [...n.querySelectorAll('video')];

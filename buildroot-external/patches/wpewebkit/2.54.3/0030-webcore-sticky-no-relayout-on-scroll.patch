@@ -1,0 +1,38 @@
+From: Robin <robin@localhost>
+Subject: [PATCH] LocalFrameView: scrolling moves sticky boxes without a relayout
+
+From webos-browser-lab patch 0014 (MIT), rebased on 2.54.3. A scroll on a page with position: sticky elements laid out
+the whole page again on every scroll step; the boxes are now moved on the compositing side only. The lab measured
+Wikipedia scrolling at 10 -> 30 fps on an LG C1.
+---
+diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
+--- a/Source/WebCore/page/LocalFrameView.cpp
++++ b/Source/WebCore/page/LocalFrameView.cpp
+@@ -1936,8 +1936,25 @@
+         return;
+ 
+     m_layoutViewportOrigin = origin;
+-    if (layoutTriggering == TriggerLayoutOrNot::Yes)
+-        setViewportConstrainedObjectsNeedLayout();
++    // A scroll moves the layout viewport. Sticky boxes take their offset from the layer position update
++    // after the scroll, so only fixed ones need layout: a sticky box with its own scrolling (Wikipedia's
++    // pinned table of contents) relaid out on every frame held rAF-driven scrolling at 10-20 fps.
++    if (layoutTriggering == TriggerLayoutOrNot::Yes && hasViewportConstrainedObjects()) {
++        bool stickyMoved = false;
++        for (auto& renderer : *m_viewportConstrainedObjects) {
++            if (renderer.isStickilyPositioned())
++                stickyMoved = true;
++            else
++                renderer.setNeedsLayout();
++            if (renderer.hasLayer())
++                downcast<RenderBoxModelObject>(renderer).layer()->setNeedsCompositingGeometryUpdate();
++        }
++        // Without a layout nothing else schedules the compositing update that moves the sticky layers.
++        if (stickyMoved) {
++            if (auto* view = renderView())
++                view->compositor().scheduleCompositingLayerUpdate();
++        }
++    }
+     
+     if (TiledBacking* tiledBacking = this->tiledBacking()) {
+         FloatRect layoutViewport = layoutViewportRect();

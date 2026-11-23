@@ -167,7 +167,9 @@
         }
     };
 
-    // Work in batches: at most every 100 ms while the document changes.
+    // Work in batches: at most every 100 ms while the document changes, every 400 ms while it is still being parsed. Each batch of generic
+    // rules is a new style sheet, and each new sheet restyles the whole page: on a large article that was one full restyle every
+    // 100 ms of the load (TV: about a second of a Wikipedia load). The site's own rules (data.css) are in place from the start.
     let scheduled = false;
     // The procedural filters run again only when nodes were added or an element's class/id changed (not for every mutation of the page).
     let needProcedural = true;
@@ -180,7 +182,7 @@
     const schedule = () => {
         if (scheduled) return;
         scheduled = true;
-        setTimeout(run, 100);
+        setTimeout(run, document.readyState === 'loading' ? 400 : 100);
     };
     const observer = new MutationObserver(records => {
         for (const r of records) {

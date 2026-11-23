@@ -1,0 +1,195 @@
+From: Robin <robin@localhost>
+Subject: [PATCH] CSS selector JIT for ARMv7 (Thumb-2), with a runtime off switch
+
+Ported from webos-browser-lab patch 0015 (MIT) to 2.54.3; the lab's file names were cut off and are restored here, and
+2.54's SelectorCompiler.cpp needed the r6 save/restore, the ARMv7 prologue, the stack reference member and a plain
+(non-template) sdiv by hand. The selector compiler was only enabled for x86_64 and ARM64, so 32-bit ARM matched every
+selector in the C++ SelectorChecker: a third of the main thread during a Wikipedia load on an LG C1 (33% -> 24% with
+this). It needs hardware integer divide (SDIV, for :nth-child), which Robin's -march=armv8-a build has.
+WEBKIT_DISABLE_CSS_JIT=1 in the web process's environment turns it off at run time.
+---
+diff --git a/Source/WebCore/cssjit/RegisterAllocator.h b/Source/WebCore/cssjit/RegisterAllocator.h
+--- a/Source/WebCore/cssjit/RegisterAllocator.h
++++ b/Source/WebCore/cssjit/RegisterAllocator.h
+@@ -72,6 +72,24 @@
+     JSC::X86Registers::r14,
+     JSC::X86Registers::r15
+ };
++#elif CPU(ARM_THUMB2)
++static constexpr std::array<JSC::MacroAssembler::RegisterID, 4> callerSavedRegisters {
++    JSC::ARMRegisters::r0,
++    JSC::ARMRegisters::r1,
++    JSC::ARMRegisters::r2,
++    JSC::ARMRegisters::r3,
++};
++static constexpr std::array<JSC::MacroAssembler::RegisterID, 6> calleeSavedRegisters {
++    JSC::ARMRegisters::r4,
++    JSC::ARMRegisters::r5,
++    JSC::ARMRegisters::r8,
++    JSC::ARMRegisters::r9,
++    JSC::ARMRegisters::r10,
++    JSC::ARMRegisters::r11,
++};
++// Only used for three register-to-register moves (swapping call arguments), which never touch the
++// MacroAssembler's own scratch use of ip.
++static const JSC::MacroAssembler::RegisterID tempRegister = JSC::ARMRegisters::ip;
+ #else
+ #error RegisterAllocator has no defined registers for the architecture.
+ #endif
+@@ -176,6 +194,9 @@
+         return (registerID >= JSC::X86Registers::eax && registerID <= JSC::X86Registers::edx)
+             || (registerID >= JSC::X86Registers::esi && registerID <= JSC::X86Registers::r10)
+             || (registerID >= JSC::X86Registers::r12 && registerID <= JSC::X86Registers::r15);
++#elif CPU(ARM_THUMB2)
++        return (registerID >= JSC::ARMRegisters::r0 && registerID <= JSC::ARMRegisters::r5)
++            || (registerID >= JSC::ARMRegisters::r8 && registerID <= JSC::ARMRegisters::r11);
+ #else
+ #error RegisterAllocator does not define the valid register range for the current architecture.
+ #endif
+@@ -189,6 +210,8 @@
+ #elif CPU(X86_64)
+         return (registerID >= JSC::X86Registers::eax && registerID <= JSC::X86Registers::edx)
+             || (registerID >= JSC::X86Registers::esi && registerID <= JSC::X86Registers::r10);
++#elif CPU(ARM_THUMB2)
++        return registerID >= JSC::ARMRegisters::r0 && registerID <= JSC::ARMRegisters::r3;
+ #else
+ #error RegisterAllocator does not define the valid caller saved register range for the current architecture.
+ #endif
+diff --git a/Source/WebCore/cssjit/SelectorCompiler.cpp b/Source/WebCore/cssjit/SelectorCompiler.cpp
+--- a/Source/WebCore/cssjit/SelectorCompiler.cpp
++++ b/Source/WebCore/cssjit/SelectorCompiler.cpp
+@@ -623,6 +623,9 @@
+     bool generatePrologue();
+     void generateEpilogue(StackAllocator&);
+     StackAllocator::StackReferenceVector m_prologueStackReferences;
++#if CPU(ARM_THUMB2)
++    StackAllocator::StackReferenceVector m_macroAssemblerRegistersStackReferences;
++#endif
+ 
+     Assembler m_assembler;
+     RegisterAllocator m_registerAllocator;
+@@ -1888,6 +1891,21 @@
+ 
+ inline SelectorCompilationStatus SelectorCodeGenerator::compile(JSC::MacroAssemblerCodeRef<JSC::CSSSelectorPtrTag>& codeRef)
+ {
++#if CPU(ARM_THUMB2)
++    // Robin: WEBKIT_DISABLE_CSS_JIT=1 leaves every selector to the C++ checker (the 32-bit compiler is new code).
++    static const bool disabled = [] {
++        const char* value = getenv("WEBKIT_DISABLE_CSS_JIT");
++        return value && *value && *value != '0';
++    }();
++    if (disabled)
++        return SelectorCompilationStatus::CannotCompile;
++#endif
++    if (m_functionType == FunctionType::SimpleSelectorChecker || m_functionType == FunctionType::SelectorCheckerWithCheckingContext) {
++        computeBacktrackingMemoryRequirements(m_selectorFragments);
++        if (m_selectorFragments.registerRequirements > maximumRegisterCount)
++            return SelectorCompilationStatus::CannotCompile;
++    }
++
+     switch (m_functionType) {
+     case FunctionType::SimpleSelectorChecker:
+     case FunctionType::SelectorCheckerWithCheckingContext:
+@@ -2325,12 +2343,23 @@
+     }
+ }
+ 
+-inline void NODELETE SelectorCodeGenerator::pushMacroAssemblerRegisters()
++inline void SelectorCodeGenerator::pushMacroAssemblerRegisters()
+ {
++#if CPU(ARM_THUMB2)
++    // r6 belongs to the ARMv7 MacroAssembler (addressTempRegister) and is callee saved in the AAPCS.
++    Vector<JSC::MacroAssembler::RegisterID, 1> macroAssemblerRegisters({ JSC::ARMRegisters::r6 });
++    m_macroAssemblerRegistersStackReferences = m_stackAllocator.push(macroAssemblerRegisters);
++#endif
+ }
+ 
+-inline void NODELETE SelectorCodeGenerator::popMacroAssemblerRegisters(StackAllocator&)
++inline void SelectorCodeGenerator::popMacroAssemblerRegisters(StackAllocator& stackAllocator)
+ {
++#if CPU(ARM_THUMB2)
++    Vector<JSC::MacroAssembler::RegisterID, 1> macroAssemblerRegisters({ JSC::ARMRegisters::r6 });
++    stackAllocator.pop(m_macroAssemblerRegistersStackReferences, macroAssemblerRegisters);
++#else
++    UNUSED_PARAM(stackAllocator);
++#endif
+ }
+ 
+ inline bool SelectorCodeGenerator::generatePrologue()
+@@ -2341,6 +2370,12 @@
+     prologueRegisters.append(JSC::ARM64Registers::fp);
+     m_prologueStackReferences = m_stackAllocator.push(prologueRegisters);
+     return true;
++#elif CPU(ARM_THUMB2)
++    Vector<JSC::MacroAssembler::RegisterID, 2> prologueRegisters;
++    prologueRegisters.append(JSC::ARMRegisters::lr);
++    prologueRegisters.append(JSC::ARMRegisters::r7);
++    m_prologueStackReferences = m_stackAllocator.push(prologueRegisters);
++    return true;
+ #elif CPU(X86_64)
+     if (shouldDumpCSSJITDisassembly()) {
+         Vector<JSC::MacroAssembler::RegisterID, 1> prologueRegister;
+@@ -2357,6 +2392,9 @@
+ #if CPU(ARM64)
+     Vector<JSC::MacroAssembler::RegisterID, 2> prologueRegisters({ JSC::ARM64Registers::lr, JSC::ARM64Registers::fp });
+     stackAllocator.pop(m_prologueStackReferences, prologueRegisters);
++#elif CPU(ARM_THUMB2)
++    Vector<JSC::MacroAssembler::RegisterID, 2> prologueRegisters({ JSC::ARMRegisters::lr, JSC::ARMRegisters::r7 });
++    stackAllocator.pop(m_prologueStackReferences, prologueRegisters);
+ #elif CPU(X86_64)
+     if (shouldDumpCSSJITDisassembly()) {
+         Vector<JSC::MacroAssembler::RegisterID, 1> prologueRegister({ callFrameRegister });
+@@ -3007,6 +3045,14 @@
+     m_assembler.m_assembler.sdiv<32>(resultRegister, inputDividend, divisorRegister);
+     m_assembler.mul32(divisorRegister, resultRegister);
+     return m_assembler.branchSub32(condition, inputDividend, resultRegister, resultRegister);
++#elif CPU(ARM_THUMB2)
++    LocalRegister divisorRegister(m_registerAllocator);
++    m_assembler.move(Assembler::TrustedImm32(divisor), divisorRegister);
++
++    LocalRegister resultRegister(m_registerAllocator);
++    m_assembler.m_assembler.sdiv(resultRegister, inputDividend, divisorRegister);
++    m_assembler.mul32(divisorRegister, resultRegister);
++    return m_assembler.branchSub32(condition, inputDividend, resultRegister, resultRegister);
+ #elif CPU(X86_64)
+     // idiv takes RAX + an arbitrary register, and return RAX + RDX. Most of this code is about doing
+     // an efficient allocation of those registers. If a register is already in use and is not the inputDividend,
+diff --git a/Source/WebCore/cssjit/StackAllocator.h b/Source/WebCore/cssjit/StackAllocator.h
+--- a/Source/WebCore/cssjit/StackAllocator.h
++++ b/Source/WebCore/cssjit/StackAllocator.h
+@@ -183,7 +183,13 @@
+ 
+     void alignStackPreFunctionCall()
+     {
+-#if CPU(X86_64)
++#if CPU(ARM_THUMB2)
++        RELEASE_ASSERT(!m_hasFunctionCallPadding);
++        if (m_offsetFromTop % 8) {
++            m_hasFunctionCallPadding = true;
++            m_assembler.addPtrNoFlags(JSC::MacroAssembler::TrustedImm32(-stackUnitInBytes()), JSC::MacroAssembler::stackPointerRegister);
++        }
++#elif CPU(X86_64)
+         RELEASE_ASSERT(!m_hasFunctionCallPadding);
+         unsigned topAlignment = stackUnitInBytes();
+         if ((topAlignment + m_offsetFromTop) % 16) {
+@@ -195,7 +201,7 @@
+ 
+     void unalignStackPostFunctionCall()
+     {
+-#if CPU(X86_64)
++#if CPU(X86_64) || CPU(ARM_THUMB2)
+         if (m_hasFunctionCallPadding) {
+             m_assembler.addPtrNoFlags(JSC::MacroAssembler::TrustedImm32(stackUnitInBytes()), JSC::MacroAssembler::stackPointerRegister);
+             m_hasFunctionCallPadding = false;
+diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
+--- a/Source/WTF/wtf/PlatformEnable.h
++++ b/Source/WTF/wtf/PlatformEnable.h
+@@ -976,7 +976,7 @@
+ #endif
+ 
+ /* CSS Selector JIT Compiler */
+-#if !defined(ENABLE_CSS_SELECTOR_JIT) && ((CPU(X86_64) || CPU(ARM64)) && ENABLE(JIT))
++#if !defined(ENABLE_CSS_SELECTOR_JIT) && ((CPU(X86_64) || CPU(ARM64) || (CPU(ARM_THUMB2) && HAVE(ARM_IDIV_INSTRUCTIONS))) && ENABLE(JIT))
+ #define ENABLE_CSS_SELECTOR_JIT 1
+ #endif
+ 

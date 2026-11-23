@@ -1,0 +1,33 @@
+From: Robin <robin@localhost>
+Subject: [PATCH] WebCore compositing: a blur or drop-shadow filter gets its own layer with coordinated graphics
+
+WebChromeClient leaves FilterTrigger out of the compositing triggers, so an element with `filter: blur()` that is not
+composited for another reason is filtered on the CPU, on the web process's main thread, at every repaint. On the TV one
+animated blurred element kept that thread at 100% (SkBlurEngine under RenderLayer::applyFilters) and every tab stopped
+answering. Robin worked around it in compat.js by walking every CSS rule of every page and adding `will-change: filter`
+where a rule had a blur; that walk cost ~1-2 s per page load on the TV. With coordinated graphics the compositor applies
+any filter on the GPU, so a filter that moves pixels (blur, drop-shadow) now makes the element composited directly.
+Backdrop filters were already composited.
+---
+diff --git a/Source/WebCore/rendering/RenderLayerCompositor.cpp b/Source/WebCore/rendering/RenderLayerCompositor.cpp
+--- a/Source/WebCore/rendering/RenderLayerCompositor.cpp
++++ b/Source/WebCore/rendering/RenderLayerCompositor.cpp
+@@ -3998,8 +3998,17 @@
+         return true;
+ #endif
+ 
+-    if (!(m_compositingTriggers & ChromeClient::FilterTrigger))
++    if (!(m_compositingTriggers & ChromeClient::FilterTrigger)) {
++#if USE(COORDINATED_GRAPHICS)
++        // A blur or a drop shadow on a layer that is not composited is redrawn on the CPU, on the web process's main thread,
++        // at every repaint of the element; one animated blurred element kept that thread at 100% (TV, LG CX). The coordinated
++        // compositor applies any filter on the GPU, so such an element gets its own layer, as `will-change: filter` would.
++        // Filters that do not move pixels (grayscale, brightness, ...) stay where they are: they are cheap to paint.
++        return renderer.hasFilter() && renderer.style().filter().hasFilterThatMovesPixels();
++#else
+         return false;
++#endif
++    }
+ 
+     return renderer.hasFilter();
+ }

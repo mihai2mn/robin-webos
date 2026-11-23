@@ -40,3 +40,7 @@ Rebased from the 2.50.5 set and regenerated exactly against 2.54.3 (no fuzz). Dr
   (default 30, 0 = every poll). Robin polls every 2 s with thresholds most pages exceed (182 / 286 MB), so the relief (JIT
   code, style data, decoded images, a GC) ran every 2 s on ordinary pages. The kill check still runs on every poll.
   The engine sets it from `WPE_BROWSER_DEBUG_MEM_RELIEF_S`.
+- 0029 gives an element with a blur or drop-shadow filter its own compositing layer (coordinated graphics): WPE leaves
+  FilterTrigger out, so such a filter was redrawn on the main thread at every repaint.
+- 0030-0032 are webos-browser-lab's 0014 (sticky boxes move without a relayout on scroll), 0015 (CSS selector JIT on ARMv7,
+  ported by hand to 2.54.3; `WEBKIT_DISABLE_CSS_JIT=1` turns it off) and 0013 (16-byte system-heap alignment), MIT.
