@@ -5,7 +5,7 @@
 <h1 align="center">Robin</h1>
 
 <p align="center">
-  A web browser for LG webOS TVs that handles video-heavy sites the way a computer would, driven with the remote.<br>
+  A web browser for LG webOS TVs, driven with the remote.<br>
   Based on <a href="https://github.com/sostk/webos-wpe-browser">Wren</a> by sostk.
 </p>
 
@@ -29,14 +29,12 @@
 
 ## Why I made this
 
-My LG CX lives in a campervan, and that is where it gets most of its use. Power there comes from a battery, so every
-watt counts. The TV alone is fine. Putting a laptop or a mini PC next to it, only to browse the sites I actually watch,
-would take two to three times the power of the TV on its own.
+My LG CX is in a campervan and runs off a battery. Browsing on a laptop or mini PC next to it would use two to three
+times the power of the TV on its own, so I wanted the TV to do the browsing itself.
 
-The TV's built-in browser cannot do the job. It is years behind, most modern sites break or crawl in it, and video
-sites are the worst case. [Wren](https://github.com/sostk/webos-wpe-browser) showed that a current WebKit can run on
-the TV. Robin takes that further, with one goal: the sites you would otherwise open on a computer, the ones built
-around video, thumbnails and long feeds, should just work on the TV, with the remote, and keep working for hours.
+The TV's built-in browser is years old, and most current sites break or run slowly in it, video sites most of all.
+[Wren](https://github.com/sostk/webos-wpe-browser) put a current WebKit on the TV. Robin builds on Wren for the sites
+I would otherwise open on a computer: video players, pages of thumbnails with hover previews, long feeds.
 
 ## What it does
 
@@ -47,7 +45,7 @@ around video, thumbnails and long feeds, should just work on the TV, with the re
   </tr>
   <tr>
     <td valign="top"><b>Browsing.</b> Arrows move a pointer and scroll, OK clicks, Back goes back. Press ▲ at the top of a page for tabs and the address bar.</td>
-    <td valign="top"><b>Side panel.</b> Bookmarks, history, zoom per site and settings, one key away.</td>
+    <td valign="top"><b>Side panel.</b> Bookmarks, history, zoom per site and settings.</td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/adblock.jpg" alt="The ad blocker page with a list of filter lists and switches"></td>
@@ -59,23 +57,23 @@ around video, thumbnails and long feeds, should just work on the TV, with the re
   </tr>
 </table>
 
-What makes video-heavy sites usable:
+For video sites:
 
 - **The TV's hardware decoder plays the main video.** H.264 and VP9 with AAC or PCM audio, full screen, seeking,
   quality changes, and play, pause, rewind and fast-forward from the remote. YouTube plays at full quality
   ([details](docs/video.md)).
-- **Thumbnail walls with hover previews work.** Small muted previews are decoded in the page, so they never take the
+- **Hover previews on thumbnail pages play.** Small muted previews are decoded in the page, so they never take the
   decoder away from the video you are watching. At most two play at once, which keeps a page full of them inside the
   memory limit.
 - **Seeking and quality switches do not leave a black picture.** Frames are held back until the decoder has a
   keyframe.
-- **Long feeds stay responsive.** Loading spinners and other endless animations pause while they are off screen, and
-  blur effects are drawn by the graphics chip, so one busy page does not freeze every tab.
-- **Memory limits that hold.** The web process is capped and watched. A page that grows too large is reloaded before
-  the TV runs out of memory.
+- **Busy pages do not freeze the other tabs.** Loading spinners and other endless animations pause while they are
+  off screen, and blur effects are drawn by the graphics chip.
+- **Memory is capped.** WebKit frees caches as a page grows, and a page that passes 832 MB is reloaded before the TV
+  runs out of memory.
 - **An ad blocker** built on Brave's adblock-rust with uBlock Origin's lists: network rules, redirects, scriptlets,
   cosmetic and procedural filters, pop-up rules ([details](docs/ad-blocking.md)).
-- **Remote first.** Zoom is remembered per site; bookmarks, history and tabs come back after a restart. The TV keyboard
+- **Remote control.** Zoom is remembered per site; bookmarks, history and tabs come back after a restart. The TV keyboard
   opens when you click a text field, and typing from LG's phone app works ([usage](docs/usage.md)).
 
 ## Performance
@@ -96,7 +94,6 @@ Measured on one LG CX (webOS 5.3), same test pages, November 2026:
 
 JavaScript now runs close to LG's own browser. Page loads and scrolling are still slower: LG's browser is an older
 Chromium that scrolls on the graphics chip, and on the TV's processor WebKit's layout and style work is the main cost.
-That is what the next releases go after.
 
 ## How it was tested
 
@@ -210,7 +207,7 @@ Please report Robin's bugs here and not to Wren. Upstream has not seen this code
 Robin is a fork of **[Wren](https://github.com/sostk/webos-wpe-browser)** by **sostk**, taken at version 0.3.3.
 The browser itself, its remote-first interface, the split between the UI and the engine, the Buildroot-based WebKit
 build, the Widevine bridge and most of the media design are upstream's work. Robin keeps Wren's licence and its full
-commit history. Without Wren there would be no Robin.
+commit history.
 
 Robin is independent. Upstream has not reviewed, endorsed or tested it, and it is not a Wren release. For the
 original project, its releases and its list of supported TVs, go to
@@ -218,7 +215,7 @@ original project, its releases and its list of supported TVs, go to
 
 Some internal names still say Wren (the `wren://` page addresses, file names). They were kept so that nothing breaks.
 
-Robin also stands on:
+Robin also uses:
 
 | Project | Used for | Licence |
 |---|---|---|
