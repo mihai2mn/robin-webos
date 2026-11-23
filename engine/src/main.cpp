@@ -2558,6 +2558,11 @@ int main(int, char **)
     // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=0: WebKit's own.
     // WPE_BROWSER_DEBUG_MEM_LIMIT_MB=<n>: the process limit; the thresholds below are fractions of it (conservative / strict / kill).
     // The kill threshold (1.6 x the limit, WPE_BROWSER_DEBUG_MEM_KILL=0: off) ends a web process that goes on growing while the TV swaps.
+    // WPE_BROWSER_DEBUG_MEM_RELIEF_S: how often WebKit repeats its memory relief while a process stays above a threshold (patch 0028,
+    // MEMORY_RELIEF_REPEAT_S in the web and network processes; default 30 s, 0 = on every poll as in 1.0.0). The relief throws away
+    // JIT code, style data and decoded images; on every 2 s poll it slowed every page above ~180 MB.
+    if (const char *relief = getenv("WPE_BROWSER_DEBUG_MEM_RELIEF_S"))
+        g_setenv("MEMORY_RELIEF_REPEAT_S", relief, TRUE);
     {
         const long limit_mb = atol(env_or("WPE_BROWSER_DEBUG_MEM_LIMIT_MB", "520").c_str());
         if (limit_mb > 0) {

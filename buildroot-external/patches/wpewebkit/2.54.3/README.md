@@ -36,3 +36,7 @@ Rebased from the 2.50.5 set and regenerated exactly against 2.54.3 (no fuzz). Dr
   +90 MB at once before). A seek inside the buffer removes nothing.
 - 0027 kills the web process only when the footprint is above the kill threshold (after the release) in `MEMORY_KILL_CONSECUTIVE_POLLS` measurements in a row
   (default 3, 1 = old behaviour), or at once when it is 12.5% above (runaway). Spikes of 17-30 MB media appends fall back within ~10 s.
+- 0028 repeats WebKit's memory relief only when the pressure policy gets stricter or after `MEMORY_RELIEF_REPEAT_S` seconds
+  (default 30, 0 = every poll). Robin polls every 2 s with thresholds most pages exceed (182 / 286 MB), so the relief (JIT
+  code, style data, decoded images, a GC) ran every 2 s on ordinary pages. The kill check still runs on every poll.
+  The engine sets it from `WPE_BROWSER_DEBUG_MEM_RELIEF_S`.
