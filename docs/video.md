@@ -103,4 +103,4 @@ one for every kind of player.
 - Test pages need a server with HTTP range support.
 - The 64-bit engine has no hardware video ([engine64.md](engine64.md)).
 - Memory: the page cache is off by default and the web and network processes have pressure limits (520 MB by
-  default for each). The `appinfo.json` declares `requiredMemory` 1700.
+  default for each). The `appinfo.json` declares `requiredMemory` 1200 (1700 made webOS hold every launch for 7 s).

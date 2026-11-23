@@ -8,9 +8,12 @@ set(WPEB_APPID "io.github.mihai2mn.robin" CACHE STRING "webOS application id")
 # The version: one file for the whole repository (appinfo, the About screen, the logs header, tools/package-release.sh).
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" WPEB_VERSION LIMIT_COUNT 1)
 # The title in the launcher: a development copy gets its own, so the two can be told apart on the TV.
-# appinfo requiredMemory (MB): with 1700 webOS closes a suspended background app (YouTube) when Robin starts, which frees ~200 MB; 1200 did
-# not, 2200 did but slowed the launch by ~8 s (TV, 2026-11-20).
-set(WPEB_REQUIRED_MEMORY 1700 CACHE STRING "appinfo requiredMemory")
+# appinfo requiredMemory (MB): what memchute (the TV's memory manager) wants free before it starts Robin. When it cannot find that much,
+# even after closing suspended apps, it holds the launch behind the splash screen for its full timeout (memorymanager-conf.json
+# MaxTimeout, 7 s). 1700 closed a suspended app (YouTube, LG's browser) but always hit that timeout: launch to window 8.4 s, with or
+# without an app to close. 1200: 1.3-1.7 s, and a suspended app stays until memory actually runs low (memchute then closes background
+# apps itself). TV, 2026-11-23.
+set(WPEB_REQUIRED_MEMORY 1200 CACHE STRING "appinfo requiredMemory")
 set(WPEB_TITLE "Robin" CACHE STRING "launcher title")
 
 # The kit: -DWNK_KIT_DIR=..., else $WNK_KIT_DIR, else where it was when tools/new-app.py made this.
